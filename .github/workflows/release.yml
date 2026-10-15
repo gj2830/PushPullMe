@@ -1,0 +1,30 @@
+name: Release
+
+# a tag such as v0.1 makes a release with the app ready to run (Windows, no .NET needed)
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet test tests/PushPullMe.Tests -c Release
+      - run: dotnet publish src/PushPullMe -c Release -r win-x64 --self-contained true -o publish
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path publish\* -DestinationPath PushPullMe-${{ github.ref_name }}-win-x64.zip
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create ${{ github.ref_name }} PushPullMe-${{ github.ref_name }}-win-x64.zip --title "PushPullMe ${{ github.ref_name }}" --generate-notes
