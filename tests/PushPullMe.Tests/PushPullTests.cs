@@ -1402,7 +1402,7 @@ public class RsDocxReaderTests(ITestOutputHelper output)
     [InlineData("helix.rsdocx")]
     public void DesignSpark_files_open(string file)
     {
-        string path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata", file));
+        string path = TestFiles.Converter(file);
         try
         {
             var d = SketchDocument.FromRsDocx(path);
@@ -1717,7 +1717,7 @@ public class PaintTests
     public void The_colours_DesignSpark_gave_are_read()
     {
         // testdata/kubus_kleuren.rsdocx (made in DesignSpark, 12 October 2026): a red, a white and a blue cube, the smallest with a colour per face
-        string path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/kubus_kleuren.rsdocx"));
+        string path = TestFiles.Converter("kubus_kleuren.rsdocx");
         var d = SketchDocument.FromRsDocx(path);
         var perBody = Enumerable.Range(0, d.Bodies.Count).Select(b => Enumerable.Range(0, d.Bodies[b].Faces.Count).Select(f => d.ColorOf(new FaceRef(b, f))).ToList()).ToList();
         Assert.Contains(perBody, fs => fs.All(c => c == 0xFFFF0000));
@@ -1812,7 +1812,7 @@ public class GuideTests
 /// <summary>On real models from the converter (testdata of RsCOnverter).</summary>
 public class RealModelTests(ITestOutputHelper output)
 {
-    private static string TestData(string name) => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata", name));
+    private static string TestData(string name) => TestFiles.Converter(name);
 
     /// <summary>
     /// From the user's session log: a block pulled from a hook, its top pushed down, the strip above it pulled out far
@@ -2020,7 +2020,7 @@ public class DebugTests(ITestOutputHelper output)
     public void Debug_sleutelrek_roundings()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
-        var doc = SketchDocument.FromMesh(StlReader.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/sleutelrek.stl"))), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
+        var doc = SketchDocument.FromMesh(StlReader.Read(TestFiles.Converter("sleutelrek.stl")), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
         var b = doc.Bodies[0];
         for (int f = 0; f < b.Faces.Count; f++)
         {
@@ -2041,7 +2041,7 @@ public class DebugTests(ITestOutputHelper output)
     public void Debug_sleutelrek_drag_into_rounding()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
-        var doc = SketchDocument.FromMesh(StlReader.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/sleutelrek.stl"))), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
+        var doc = SketchDocument.FromMesh(StlReader.Read(TestFiles.Converter("sleutelrek.stl")), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
         var b = doc.Bodies[0];
         foreach (int face in new[] { 5, 32, 41, 43, 52 })
         {
@@ -2073,7 +2073,7 @@ public class DebugTests(ITestOutputHelper output)
     public void Debug_sleutelrek_pull_check_volume()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
-        var doc = SketchDocument.FromMesh(StlReader.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/sleutelrek.stl"))), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
+        var doc = SketchDocument.FromMesh(StlReader.Read(TestFiles.Converter("sleutelrek.stl")), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
         var b = doc.Bodies[0];
         double v0 = doc.Volume();
         for (int face = 0; face < b.Faces.Count; face++)
@@ -2106,7 +2106,7 @@ public class DebugTests(ITestOutputHelper output)
     public void Debug_sleutelrek_side_after_rounding()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
-        var doc0 = SketchDocument.FromMesh(StlReader.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/sleutelrek.stl"))), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
+        var doc0 = SketchDocument.FromMesh(StlReader.Read(TestFiles.Converter("sleutelrek.stl")), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
         // the first hook: its side faces (x) after its inner face (5, +y) went into the rounding
         foreach (var first in new double[] { 0, 2 })
         {
@@ -2136,7 +2136,7 @@ public class DebugTests(ITestOutputHelper output)
     public void Debug_sleutelrek_face5_neighbours()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
-        var doc = SketchDocument.FromMesh(StlReader.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/sleutelrek.stl"))), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
+        var doc = SketchDocument.FromMesh(StlReader.Read(TestFiles.Converter("sleutelrek.stl")), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
         var b = doc.Bodies[0];
         {
             var (d1, r1) = doc.PushPull(new FaceRef(0, 5), 3e-3);
@@ -2187,7 +2187,7 @@ public class DebugTests(ITestOutputHelper output)
     public void Debug_sleutelrek_crossing()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
-        var doc = SketchDocument.FromMesh(StlReader.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/sleutelrek.stl"))), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
+        var doc = SketchDocument.FromMesh(StlReader.Read(TestFiles.Converter("sleutelrek.stl")), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
         var all = Enumerable.Range(0, doc.Bodies[0].Faces.Count).Select(f => new FaceRef(0, f)).ToHashSet();
         output.WriteLine($"before: {Intersections.FirstCrossing(doc, all)}");
         {
@@ -2220,7 +2220,7 @@ public class DebugTests(ITestOutputHelper output)
     public void Debug_sleutelrek_second_pull()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
-        var doc = SketchDocument.FromMesh(StlReader.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/sleutelrek.stl"))), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
+        var doc = SketchDocument.FromMesh(StlReader.Read(TestFiles.Converter("sleutelrek.stl")), new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 });
         var b = doc.Bodies[0];
         // the planar faces of the third hook (x 21..25) next to a rounding
         var hook = Enumerable.Range(0, b.Faces.Count).Where(f => b.Faces[f].Surface is BrepPlane
@@ -2276,7 +2276,7 @@ public class DebugTests(ITestOutputHelper output)
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
         foreach (var file in new[] { "yubikey.rsdocx", "sleutelrek.rsdocx" })
         {
-            var pkg = RsDocx.Core.Package.RsDocxPackage.Open(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata", file)));
+            var pkg = RsDocx.Core.Package.RsDocxPackage.Open(TestFiles.Converter(file));
             var xt = XtReader.Read(pkg.GetPart(RsDocx.Core.RsDocxComposer.GeometryPart));
             var map = xt.ByIndex();
             var root = xt.Nodes[0];
@@ -2350,7 +2350,7 @@ public class DebugTests(ITestOutputHelper output)
     public void Debug_sleutelrek_183()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
-        var doc = SketchDocument.FromMesh(StlReader.Read(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata/sleutelrek.stl"))), new MeshOptions { MergeCoplanar = true });
+        var doc = SketchDocument.FromMesh(StlReader.Read(TestFiles.Converter("sleutelrek.stl")), new MeshOptions { MergeCoplanar = true });
         var b = doc.Bodies[0];
         var f = b.Faces[183];
         output.WriteLine($"face 183 normal {FaceGeometry.Normal(f)} loops {f.Loops.Count} sizes {string.Join(",", f.Loops.Select(l => l.Count))}");
@@ -2370,7 +2370,7 @@ public class DebugTests(ITestOutputHelper output)
 /// <summary>Loose lines (sketch curves) in DesignSpark files.</summary>
 public class SketchLineTests
 {
-    private static string TestData(string name) => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../../RsCOnverter/testdata", name));
+    private static string TestData(string name) => TestFiles.Converter(name);
 
     [Fact]
     public void Loose_lines_are_read_from_a_DesignSpark_file()

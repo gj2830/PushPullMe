@@ -6,7 +6,9 @@ obj/
 
 # generated files and test files (not public)
 output/
-test/
+test/*
+# (the user's DesignSpark file with three different roundings in one corner: a test uses it)
+!test/kubus_bewerkt_bewerkt.rsdocx
 
 # notes (kept privately)
 NOTES.md
