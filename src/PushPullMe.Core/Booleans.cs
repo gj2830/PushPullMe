@@ -49,7 +49,7 @@ public static class Booleans
                 if (where != Where.Outside) any = true;
                 if (where == Where.Outside) kept.Add((pb[j], loops, 1, pb[j].Face));
             }
-        if (!any) throw new PushPullException("Die delen raken elkaar niet; samenvoegen kan alleen als ze elkaar overlappen of met een vlak raken.");
+        if (!any) throw new PushPullException(Lang.T("Die delen raken elkaar niet; samenvoegen kan alleen als ze elkaar overlappen of met een vlak raken.", "Those parts do not touch; they can only be united when they overlap or touch with a face."));
         return Stitch(kept);
     }
 
@@ -60,7 +60,7 @@ public static class Booleans
         {
             var face = body.Faces[f];
             if (face.Surface is not BrepPlane pl || face.Loops.SelectMany(l => l).Any(c => body.Edges[c.Edge].Curve is not BrepLine))
-                throw new PushPullException("Samenvoegen kan (nog) alleen met delen die alleen platte vlakken en rechte randen hebben.");
+                throw new PushPullException(Lang.T("Samenvoegen kan (nog) alleen met delen die alleen platte vlakken en rechte randen hebben.", "Uniting only works (for now) with parts that have only flat faces and straight edges."));
             var n = FaceGeometry.Normal(face);
             var x = (Math.Abs(n.X) < 0.9 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0)); x = (x - n * x.Dot(n)).Normalized();
             var y = n.Cross(x);
@@ -379,13 +379,13 @@ public static class Booleans
             from.Add((pieces[pi].Body, pieces[pi].Face));
         }
         if (uses.Values.Any(u => u.Count != 2 || u[0] == u[1]))
-            throw new PushPullException("Zo samengevoegd klopt de vorm niet: raken de delen elkaar alleen in een rand of een punt?");
+            throw new PushPullException(Lang.T("Zo samengevoegd klopt de vorm niet: raken de delen elkaar alleen in een rand of een punt?", "United like this the shape is not right: do the parts touch only in an edge or a point?"));
         // one piece of solid (else: apart, or a hollow inside)
         var faceOfEdge = new Dictionary<int, List<int>>();
         for (int f = 0; f < faces.Count; f++) foreach (var c in faces[f].Loops.SelectMany(l => l)) { if (!faceOfEdge.TryGetValue(c.Edge, out var lst)) faceOfEdge[c.Edge] = lst = []; lst.Add(f); }
         var reached = new HashSet<int> { 0 }; var stack = new Stack<int>(); stack.Push(0);
         while (stack.Count > 0) { int f = stack.Pop(); foreach (var c in faces[f].Loops.SelectMany(l => l)) foreach (int g in faceOfEdge[c.Edge]) if (reached.Add(g)) stack.Push(g); }
-        if (reached.Count != faces.Count) throw new PushPullException("Samengevoegd zijn het nog steeds losse delen (of zit er een holte in); dat kan nog niet.");
+        if (reached.Count != faces.Count) throw new PushPullException(Lang.T("Samengevoegd zijn het nog steeds losse delen (of zit er een holte in); dat kan nog niet.", "United they are still separate parts (or there is a hollow inside); that is not possible yet."));
         return (new BrepBody { Vertices = verts, Edges = edges, Faces = faces }, from);
     }
 }

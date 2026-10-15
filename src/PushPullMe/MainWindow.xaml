@@ -78,6 +78,7 @@
                 <TextBlock x:Name="FileText" Text="" FontSize="14" Foreground="{StaticResource Muted}" VerticalAlignment="Bottom" Margin="14,0,0,4"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                <Button x:Name="LanguageButton" Content="🌐  NL" Style="{StaticResource PillButton}" Click="Language_Click" ToolTip="Taal / language: Nederlands · English"/>
                 <Button x:Name="UndoButton" Content="↩  ongedaan" Style="{StaticResource PillButton}" Click="Undo_Click" IsEnabled="False" ToolTip="Ctrl+Z"/>
                 <Button x:Name="RedoButton" Content="↪  opnieuw" Style="{StaticResource PillButton}" Click="Redo_Click" IsEnabled="False" ToolTip="Ctrl+Y"/>
                 <Button Content="📂  openen" Style="{StaticResource PillButton}" Click="Open_Click" ToolTip="STL, 3MF of .rsdocx (Ctrl+O)"/>

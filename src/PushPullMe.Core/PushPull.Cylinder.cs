@@ -55,7 +55,7 @@ public static partial class PushPull
         // a rounding between two flat faces (its straight edges shared with them): another radius, see Rounding
         if (groupEdges.Any(e => body.Edges[e].Curve is BrepLine && facesOf[e].Any(h => !group.Contains(h))))
             return Rounding(body, face, group, groupEdges, facesOf, distance);
-        if (nr < 1e-5) throw new PushPullException(F.Reversed ? "Zo wordt het gat zo klein dat het verdwijnt." : "Zo wordt de cilinder zo dun dat hij verdwijnt.");
+        if (nr < 1e-5) throw new PushPullException(F.Reversed ? Lang.T("Zo wordt het gat zo klein dat het verdwijnt.", "That way the hole gets so small that it disappears.") : Lang.T("Zo wordt de cilinder zo dun dat hij verdwijnt.", "That way the cylinder gets so thin that it disappears."));
         var moving = new HashSet<int>();
         var neighbours = new HashSet<int>();
         foreach (int e in groupEdges)
@@ -69,23 +69,23 @@ public static partial class PushPull
                     foreach (int h in others)
                     {
                         if (body.Faces[h].Surface is not BrepPlane pl || !AlongAxis(pl.Normal))
-                            throw new PushPullException("Aan de rand van deze cilinder zit een ronding of een schuine kant; dan kan de straal (nog) niet veranderen.");
+                            throw new PushPullException(Lang.T("Aan de rand van deze cilinder zit een ronding of een schuine kant; dan kan de straal (nog) niet veranderen.", "There is a rounding or a chamfer at the edge of this cylinder; then the radius cannot change (yet)."));
                         neighbours.Add(h);
                     }
                     break;
                 case BrepLine when others.Count == 0:
                     break; // a seam between parts of the cylinder
                 case BrepLine:
-                    throw new PushPullException("Deze cilinder loopt over in een plat vlak (een ronding tussen vlakken, of een afgevlakte kant); de straal daarvan kan (nog) niet veranderen.");
+                    throw new PushPullException(Lang.T("Deze cilinder loopt over in een plat vlak (een ronding tussen vlakken, of een afgevlakte kant); de straal daarvan kan (nog) niet veranderen.", "This cylinder runs into a flat face (a rounding between faces, or a flattened side); its radius cannot change (yet)."));
                 default:
-                    throw new PushPullException("Deze cilinder heeft een rand die geen cirkel is (bijvoorbeeld waar hij een ander vlak schuin snijdt); dat kan nog niet.");
+                    throw new PushPullException(Lang.T("Deze cilinder heeft een rand die geen cirkel is (bijvoorbeeld waar hij een ander vlak schuin snijdt); dat kan nog niet.", "This cylinder has an edge that is not a circle (for example where it cuts another face at a slant); that is not possible yet."));
             }
             if (E.Start >= 0) { moving.Add(E.Start); moving.Add(E.End); }
         }
         // (a corner on the circle where another edge comes out: that edge would have to change too)
         for (int e = 0; e < edges.Count; e++)
             if (!groupEdges.Contains(e) && (moving.Contains(edges[e].Start) || moving.Contains(edges[e].End)))
-                throw new PushPullException("Op de rand van deze cilinder komt een andere rand uit; dan kan de straal (nog) niet veranderen.");
+                throw new PushPullException(Lang.T("Op de rand van deze cilinder komt een andere rand uit; dan kan de straal (nog) niet veranderen.", "Another edge ends on the edge of this cylinder; then the radius cannot change (yet)."));
         foreach (int v in moving)
         {
             var p = verts[v];
@@ -115,10 +115,10 @@ public static partial class PushPull
                 for (int i = 0, j = outer.Count - 1; i < outer.Count; j = i++)
                     if ((outer[i].Y > qy) != (outer[j].Y > qy) && qx < (outer[j].X - outer[i].X) * (qy - outer[i].Y) / (outer[j].Y - outer[i].Y) + outer[i].X)
                         inside = !inside;
-                if (!inside) throw new PushPullException("Zo komt een gat buiten het vlak te liggen; dat kan niet.");
+                if (!inside) throw new PushPullException(Lang.T("Zo komt een gat buiten het vlak te liggen; dat kan niet.", "That way a hole would lie outside the face; that is not possible."));
             }
         }
-        if (SignedVolume(result) is double vol && vol <= 0) throw new PushPullException("Zo klopt de vorm niet meer (binnenstebuiten).");
+        if (SignedVolume(result) is double vol && vol <= 0) throw new PushPullException(Lang.T("Zo klopt de vorm niet meer (binnenstebuiten).", "That way the shape is no longer right (inside out)."));
 
         var curved = new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>();
         foreach (int g in group)

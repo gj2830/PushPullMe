@@ -68,7 +68,7 @@ public static partial class PushPull
                 var ed = body.Edges[c.Edge];
                 if (ed.Start < 0) movedRing.Add(c.Edge); else { movedV.Add(ed.Start); movedV.Add(ed.End); }
             }
-        if (movedV.Count == 0 && movedRing.Count == 0) throw new PushPullException("Er is niets gekozen om te verplaatsen.");
+        if (movedV.Count == 0 && movedRing.Count == 0) throw new PushPullException(Lang.T("Er is niets gekozen om te verplaatsen.", "Nothing is selected to move."));
         foreach (int v in movedV) verts[v] = motion.Point(verts[v]);
 
         // edges: a curve goes along when all of it does; one end of a curve alone cannot
@@ -79,7 +79,7 @@ public static partial class PushPull
             bool all = ed.Start < 0 ? movedRing.Contains(e) : movedV.Contains(ed.Start) && movedV.Contains(ed.End);
             bool some = ed.Start >= 0 && (movedV.Contains(ed.Start) || movedV.Contains(ed.End));
             if (all) edges[e] = ed with { Curve = motion.Turn is { } tc ? BrepTransform.TurnCurve(ed.Curve, tc) : Shifted(ed.Curve, offset) };
-            else if (some) throw new PushPullException("Een ronde rand kan niet meebuigen; verplaats hem helemaal (het hele vlak of beide eindpunten).");
+            else if (some) throw new PushPullException(Lang.T("Een ronde rand kan niet meebuigen; verplaats hem helemaal (het hele vlak of beide eindpunten).", "A round edge cannot bend along; move it wholly (the whole face or both endpoints)."));
         }
 
         // faces: all along → moved as they are; partly → a planar one gets its new plane (or is folded), a curved one cannot
@@ -97,7 +97,7 @@ public static partial class PushPull
             if (movedCount == vs.Count + rings.Count) { w.Surface = motion.Turn is { } ts ? BrepTransform.TurnSurface(w.Surface, ts) : ShiftedSurface(w.Surface, offset); continue; }
             // (a cylinder moved partly along its axis just gets longer or shorter: it stays as it is)
             if (motion.Turn == null && w.Surface is BrepCylinder cy && Math.Abs(cy.Axis.Normalized().Dot(offset.Normalized())) > 1 - AngleTol * AngleTol) continue;
-            if (w.Surface is not BrepPlane) throw new PushPullException("Een rond vlak kan niet meebuigen; zo kan het (nog) niet.");
+            if (w.Surface is not BrepPlane) throw new PushPullException(Lang.T("Een rond vlak kan niet meebuigen; zo kan het (nog) niet.", "A round face cannot bend along; that is not possible (yet)."));
             if (Replane(verts, edges, w, oldNormal[f]) is not { } fold) continue;
             // not flat any more: a four-sided face folded along a diagonal, as SketchUp does
             faces.Add(fold);
@@ -121,7 +121,7 @@ public static partial class PushPull
         Canonicalize(edges, faces);
         foreach (var e in edges)
             if (e is { Curve: BrepLine } && e.Start >= 0 && e.Start != e.End && (verts[e.Start] - verts[e.End]).Length < 1e-9)
-                throw new PushPullException("Twee hoekpunten komen op elkaar terecht; dat kan nog niet.");
+                throw new PushPullException(Lang.T("Twee hoekpunten komen op elkaar terecht; dat kan nog niet.", "Two vertices end up on each other; that is not possible yet."));
         RemoveSlivers(faces, edges);
         var mergedInto = new Dictionary<int, int>();
         Work Before(int f) => new(body.Faces[f].Surface, body.Faces[f].Reversed, body.Faces[f].Loops.Select(l => l.ToList()).ToList());
@@ -165,7 +165,7 @@ public static partial class PushPull
         var changedNew = changed.Select(Final).Where(f => f >= 0).Distinct().Order().ToList();
         Check(result, changedNew);
         if (SignedVolume(result) is double vol && vol <= 0)
-            throw new PushPullException("Zo keert de vorm binnenstebuiten; dat kan niet.");
+            throw new PushPullException(Lang.T("Zo keert de vorm binnenstebuiten; dat kan niet.", "That way the shape turns inside out; that is not possible."));
         return new(result, Enumerable.Range(0, oldFaces).Select(Final).ToList(), changedNew);
     }
 
@@ -177,7 +177,7 @@ public static partial class PushPull
         BrepCone k => k with { Origin = k.Origin + off },
         BrepSphere sp => sp with { Centre = sp.Centre + off },
         BrepTorus t => t with { Centre = t.Centre + off },
-        _ => throw new PushPullException("Dit soort vlak kan nog niet verplaatst worden."),
+        _ => throw new PushPullException(Lang.T("Dit soort vlak kan nog niet verplaatst worden.", "This kind of face cannot be moved yet.")),
     };
 
     /// <summary>
@@ -200,7 +200,7 @@ public static partial class PushPull
         double size = outer.Max(p => (p - c).Length);
         if (off <= Math.Max(DistanceTol / 2, size * 1e-9))
         {
-            if (n.Dot(oldNormal) <= 0) throw new PushPullException("Een vlak keert zo om; dat kan niet.");
+            if (n.Dot(oldNormal) <= 0) throw new PushPullException(Lang.T("Een vlak keert zo om; dat kan niet.", "A face turns over that way; that is not possible."));
             var x = (w.Surface as BrepPlane)!.XAxis; x = (x - n * x.Dot(n));
             w.Surface = new BrepPlane(c, n, x.Length > 1e-9 ? x.Normalized() : (Math.Abs(n.X) < 0.9 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0)).Cross(n).Normalized());
             w.Reversed = false;
@@ -208,7 +208,7 @@ public static partial class PushPull
         }
         // folding: one loop, four straight edges
         if (w.Loops.Count != 1 || w.Loops[0].Count != 4 || w.Loops[0].Any(co => edges[co.Edge] is not { Curve: BrepLine }))
-            throw new PushPullException("Een vlak zou zo krom worden; dat kan (nog) niet. (Een vierhoek wordt gevouwen, andere vlakken nog niet.)");
+            throw new PushPullException(Lang.T("Een vlak zou zo krom worden; dat kan (nog) niet. (Een vierhoek wordt gevouwen, andere vlakken nog niet.)", "A face would become curved that way; that is not possible (yet). (A quadrilateral is folded, other faces not yet.)"));
         var loop = w.Loops[0];
         int From(BrepCoedge co) => co.Forward ? edges[co.Edge]!.Start : edges[co.Edge]!.End;
         var p = loop.Select(From).ToList();
@@ -226,7 +226,7 @@ public static partial class PushPull
             w.Surface = new BrepPlane(verts[a], n1.Normalized(), (verts[b] - verts[a]).Normalized()); w.Reversed = false;
             return new Work(new BrepPlane(verts[d], n2.Normalized(), (verts[e] - verts[d]).Normalized()), false, [second]);
         }
-        throw new PushPullException("Een vlak zou zo omklappen; dat kan niet.");
+        throw new PushPullException(Lang.T("Een vlak zou zo omklappen; dat kan niet.", "A face would flip over that way; that is not possible."));
     }
 
     private static Vec3 Newell(List<Vec3> l)

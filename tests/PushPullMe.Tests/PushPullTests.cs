@@ -1336,13 +1336,13 @@ public class DrawingTests(ITestOutputHelper output)
         var top = Top(doc);
         var b = doc.Bodies[0];
         var (p, kind) = Drawing.NearestOnEdge(b, top.Face, new Vec3(5.2 * Mm, 0.3 * Mm, 10 * Mm), 0.5 * Mm)!.Value;
-        Assert.Equal("midden", kind);
+        Assert.Equal(Snap.Midpoint, kind);
         Assert.Equal(5 * Mm, p.X, 12);
         (p, kind) = Drawing.NearestOnEdge(b, top.Face, new Vec3(3 * Mm, 0.3 * Mm, 10 * Mm), 0.5 * Mm)!.Value;
-        Assert.Equal("op de rand", kind);
+        Assert.Equal(Snap.OnEdge, kind);
         Assert.Equal(0, p.Y, 12);
         (_, kind) = Drawing.NearestOnEdge(b, top.Face, new Vec3(9.8 * Mm, 9.9 * Mm, 10 * Mm), 0.5 * Mm)!.Value;
-        Assert.Equal("eindpunt", kind);
+        Assert.Equal(Snap.Endpoint, kind);
     }
 }
 

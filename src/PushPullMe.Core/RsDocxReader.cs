@@ -28,11 +28,11 @@ public static class RsDocxReader
         hidden = 0;
         RsDocxPackage pkg;
         try { pkg = RsDocxPackage.Open(path); }
-        catch (Exception e) when (e is InvalidDataException or IOException) { throw new RsDocxReadException("Dit is geen leesbaar .rsdocx-bestand: " + e.Message); }
-        if (!pkg.Contains(RsDocxComposer.GeometryPart)) throw new RsDocxReadException("Er staat geen geometrie in dit bestand.");
+        catch (Exception e) when (e is InvalidDataException or IOException) { throw new RsDocxReadException(Lang.T("Dit is geen leesbaar .rsdocx-bestand: ", "This is not a readable .rsdocx file: ") + e.Message); }
+        if (!pkg.Contains(RsDocxComposer.GeometryPart)) throw new RsDocxReadException(Lang.T("Er staat geen geometrie in dit bestand.", "There is no geometry in this file."));
         XtFile xt;
         try { xt = XtReader.Read(pkg.GetPart(RsDocxComposer.GeometryPart)); }
-        catch (XtFormatException e) { throw new RsDocxReadException("De geometrie in dit bestand is niet te lezen: " + e.Message); }
+        catch (XtFormatException e) { throw new RsDocxReadException(Lang.T("De geometrie in dit bestand is niet te lezen: ", "The geometry in this file cannot be read: ") + e.Message); }
         var hide = new HashSet<string>();
         if (pkg.Contains("SpaceClaim/document.xml"))
             try { hide = HiddenIds(pkg.GetXml("SpaceClaim/document.xml")); } catch (System.Xml.XmlException) { }
@@ -92,7 +92,7 @@ public static class RsDocxReader
         {
             XtNodeTypes.Body => [root.Index],
             XtNodeTypes.PartXmtBlock or XtNodeTypes.PointerLisBlock => root.Array("entries").Cast<int>().Take(root.Int("n_entries")),
-            _ => throw new RsDocxReadException($"Onbekende opbouw van de geometrie (knoop {root.NodeType})."),
+            _ => throw new RsDocxReadException(Lang.T($"Onbekende opbouw van de geometrie (knoop {root.NodeType}).", $"Unknown structure of the geometry (node {root.NodeType}).")),
         };
         var result = new List<BrepBody>();
         foreach (int bi in bodyIdx)
@@ -102,7 +102,7 @@ public static class RsDocxReader
                 names.Add(XtTopology.NameOf(map, b));
                 nodes.Add(b);
             }
-        if (result.Count == 0) throw new RsDocxReadException("Er staan geen vaste lichamen in dit bestand.");
+        if (result.Count == 0) throw new RsDocxReadException(Lang.T("Er staan geen vaste lichamen in dit bestand.", "There are no solid bodies in this file."));
         return result;
     }
 
@@ -127,7 +127,7 @@ public static class RsDocxReader
             int end = Vx(fin.Ptr("vertex")), start = other != 0 ? Vx(map[other].Ptr("vertex")) : end;
             int ci = e.Ptr("curve");
             if (ci == 0 && fin.Has("curve")) ci = fin.Ptr("curve");
-            if (ci == 0 || !map.TryGetValue(ci, out var cn)) throw new RsDocxReadException("Een rand zonder kromme; dat kan PushPullMe nog niet lezen.");
+            if (ci == 0 || !map.TryGetValue(ci, out var cn)) throw new RsDocxReadException(Lang.T("Een rand zonder kromme; dat kan PushPullMe nog niet lezen.", "An edge without a curve; PushPullMe cannot read that yet."));
             eIndex[e.Index] = edges.Count;
             edges.Add(new BrepEdge(start, end, Curve(map, cn, start >= 0 ? verts[start] : default, end >= 0 ? verts[end] : default)));
         }
@@ -142,7 +142,7 @@ public static class RsDocxReader
                 foreach (var f in fs)
                     if (seen.Add(f.Index)) faces.Add(Face(map, f, eIndex));
             }
-        if (faces.Count == 0) throw new RsDocxReadException("Een lichaam zonder vlakken; dat kan PushPullMe niet openen.");
+        if (faces.Count == 0) throw new RsDocxReadException(Lang.T("Een lichaam zonder vlakken; dat kan PushPullMe niet openen.", "A body without faces; PushPullMe cannot open that."));
         return new BrepBody { Vertices = verts, Edges = edges, Faces = faces };
     }
 
@@ -179,7 +179,7 @@ public static class RsDocxReader
                 Math.Atan2(s.Double("sin_half_angle"), s.Double("cos_half_angle"))),
             XtNodeTypes.Sphere => new BrepSphere(V(s.Vec("centre")), s.Double("radius"), V(s.Vec("axis")), V(s.Vec("x_axis"))),
             XtNodeTypes.Torus => new BrepTorus(V(s.Vec("centre")), V(s.Vec("axis")), V(s.Vec("x_axis")), s.Double("major_radius"), s.Double("minor_radius")),
-            _ => throw new RsDocxReadException("Dit bestand heeft vrije-vormvlakken; die kan PushPullMe nog niet openen."),
+            _ => throw new RsDocxReadException(Lang.T("Dit bestand heeft vrije-vormvlakken; die kan PushPullMe nog niet openen.", "This file has free-form faces; PushPullMe cannot open those yet.")),
         };
         return (surface, flipped);
     }
@@ -203,7 +203,7 @@ public static class RsDocxReader
             }
             case XtNodeTypes.BCurve:
             {
-                if (flipped) throw new RsDocxReadException("Een omgekeerde B-kromme; dat kan PushPullMe nog niet lezen.");
+                if (flipped) throw new RsDocxReadException(Lang.T("Een omgekeerde B-kromme; dat kan PushPullMe nog niet lezen.", "A reversed B-curve; PushPullMe cannot read that yet."));
                 var nurbs = map[c.Ptr("nurbs")];
                 int degree = Convert.ToInt32(nurbs["degree"]), count = nurbs.Int("n_vertices"), dim = Convert.ToInt32(nurbs["vertex_dim"]);
                 var raw = map[nurbs.Ptr("bspline_vertices")].Array("vertices").Select(Convert.ToDouble).ToArray();
@@ -223,7 +223,7 @@ public static class RsDocxReader
             case 38:
                 return Intersection(map, c, start, end);
             default:
-                throw new RsDocxReadException($"Een rand met een kromme die PushPullMe nog niet kan lezen (knoop {c.NodeType}).");
+                throw new RsDocxReadException(Lang.T($"Een rand met een kromme die PushPullMe nog niet kan lezen (knoop {c.NodeType}).", $"An edge with a curve that PushPullMe cannot read yet (node {c.NodeType})."));
         }
     }
 
@@ -235,7 +235,7 @@ public static class RsDocxReader
     private static BrepCurve Intersection(Dictionary<int, XtNode> map, XtNode c, Vec3 start, Vec3 end)
     {
         var surfs = c.Array("surface").Select(x => Convert.ToInt32(x)).Where(map.ContainsKey).Select(i => Surface(map[i]).Item1).ToList();
-        if (surfs.Count != 2) throw new RsDocxReadException("Een snijkromme zonder twee vlakken; die kan PushPullMe nog niet lezen.");
+        if (surfs.Count != 2) throw new RsDocxReadException(Lang.T("Een snijkromme zonder twee vlakken; die kan PushPullMe nog niet lezen.", "An intersection curve without two faces; PushPullMe cannot read that yet."));
         // two cylinders (roundings that cut each other): exactly, round the thinner one
         if (surfs[0] is BrepCylinder ca && surfs[1] is BrepCylinder cb)
             try
@@ -317,7 +317,7 @@ public static class RsDocxReader
                 var ring = t.Centre + radial.Normalized() * t.MajorRadius;
                 return (p - ring).Length - t.MinorRadius;
             }
-            default: throw new RsDocxReadException("Een snijkromme op een vlak dat PushPullMe nog niet kent.");
+            default: throw new RsDocxReadException(Lang.T("Een snijkromme op een vlak dat PushPullMe nog niet kent.", "An intersection curve on a face that PushPullMe does not know yet."));
         }
     }
 

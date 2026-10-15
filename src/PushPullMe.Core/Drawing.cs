@@ -10,6 +10,19 @@ namespace PushPullMe.Core;
 /// </summary>
 public static class Drawing
 {
+    /// <summary>What is being drawn (named in the messages).</summary>
+    public enum Shape { Shape, Rectangle, Arc, Pie, NewEdge }
+
+    /// <summary>Its name in the language chosen.</summary>
+    private static string Name(Shape what) => what switch
+    {
+        Shape.Rectangle => Lang.T("rechthoek", "rectangle"),
+        Shape.Arc => Lang.T("boog", "arc"),
+        Shape.Pie => Lang.T("taartpunt", "pie"),
+        Shape.NewEdge => Lang.T("nieuwe rand", "new edge"),
+        _ => Lang.T("vorm", "shape"),
+    };
+
     /// <summary>Distance (metres) within which a point counts as on an edge or a vertex.</summary>
     public const double SnapTol = 1e-6;
 
@@ -25,8 +38,8 @@ public static class Drawing
         var v = n.Cross(u);
         var d = c - a;
         double du = d.Dot(u), dv = d.Dot(v);
-        if (Math.Abs(du) < SnapTol || Math.Abs(dv) < SnapTol) throw new PushPullException("Een rechthoek moet een breedte en een hoogte hebben.");
-        return Polygon(body, face, [a, a + u * du, a + u * du + v * dv, a + v * dv], "rechthoek");
+        if (Math.Abs(du) < SnapTol || Math.Abs(dv) < SnapTol) throw new PushPullException(Lang.T("Een rechthoek moet een breedte en een hoogte hebben.", "A rectangle must have a width and a height."));
+        return Polygon(body, face, [a, a + u * du, a + u * du + v * dv, a + v * dv], Shape.Rectangle);
     }
 
     /// <summary>
@@ -34,12 +47,12 @@ public static class Drawing
     /// a face of its own; the face around it gets a hole for it. It must lie inside the face, clear of its edges, and not
     /// cross itself. Returns the new body and the index of the new face.
     /// </summary>
-    public static (BrepBody Body, int Face) Polygon(BrepBody body, int face, IReadOnlyList<Vec3> corners, string what = "vorm")
+    public static (BrepBody Body, int Face) Polygon(BrepBody body, int face, IReadOnlyList<Vec3> corners, Shape what = Shape.Shape)
     {
         var F = Planar(body, face, out var n);
         var pts = corners.ToList();
-        if (pts.Count < 3) throw new PushPullException("Een vlak heeft minstens drie hoeken.");
-        if (Math.Abs(FaceGeometry.Area(pts, n)) < SnapTol * SnapTol) throw new PushPullException($"Een {what} moet een oppervlakte hebben.");
+        if (pts.Count < 3) throw new PushPullException(Lang.T("Een vlak heeft minstens drie hoeken.", "A face has at least three corners."));
+        if (Math.Abs(FaceGeometry.Area(pts, n)) < SnapTol * SnapTol) throw new PushPullException(Lang.T($"Een {Name(what)} moet een oppervlakte hebben.", $"A {Name(what)} must have an area."));
         // counter-clockwise around the face's normal
         if (FaceGeometry.Area(pts, n) < 0) pts.Reverse();
         int k = pts.Count;
@@ -48,16 +61,16 @@ public static class Drawing
         var loops = F.Loops.Select(l => FaceGeometry.LoopPoints(body, l).Select(q => (q.Dot(x), q.Dot(y))).ToList()).ToList();
         var poly = pts.Select(q => (q.Dot(x), q.Dot(y))).ToList();
         foreach (var q in poly)
-            if (!Inside(loops, q)) throw new PushPullException($"De {what} moet helemaal binnen het vlak liggen.");
+            if (!Inside(loops, q)) throw new PushPullException(Lang.T($"De {Name(what)} moet helemaal binnen het vlak liggen.", $"The {Name(what)} must lie wholly inside the face."));
         foreach (var l in loops)
             for (int i = 0; i < l.Count; i++)
                 for (int j = 0; j < k; j++)
                     if (SegmentDistance(l[i], l[(i + 1) % l.Count], poly[j], poly[(j + 1) % k]) < SnapTol)
-                        throw new PushPullException($"De {what} raakt een rand van het vlak; teken hem iets kleiner (dat kan nog niet).");
+                        throw new PushPullException(Lang.T($"De {Name(what)} raakt een rand van het vlak; teken hem iets kleiner (dat kan nog niet).", $"The {Name(what)} touches an edge of the face; draw it a little smaller (that is not possible yet)."));
         for (int i = 0; i < k; i++)
             for (int j = i + 2; j < k; j++)
                 if (!(i == 0 && j == k - 1) && SegmentDistance(poly[i], poly[(i + 1) % k], poly[j], poly[(j + 1) % k]) < SnapTol)
-                    throw new PushPullException($"De {what} kruist zichzelf.");
+                    throw new PushPullException(Lang.T($"De {Name(what)} kruist zichzelf.", $"The {Name(what)} crosses itself."));
         // a hole of the face inside the polygon goes to the new face (they do not touch: checked above)
         var inside = Enumerable.Range(1, loops.Count - 1).Where(i => Inside([poly], loops[i][0])).ToHashSet();
 
@@ -81,7 +94,7 @@ public static class Drawing
     public static (BrepBody Body, int Face) Circle(BrepBody body, int face, Vec3 centre, double radius)
     {
         var F = Planar(body, face, out var n);
-        if (radius < SnapTol) throw new PushPullException("Een cirkel moet een straal hebben.");
+        if (radius < SnapTol) throw new PushPullException(Lang.T("Een cirkel moet een straal hebben.", "A circle must have a radius."));
         var plane = (BrepPlane)F.Surface;
         centre -= n * (centre - plane.Origin).Dot(n);
         var x = plane.XAxis - n * plane.XAxis.Dot(n);
@@ -91,14 +104,14 @@ public static class Drawing
         var loops = F.Loops.Select(l => FaceGeometry.LoopPoints(body, l).Select(p => (p.Dot(ax), p.Dot(ay))).ToList()).ToList();
         var ring = FaceGeometry.EdgePoints(body, new BrepEdge(-1, -1, circle)).Select(p => (p.Dot(ax), p.Dot(ay))).ToList();
         foreach (var p in ring)
-            if (!Inside(loops, p)) throw new PushPullException("De cirkel moet helemaal binnen het vlak liggen.");
+            if (!Inside(loops, p)) throw new PushPullException(Lang.T("De cirkel moet helemaal binnen het vlak liggen.", "The circle must lie wholly inside the face."));
         // clear of every edge of the face (the points of the ring are at most a sagitta inside the true circle)
         var c2 = (centre.Dot(ax), centre.Dot(ay));
         // a hole of the face inside the circle goes to the new face; it must stay clear of the circle
         var within = Enumerable.Range(1, loops.Count - 1).Where(i => Inside([ring], loops[i][0])).ToHashSet();
         foreach (int i in within)
             if (loops[i].Any(q => Math.Sqrt((q.Item1 - c2.Item1) * (q.Item1 - c2.Item1) + (q.Item2 - c2.Item2) * (q.Item2 - c2.Item2)) > radius - SnapTol))
-                throw new PushPullException("De cirkel raakt een rand van het vlak; teken hem iets kleiner (dat kan nog niet).");
+                throw new PushPullException(Lang.T("De cirkel raakt een rand van het vlak; teken hem iets kleiner (dat kan nog niet).", "The circle touches an edge of the face; draw it a little smaller (that is not possible yet)."));
         foreach (var l in loops.Where((_, i) => !within.Contains(i)))
             for (int i = 0; i < l.Count; i++)
             {
@@ -107,7 +120,7 @@ public static class Drawing
                 double t = len2 == 0 ? 0 : Math.Clamp(((c2.Item1 - s0.Item1) * dx + (c2.Item2 - s0.Item2) * dy) / len2, 0, 1);
                 double ex = s0.Item1 + dx * t - c2.Item1, ey = s0.Item2 + dy * t - c2.Item2;
                 if (Math.Sqrt(ex * ex + ey * ey) < radius + SnapTol)
-                    throw new PushPullException("De cirkel raakt een rand van het vlak; teken hem iets kleiner (dat kan nog niet).");
+                    throw new PushPullException(Lang.T("De cirkel raakt een rand van het vlak; teken hem iets kleiner (dat kan nog niet).", "The circle touches an edge of the face; draw it a little smaller (that is not possible yet)."));
             }
         var edges = body.Edges.ToList();
         int e = edges.Count; edges.Add(new BrepEdge(-1, -1, circle));
@@ -125,15 +138,15 @@ public static class Drawing
     public static (List<Vec3>? Corners, BrepCircle? Circle) OffsetOutline(BrepBody body, int face, double distance)
     {
         var F = Planar(body, face, out var n);
-        if (distance < SnapTol) throw new PushPullException("Offset gaat naar binnen: de afstand moet groter dan 0 zijn.");
+        if (distance < SnapTol) throw new PushPullException(Lang.T("Offset gaat naar binnen: de afstand moet groter dan 0 zijn.", "Offset goes inwards: the distance must be more than 0."));
         var outer = F.Loops[0];
         if (outer.Count == 1 && body.Edges[outer[0].Edge].Curve is BrepCircle c)
         {
-            if (c.Radius - distance < SnapTol) throw new PushPullException("Zo ver naar binnen past niet: de cirkel verdwijnt.");
+            if (c.Radius - distance < SnapTol) throw new PushPullException(Lang.T("Zo ver naar binnen past niet: de cirkel verdwijnt.", "That far inwards does not fit: the circle disappears."));
             return (null, c with { Radius = c.Radius - distance });
         }
         if (outer.Any(co => body.Edges[co.Edge].Curve is not BrepLine))
-            throw new PushPullException("Offset van een vlak met bogen kan nog niet (alleen rechte randen, of één cirkel).");
+            throw new PushPullException(Lang.T("Offset van een vlak met bogen kan nog niet (alleen rechte randen, of één cirkel).", "Offset of a face with arcs is not possible yet (only straight edges, or one circle)."));
         // the corners (not the points where an edge was only divided)
         var all = FaceGeometry.LoopPoints(body, outer);
         var poly = new List<Vec3>();
@@ -144,7 +157,7 @@ public static class Drawing
             poly.Add(b);
         }
         int k = poly.Count;
-        if (k < 3) throw new PushPullException("Dit vlak heeft geen hoeken om naar binnen te schuiven.");
+        if (k < 3) throw new PushPullException(Lang.T("Dit vlak heeft geen hoeken om naar binnen te schuiven.", "This face has no corners to move inwards."));
         var result = new List<Vec3>();
         for (int i = 0; i < k; i++)
         {
@@ -157,7 +170,7 @@ public static class Drawing
         }
         for (int i = 0; i < k; i++)
             if ((result[(i + 1) % k] - result[i]).Dot(poly[(i + 1) % k] - poly[i]) <= SnapTol * SnapTol)
-                throw new PushPullException("Zo ver naar binnen past de vorm niet meer: hij klapt om.");
+                throw new PushPullException(Lang.T("Zo ver naar binnen past de vorm niet meer: hij klapt om.", "That far inwards the shape no longer fits: it folds over."));
         return (result, null);
     }
 
@@ -169,7 +182,7 @@ public static class Drawing
     public static (BrepBody Body, int Face) Offset(BrepBody body, int face, double distance)
     {
         var (corners, circle) = OffsetOutline(body, face, distance);
-        return circle is { } c ? Circle(body, face, c.Centre, c.Radius) : Polygon(body, face, corners!, "nieuwe rand");
+        return circle is { } c ? Circle(body, face, c.Centre, c.Radius) : Polygon(body, face, corners!, Shape.NewEdge);
     }
 
     /// <summary>
@@ -190,14 +203,14 @@ public static class Drawing
     public static (BrepBody Body, int Face) Path(BrepBody body, int face, IReadOnlyList<Vec3> pts, IReadOnlyList<BrepCurve>? curves = null)
     {
         var F = Planar(body, face, out var n);
-        if (pts.Count < 2) throw new PushPullException("Een lijn moet een lengte hebben.");
+        if (pts.Count < 2) throw new PushPullException(Lang.T("Een lijn moet een lengte hebben.", "A line must have a length."));
         for (int i = 0; i + 1 < pts.Count; i++)
-            if ((pts[i + 1] - pts[i]).Length < SnapTol) throw new PushPullException("Een lijn moet een lengte hebben.");
+            if ((pts[i + 1] - pts[i]).Length < SnapTol) throw new PushPullException(Lang.T("Een lijn moet een lengte hebben.", "A line must have a length."));
         var cv = curves?.ToList() ?? Enumerable.Range(0, pts.Count - 1).Select(_ => (BrepCurve)new BrepLine()).ToList();
         if (cv.Count != pts.Count - 1) throw new ArgumentException("One curve per piece required");
         bool straight = cv.All(c => c is BrepLine);
         if (pts.Count >= (straight ? 4 : 3) && (pts[^1] - pts[0]).Length < SnapTol)
-            return straight ? Polygon(body, face, pts.Take(pts.Count - 1).ToList()) : ClosedInside(body, face, pts.Take(pts.Count - 1).ToList(), cv, "vorm");
+            return straight ? Polygon(body, face, pts.Take(pts.Count - 1).ToList()) : ClosedInside(body, face, pts.Take(pts.Count - 1).ToList(), cv, Shape.Shape);
         // pieces along the outer edge at the start or the end (as SketchUp: they fall on the edge that is there): the
         // path starts where it leaves the edge, and ends where it reaches it
         bool OnOuter(Vec3 q) => NearestOnEdge(body, face, q, 0) is { } ne && (ne.Point - q).Length < SnapTol;
@@ -209,13 +222,13 @@ public static class Drawing
         var verts = body.Vertices.ToList(); var edges = body.Edges.ToList();
         var faces = body.Faces.Select(f => f.Loops.Select(l => l.ToList()).ToList()).ToList();
         int vp = OnOuterEdge(verts, edges, faces, face, pts[0]), vq = OnOuterEdge(verts, edges, faces, face, pts[^1]);
-        if (vp == vq) throw new PushPullException("Begin en eind van de lijn liggen op hetzelfde punt; zo deelt hij het vlak niet.");
+        if (vp == vq) throw new PushPullException(Lang.T("Begin en eind van de lijn liggen op hetzelfde punt; zo deelt hij het vlak niet.", "Start and end of the line are the same point; that way it does not divide the face."));
         var outer = faces[face][0];
         int From(BrepCoedge c) => c.Forward ? edges[c.Edge].Start : edges[c.Edge].End;
         int ip = outer.FindIndex(c => From(c) == vp), iq = outer.FindIndex(c => From(c) == vq);
-        if (ip < 0 || iq < 0) throw new PushPullException("Begin en eind van de lijn moeten op de buitenrand van het vlak liggen.");
+        if (ip < 0 || iq < 0) throw new PushPullException(Lang.T("Begin en eind van de lijn moeten op de buitenrand van het vlak liggen.", "Start and end of the line must lie on the outer edge of the face."));
         if (pts.Count == 2 && cv[0] is BrepLine && outer.Any(c => edges[c.Edge] is { Curve: BrepLine } e && ((e.Start == vp && e.End == vq) || (e.Start == vq && e.End == vp))))
-            throw new PushPullException("Die lijn ligt op een rand van het vlak.");
+            throw new PushPullException(Lang.T("Die lijn ligt op een rand van het vlak.", "That line lies on an edge of the face."));
         // points between on the edge of a hole: the path touches it there (they share that vertex)
         var touch = new Dictionary<int, int>();
         for (int i = 1; i + 1 < pts.Count; i++)
@@ -240,11 +253,11 @@ public static class Drawing
         var touched2 = touch.Keys.Select(i => P2(pts[i])).ToList();
         bool Touched((double, double) q) => touched2.Any(t => Near(t, q));
         for (int i = 1; i + 1 < path2.Count; i++)
-            if (!Touched(path2[i]) && !Inside(loops2, path2[i])) throw new PushPullException("De lijn loopt buiten het vlak.");
+            if (!Touched(path2[i]) && !Inside(loops2, path2[i])) throw new PushPullException(Lang.T("De lijn loopt buiten het vlak.", "The line runs outside the face."));
         for (int i = 0; i + 1 < path2.Count; i++)
         {
             var (a2, b2) = (path2[i], path2[i + 1]);
-            if (!Inside(loops2, ((a2.Item1 + b2.Item1) / 2, (a2.Item2 + b2.Item2) / 2))) throw new PushPullException("De lijn loopt buiten het vlak om.");
+            if (!Inside(loops2, ((a2.Item1 + b2.Item1) / 2, (a2.Item2 + b2.Item2) / 2))) throw new PushPullException(Lang.T("De lijn loopt buiten het vlak om.", "The line runs round outside the face."));
             foreach (var l in loops2)
                 for (int j = 0; j < l.Count; j++)
                 {
@@ -252,10 +265,10 @@ public static class Drawing
                     // (the ends of the path lie on the edge: touching there is fine)
                     bool atEnd = (i == 0 && (Near(s0, a2) || Near(s1, a2))) || (i + 2 == path2.Count && (Near(s0, b2) || Near(s1, b2)))
                         || (Touched(a2) && SegmentDistance(s0, s1, a2, a2) < SnapTol) || (Touched(b2) && SegmentDistance(s0, s1, b2, b2) < SnapTol);
-                    if (!atEnd && SegmentDistance(s0, s1, a2, b2) < SnapTol) throw new PushPullException("De lijn raakt of kruist een andere rand van het vlak.");
+                    if (!atEnd && SegmentDistance(s0, s1, a2, b2) < SnapTol) throw new PushPullException(Lang.T("De lijn raakt of kruist een andere rand van het vlak.", "The line touches or crosses another edge of the face."));
                 }
             for (int j = i + 2; j + 1 < path2.Count; j++)
-                if (SegmentDistance(a2, b2, path2[j], path2[j + 1]) < SnapTol) throw new PushPullException("De lijn kruist zichzelf.");
+                if (SegmentDistance(a2, b2, path2[j], path2[j + 1]) < SnapTol) throw new PushPullException(Lang.T("De lijn kruist zichzelf.", "The line crosses itself."));
         }
 
         // the path's vertices and edges, p → … → q
@@ -314,7 +327,7 @@ public static class Drawing
         var (x, y) = Axes(n);
         double ax = a.Dot(x), ay = a.Dot(y), mx = through.Dot(x), my = through.Dot(y), bx = b.Dot(x), by = b.Dot(y);
         double d = 2 * (ax * (my - by) + mx * (by - ay) + bx * (ay - my));
-        if (Math.Abs(d) < 1e-18) throw new PushPullException("Zo is het geen boog maar een rechte lijn; geef de boog wat bolling.");
+        if (Math.Abs(d) < 1e-18) throw new PushPullException(Lang.T("Zo is het geen boog maar een rechte lijn; geef de boog wat bolling.", "That way it is not an arc but a straight line; give the arc some bulge."));
         double a2 = ax * ax + ay * ay, m2 = mx * mx + my * my, b2 = bx * bx + by * by;
         double cx = (a2 * (my - by) + m2 * (by - ay) + b2 * (ay - my)) / d;
         double cy = (a2 * (bx - mx) + m2 * (ax - bx) + b2 * (mx - ax)) / d;
@@ -352,7 +365,7 @@ public static class Drawing
         var o = ((BrepPlane)F.Surface).Origin;
         Vec3 OnPlane(Vec3 p) => p - n * (p - o).Dot(n);
         a = OnPlane(a); b = OnPlane(b); through = OnPlane(through);
-        if ((b - a).Length < SnapTol) throw new PushPullException("Een boog moet een begin en een eind hebben.");
+        if ((b - a).Length < SnapTol) throw new PushPullException(Lang.T("Een boog moet een begin en een eind hebben.", "An arc must have a start and an end."));
         var circle = ArcThrough(a, through, b, n);
         var samples = ArcPoints(circle, a, b);
         var (x, y) = Axes(n);
@@ -364,7 +377,7 @@ public static class Drawing
         var s2 = samples.Select(P2).ToList();
         // inside the face, crossing nothing (only its ends may touch the edge)
         for (int i = 1; i + 1 < s2.Count; i++)
-            if (!Inside(loops2, s2[i])) throw new PushPullException("De boog loopt buiten het vlak.");
+            if (!Inside(loops2, s2[i])) throw new PushPullException(Lang.T("De boog loopt buiten het vlak.", "The arc runs outside the face."));
         bool ends = OnOuter(a) && OnOuter(b);
         for (int i = 0; i + 1 < s2.Count; i++)
             foreach (var l in loops2)
@@ -373,18 +386,18 @@ public static class Drawing
                     var (q0, q1) = (l[j], l[(j + 1) % l.Count]);
                     bool atEnd = ends && ((i == 0 && (Near(q0, s2[0]) || Near(q1, s2[0]) || SegmentDistance(q0, q1, s2[0], s2[0]) < SnapTol))
                         || (i + 2 == s2.Count && (Near(q0, s2[^1]) || Near(q1, s2[^1]) || SegmentDistance(q0, q1, s2[^1], s2[^1]) < SnapTol)));
-                    if (!atEnd && SegmentDistance(q0, q1, s2[i], s2[i + 1]) < SnapTol) throw new PushPullException("De boog raakt of kruist een rand van het vlak.");
+                    if (!atEnd && SegmentDistance(q0, q1, s2[i], s2[i + 1]) < SnapTol) throw new PushPullException(Lang.T("De boog raakt of kruist een rand van het vlak.", "The arc touches or crosses an edge of the face."));
                 }
 
         if (ends)
         {
             // from edge to edge: the face divided along the arc
             int vp = OnOuterEdge(verts, edges, faces, face, a), vq = OnOuterEdge(verts, edges, faces, face, b);
-            if (vp == vq) throw new PushPullException("Begin en eind van de boog liggen op hetzelfde punt.");
+            if (vp == vq) throw new PushPullException(Lang.T("Begin en eind van de boog liggen op hetzelfde punt.", "Start and end of the arc are the same point."));
             var outer = faces[face][0];
             int From(BrepCoedge c) => c.Forward ? edges[c.Edge].Start : edges[c.Edge].End;
             int ip = outer.FindIndex(c => From(c) == vp), iq = outer.FindIndex(c => From(c) == vq);
-            if (ip < 0 || iq < 0) throw new PushPullException("Begin en eind van de boog moeten op de buitenrand van het vlak liggen.");
+            if (ip < 0 || iq < 0) throw new PushPullException(Lang.T("Begin en eind van de boog moeten op de buitenrand van het vlak liggen.", "Start and end of the arc must lie on the outer edge of the face."));
             int e = edges.Count; edges.Add(new BrepEdge(vp, vq, circle));
             int m = outer.Count;
             List<BrepCoedge> Run(int from, int to) { var r = new List<BrepCoedge>(); for (int i = from; i != to; i = (i + 1) % m) r.Add(outer[i]); return r; }
@@ -401,9 +414,9 @@ public static class Drawing
         else
         {
             if (OnOuter(a) || OnOuter(b))
-                throw new PushPullException("Een boog loopt van rand tot rand (dan deelt hij het vlak), of ligt helemaal binnen het vlak; niet half.");
+                throw new PushPullException(Lang.T("Een boog loopt van rand tot rand (dan deelt hij het vlak), of ligt helemaal binnen het vlak; niet half.", "An arc runs from edge to edge (then it divides the face), or lies wholly inside the face; not half."));
             // inside: closed with the straight line back (its chord)
-            return ClosedInside(body, face, [a, b], [circle, new BrepLine()], "boog");
+            return ClosedInside(body, face, [a, b], [circle, new BrepLine()], Shape.Arc);
         }
         var outFaces = faces.Select((loops, i) => new BrepFace(i < body.Faces.Count ? body.Faces[i].Surface : F.Surface, i < body.Faces.Count ? body.Faces[i].Reversed : F.Reversed,
             loops.Select(l => (IReadOnlyList<BrepCoedge>)l).ToList())).ToList();
@@ -422,8 +435,8 @@ public static class Drawing
         Vec3 OnPlane(Vec3 p) => p - n * (p - o).Dot(n);
         centre = OnPlane(centre); a = OnPlane(a); b = OnPlane(b); through = OnPlane(through);
         var circle = ArcThrough(a, through, b, n);
-        if ((circle.Centre - centre).Length > Math.Max(SnapTol, circle.Radius * 1e-6)) throw new PushPullException("De taartpunt heeft zijn middelpunt niet in het midden van de boog.");
-        return ClosedInside(body, face, [centre, a, b], [new BrepLine(), circle with { Centre = centre }, new BrepLine()], "taartpunt");
+        if ((circle.Centre - centre).Length > Math.Max(SnapTol, circle.Radius * 1e-6)) throw new PushPullException(Lang.T("De taartpunt heeft zijn middelpunt niet in het midden van de boog.", "The pie does not have its centre in the middle of the arc."));
+        return ClosedInside(body, face, [centre, a, b], [new BrepLine(), circle with { Centre = centre }, new BrepLine()], Shape.Pie);
     }
 
     /// <summary>
@@ -432,7 +445,7 @@ public static class Drawing
     /// next with <paramref name="curves"/>[i] (a line, or a circle running from it to the next). It must stay clear of the
     /// face's edges and not cross itself.
     /// </summary>
-    private static (BrepBody Body, int Face) ClosedInside(BrepBody body, int face, IReadOnlyList<Vec3> pts, IReadOnlyList<BrepCurve> curves, string what)
+    private static (BrepBody Body, int Face) ClosedInside(BrepBody body, int face, IReadOnlyList<Vec3> pts, IReadOnlyList<BrepCurve> curves, Shape what)
     {
         var F = Planar(body, face, out var n);
         var (x, y) = Axes(n);
@@ -451,15 +464,15 @@ public static class Drawing
         }
         var o2 = outline.Select(P2).ToList();
         foreach (var q in o2)
-            if (!Inside(loops2, q)) throw new PushPullException($"De {what} moet helemaal binnen het vlak liggen.");
+            if (!Inside(loops2, q)) throw new PushPullException(Lang.T($"De {Name(what)} moet helemaal binnen het vlak liggen.", $"The {Name(what)} must lie wholly inside the face."));
         for (int i = 0; i < o2.Count; i++)
         {
             var (s0, s1) = (o2[i], o2[(i + 1) % o2.Count]);
             foreach (var l in loops2)
                 for (int j = 0; j < l.Count; j++)
-                    if (SegmentDistance(l[j], l[(j + 1) % l.Count], s0, s1) < SnapTol) throw new PushPullException($"De {what} raakt een rand van het vlak; teken hem iets kleiner (dat kan nog niet).");
+                    if (SegmentDistance(l[j], l[(j + 1) % l.Count], s0, s1) < SnapTol) throw new PushPullException(Lang.T($"De {Name(what)} raakt een rand van het vlak; teken hem iets kleiner (dat kan nog niet).", $"The {Name(what)} touches an edge of the face; draw it a little smaller (that is not possible yet)."));
             for (int j = i + 2; j < o2.Count; j++)
-                if (!(i == 0 && j == o2.Count - 1) && SegmentDistance(s0, s1, o2[j], o2[(j + 1) % o2.Count]) < SnapTol) throw new PushPullException($"De {what} kruist zichzelf.");
+                if (!(i == 0 && j == o2.Count - 1) && SegmentDistance(s0, s1, o2[j], o2[(j + 1) % o2.Count]) < SnapTol) throw new PushPullException(Lang.T($"De {Name(what)} kruist zichzelf.", $"The {Name(what)} crosses itself."));
         }
         int v0 = verts.Count; verts.AddRange(pts);
         int e0 = edges.Count;
@@ -512,11 +525,11 @@ public static class Drawing
     /// <see cref="NearestOnEdge"/> over several faces: a vertex or middle within <paramref name="snapToPoint"/> on any of
     /// them first, otherwise the nearest point on any of their edges.
     /// </summary>
-    public static (Vec3 Point, string Kind)? NearestOnEdges(BrepBody body, IEnumerable<int> faces, Vec3 p, double snapToPoint)
+    public static (Vec3 Point, Snap Kind)? NearestOnEdges(BrepBody body, IEnumerable<int> faces, Vec3 p, double snapToPoint)
     {
         var all = faces.Select(f => NearestOnEdge(body, f, p, snapToPoint)).Where(x => x != null).Select(x => x!.Value).ToList();
         if (all.Count == 0) return null;
-        var points = all.Where(x => x.Kind != "op de rand").ToList();
+        var points = all.Where(x => x.Kind != Snap.OnEdge).ToList();
         return (points.Count > 0 ? points : all).MinBy(x => (x.Point - p).Length);
     }
 
@@ -536,7 +549,7 @@ public static class Drawing
     public static List<List<Vec3>> Runs(BrepBody body, int face, IReadOnlyList<Vec3> pts)
     {
         Planar(body, face, out var n);
-        if (pts.Count < 2) throw new PushPullException("Een lijn moet een lengte hebben.");
+        if (pts.Count < 2) throw new PushPullException(Lang.T("Een lijn moet een lengte hebben.", "A line must have a length."));
         var (x, y) = Axes(n);
         (double X, double Y) P2(Vec3 q) => (q.Dot(x), q.Dot(y));
         var segs = CoplanarFaces(body, face).SelectMany(f => body.Faces[f].Loops.SelectMany(l => l)).Select(c => body.Edges[c.Edge])
@@ -594,7 +607,7 @@ public static class Drawing
             on = refined.Select(OnEdge).ToList();
         }
         else if (!on[0] || !on[^1])
-            throw new PushPullException("Begin en eind van de lijn moeten op een rand liggen (of sluit de lijn op het beginpunt).");
+            throw new PushPullException(Lang.T("Begin en eind van de lijn moeten op een rand liggen (of sluit de lijn op het beginpunt).", "Start and end of the line must lie on an edge (or close the line on its start point)."));
         var runs = new List<List<Vec3>>();
         var run = new List<Vec3> { refined[0] };
         for (int i = 1; i < refined.Count; i++)
@@ -630,7 +643,7 @@ public static class Drawing
     /// The nearest point on the face's outer edge to <paramref name="p"/> (on its plane): a vertex, the middle of a
     /// straight edge, or a point on one; with what kind of point it is. Null when the face has no outer edge to snap to.
     /// </summary>
-    public static (Vec3 Point, string Kind)? NearestOnEdge(BrepBody body, int face, Vec3 p, double snapToPoint)
+    public static (Vec3 Point, Snap Kind)? NearestOnEdge(BrepBody body, int face, Vec3 p, double snapToPoint)
     {
         var F = body.Faces[face];
         if (F.Surface is not BrepPlane || F.Loops.Count == 0) return null;
@@ -638,14 +651,14 @@ public static class Drawing
             .Select(e => (A: body.Vertices[e.Start], B: body.Vertices[e.End])).ToList();
         if (lines.Count == 0) return null;
         // a vertex or a middle close by first
-        var points = lines.SelectMany(l => new[] { (l.A, "eindpunt"), (l.B, "eindpunt"), ((l.A + l.B) * 0.5, "midden") })
+        var points = lines.SelectMany(l => new[] { (l.A, Snap.Endpoint), (l.B, Snap.Endpoint), ((l.A + l.B) * 0.5, Snap.Midpoint) })
             .Where(x => (x.Item1 - p).Length < snapToPoint).ToList();
         if (points.Count > 0) return points.MinBy(x => (x.Item1 - p).Length);
         return lines.Select(l =>
         {
             var ab = l.B - l.A;
             double t = Math.Clamp((p - l.A).Dot(ab) / ab.Dot(ab), 0, 1);
-            return (l.A + ab * t, "op de rand");
+            return (l.A + ab * t, Snap.OnEdge);
         }).MinBy(x => (x.Item1 - p).Length);
     }
 
@@ -709,7 +722,7 @@ public static class Drawing
     {
         if (face < 0 || face >= body.Faces.Count) throw new ArgumentOutOfRangeException(nameof(face));
         var F = body.Faces[face];
-        if (F.Surface is not BrepPlane) throw new PushPullException("Tekenen kan (nog) alleen op platte vlakken.");
+        if (F.Surface is not BrepPlane) throw new PushPullException(Lang.T("Tekenen kan (nog) alleen op platte vlakken.", "Drawing only works on flat faces (for now)."));
         n = FaceGeometry.Normal(F);
         return F;
     }
@@ -724,7 +737,7 @@ public static class Drawing
     /// <summary>The vertex at p on the outer loop of the face: an existing one, or a new one splitting the straight edge p
     /// lies on (in every face that runs along it).</summary>
     private static int OnOuterEdge(List<Vec3> verts, List<BrepEdge> edges, List<List<List<BrepCoedge>>> faces, int face, Vec3 p) =>
-        OnLoopEdge(verts, edges, faces, face, 0, p) ?? throw new PushPullException("Begin en eind van de lijn moeten op een rechte rand van het vlak liggen.");
+        OnLoopEdge(verts, edges, faces, face, 0, p) ?? throw new PushPullException(Lang.T("Begin en eind van de lijn moeten op een rechte rand van het vlak liggen.", "Start and end of the line must lie on a straight edge of the face."));
 
     /// <summary>The vertex of loop <paramref name="loop"/> of the face at p: one there, or made by cutting the straight
     /// edge p lies on (in every loop that uses it); null when p is not on that loop.</summary>

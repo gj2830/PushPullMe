@@ -207,10 +207,10 @@ public sealed class SketchDocument
         var changed = changedFaces.Select(x => new FaceRef(f.Body, x)).ToHashSet();
         if (checkCrossing && Intersections.FirstCrossing(doc, changed) is { } hit)
             throw new PushPullException(r.MovedAlong.Contains(hit.A.Face) || r.MovedAlong.Contains(hit.B.Face)
-                ? "Zo komt de ronding die meeschuift door een ander deel heen (bijvoorbeeld de ronding aan de andere kant: dan zou de straal kleiner moeten); dat kan nog niet."
-                : "Zo komt het vlak door een ander deel van het model heen; dat kan nog niet.");
+                ? Lang.T("Zo komt de ronding die meeschuift door een ander deel heen (bijvoorbeeld de ronding aan de andere kant: dan zou de straal kleiner moeten); dat kan nog niet.", "That way the rounding that moves along goes through another part (for example the rounding on the other side: then the radius would have to be smaller); that is not possible yet.")
+                : Lang.T("Zo komt het vlak door een ander deel van het model heen; dat kan nog niet.", "That way the face goes through another part of the model; that is not possible yet."));
         if (checkCrossing && r.FaceMap[f.Face] is >= 0 and var mf && doc.AgainstOpposite(new FaceRef(f.Body, mf)))
-            throw new PushPullException("Zo komt het vlak precies tegen de andere kant aan: doorduwen tot een gat kan nog niet.");
+            throw new PushPullException(Lang.T("Zo komt het vlak precies tegen de andere kant aan: doorduwen tot een gat kan nog niet.", "That way the face comes exactly against the other side: pushing through to a hole is not possible yet."));
         return (doc, r);
     }
 
@@ -252,7 +252,7 @@ public sealed class SketchDocument
             Colors = Colors,
         };
         if (checkCrossing && Intersections.FirstNewCrossing(this, doc, r.TrimmedFaces.Select(x => new FaceRef(f.Body, x)).ToHashSet()) is not null)
-            throw new PushPullException("Zo komt de cilinder door een ander deel van het model heen; dat kan nog niet.");
+            throw new PushPullException(Lang.T("Zo komt de cilinder door een ander deel van het model heen; dat kan nog niet.", "That way the cylinder goes through another part of the model; that is not possible yet."));
         return (doc, r);
     }
 
@@ -272,7 +272,7 @@ public sealed class SketchDocument
             Colors = Recolor(f.Body, r.FaceMap),
         };
         if (checkCrossing && Intersections.FirstCrossing(doc, r.TrimmedFaces.Select(x => new FaceRef(f.Body, x)).ToHashSet()) is not null)
-            throw new PushPullException("Zo komt de ronding door een ander deel van het model heen; dat kan nog niet.");
+            throw new PushPullException(Lang.T("Zo komt de ronding door een ander deel van het model heen; dat kan nog niet.", "That way the rounding goes through another part of the model; that is not possible yet."));
         return (doc, r);
     }
 
@@ -342,7 +342,7 @@ public sealed class SketchDocument
             Colors = Recolor(body, r.FaceMap),
         };
         if (checkCrossing && Intersections.FirstCrossing(doc, r.Changed.Select(x => new FaceRef(body, x)).ToHashSet()) is not null)
-            throw new PushPullException("Zo komt een vlak door een ander deel van het model heen; dat kan nog niet.");
+            throw new PushPullException(Lang.T("Zo komt een vlak door een ander deel van het model heen; dat kan nog niet.", "That way a face goes through another part of the model; that is not possible yet."));
         return (doc, r);
     }
 
@@ -523,12 +523,12 @@ public sealed class SketchDocument
     {
         // across every face in that plane it crosses (Drawing.Runs), one after the other; the last new face
         var runs = Drawing.Runs(Bodies[f.Body], f.Face, pts);
-        if (runs.Count == 0) throw new PushPullException("Die lijn ligt helemaal op randen die er al zijn.");
+        if (runs.Count == 0) throw new PushPullException(Lang.T("Die lijn ligt helemaal op randen die er al zijn.", "That line lies wholly on edges that are already there."));
         var doc = this; var last = f;
         foreach (var run in runs)
         {
             var b = doc.Bodies[f.Body];
-            int face = Drawing.FaceOfRun(b, f.Face, run) ?? throw new PushPullException("De lijn loopt buiten het vlak.");
+            int face = Drawing.FaceOfRun(b, f.Face, run) ?? throw new PushPullException(Lang.T("De lijn loopt buiten het vlak.", "The line runs outside the face."));
             (doc, last) = doc.With(f.Body, Drawing.Path(b, face, run), face);
         }
         return (doc, last);
@@ -584,7 +584,7 @@ public sealed class SketchDocument
         var b = Bodies[f.Body];
         var mid = curves[0] is BrepCircle c0 ? Drawing.ArcPoints(c0, pts[0], pts[1], 2)[1] : (pts[0] + pts[1]) * 0.5;
         int face = Drawing.CoplanarFaces(b, f.Face).FirstOrDefault(g => Drawing.Contains(b, g, mid), -1);
-        if (face < 0) throw new PushPullException("De vorm loopt buiten het vlak.");
+        if (face < 0) throw new PushPullException(Lang.T("De vorm loopt buiten het vlak.", "The shape runs outside the face."));
         return With(f.Body, Drawing.Path(b, face, pts, curves), face);
     }
 
@@ -608,7 +608,7 @@ public sealed class SketchDocument
         };
         if (checkCrossing && (Intersections.FirstCrossing(doc, r.Sides.Append(f.Face).Select(g => new FaceRef(f.Body, g)).ToHashSet()) is not null
             || SweepsInto(f, axisPoint, a, angle)))
-            throw new PushPullException("Zo ver gedraaid snijdt het vlak door het lichaam heen.");
+            throw new PushPullException(Lang.T("Zo ver gedraaid snijdt het vlak door het lichaam heen.", "Turned that far the face cuts through the body."));
         // a new flat face in the same plane as the one next to it (a side sweeping along a side of the body, the cap
         // landing on its bottom): one face, as DesignSpark makes it
         var capPoint = new BrepTransform.Turn(axisPoint, a, angle).Point(TrianglesOf(f).Select(t => (t.A + t.B + t.C) * (1.0 / 3)).First());
@@ -649,7 +649,7 @@ public sealed class SketchDocument
     /// </summary>
     public SketchDocument Union(int a, int b)
     {
-        if (a == b) throw new PushPullException("Kies twee verschillende delen.");
+        if (a == b) throw new PushPullException(Lang.T("Kies twee verschillende delen.", "Choose two different parts."));
         var (body, from) = Booleans.Union(Bodies[a], Bodies[b]);
         var colors = new Dictionary<int, uint>();
         for (int f = 0; f < from.Count; f++)

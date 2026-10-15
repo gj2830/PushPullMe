@@ -25,14 +25,14 @@ public static class Revolve
     public static Vec3 OutwardAxis(BrepBody body, int face, Vec3 p, Vec3 dir)
     {
         var f = body.Faces[face];
-        if (f.Surface is not BrepPlane pl) throw new PushPullException("Ronddraaien kan alleen met een plat vlak.");
+        if (f.Surface is not BrepPlane pl) throw new PushPullException(Lang.T("Ronddraaien kan alleen met een plat vlak.", "Follow Me only works with a flat face."));
         var n = FaceGeometry.Normal(f); var a = dir.Normalized();
-        if (Math.Abs(a.Dot(n)) > 1e-6 || Math.Abs((p - pl.Origin).Dot(n)) > 1e-7) throw new PushPullException("De as moet in het vlak liggen.");
+        if (Math.Abs(a.Dot(n)) > 1e-6 || Math.Abs((p - pl.Origin).Dot(n)) > 1e-7) throw new PushPullException(Lang.T("De as moet in het vlak liggen.", "The axis must lie in the plane of the face."));
         var side = n.Cross(a); // in the plane, square to the axis
         double lo = double.MaxValue, hi = double.MinValue;
         foreach (var l in f.Loops)
             foreach (var q in FaceGeometry.LoopPoints(body, l)) { double s = (q - p).Dot(side); lo = Math.Min(lo, s); hi = Math.Max(hi, s); }
-        if (lo < -1e-7 && hi > 1e-7) throw new PushPullException("Het vlak ligt aan beide kanten van de as; kies een as op of naast het vlak.");
+        if (lo < -1e-7 && hi > 1e-7) throw new PushPullException(Lang.T("Het vlak ligt aan beide kanten van de as; kies een as op of naast het vlak.", "The face lies on both sides of the axis; choose an axis on or beside the face."));
         // turning round a, a point at s·side moves along a × (s·side) = s·n: out of the body where s > 0
         return hi > 1e-7 ? a : a * -1;
     }
@@ -41,8 +41,8 @@ public static class Revolve
     /// axis through <paramref name="p"/> along <paramref name="axis"/> (from <see cref="OutwardAxis"/>).</summary>
     public static Result Face(BrepBody body, int face, Vec3 p, Vec3 axis, double angle)
     {
-        if (angle <= 1e-9) throw new PushPullException("Draai het vlak een stukje naar buiten.");
-        if (angle >= 2 * Math.PI - 1e-9) throw new PushPullException("Een hele slag rond kan nog niet; kies minder dan 360°.");
+        if (angle <= 1e-9) throw new PushPullException(Lang.T("Draai het vlak een stukje naar buiten.", "Turn the face out a little."));
+        if (angle >= 2 * Math.PI - 1e-9) throw new PushPullException(Lang.T("Een hele slag rond kan nog niet; kies minder dan 360°.", "A whole turn is not possible yet; choose less than 360°."));
         var F = body.Faces[face];
         var a = axis.Normalized();
         var turn = new BrepTransform.Turn(p, a, angle);
@@ -68,7 +68,7 @@ public static class Revolve
         foreach (int e in used)
         {
             var E = edges[e];
-            if (E.Curve is not (BrepLine or BrepCircle)) throw new PushPullException("Ronddraaien kan (nog) alleen met rechte randen en bogen.");
+            if (E.Curve is not (BrepLine or BrepCircle)) throw new PushPullException(Lang.T("Ronddraaien kan (nog) alleen met rechte randen en bogen.", "Follow Me only works with straight edges and arcs (for now)."));
             if (E.Start >= 0 && E.Curve is BrepLine && OnAxis(verts[E.Start]) && OnAxis(verts[E.End])) { turnedEdge[e] = e; continue; }
             turnedEdge[e] = edges.Count;
             edges.Add(new BrepEdge(E.Start >= 0 ? turnedVertex[E.Start] : -1, E.End >= 0 ? turnedVertex[E.End] : -1, BrepTransform.TurnCurve(E.Curve, turn)));
@@ -126,7 +126,7 @@ public static class Revolve
             if (big < 1e-7) s = new BrepSphere(cf, c.Radius, a, x);
             else
             {
-                if (big <= c.Radius + 1e-7) throw new PushPullException("Een boog die tot over de as reikt, geeft een vorm die (nog) niet kan; kies een as verder van de boog.");
+                if (big <= c.Radius + 1e-7) throw new PushPullException(Lang.T("Een boog die tot over de as reikt, geeft een vorm die (nog) niet kan; kies een as verder van de boog.", "An arc that reaches over the axis gives a shape that is not possible (yet); choose an axis further from the arc."));
                 s = new BrepTorus(cf, a, (c.Centre - cf).Normalized(), big, c.Radius);
             }
         }

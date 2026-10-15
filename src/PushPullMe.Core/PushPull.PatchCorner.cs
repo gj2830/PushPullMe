@@ -64,7 +64,7 @@ public static partial class PushPull
             Vec3 a0 = other.Perp(p0), av = carrier.Dir - other.Dir * carrier.Dir.Dot(other.Dir);
             double qa = av.Dot(av), qb = 2 * a0.Dot(av), qc = a0.Dot(a0) - other.R * other.R;
             double disc = qb * qb - 4 * qa * qc;
-            if (qa < 1e-18 || disc < 0) throw new PushPullException("Deze rondingen snijden elkaar niet zoals verwacht; dat kan nog niet.");
+            if (qa < 1e-18 || disc < 0) throw new PushPullException(Lang.T("Deze rondingen snijden elkaar niet zoals verwacht; dat kan nog niet.", "These roundings do not meet as expected; that is not possible yet."));
             double t1 = (-qb - Math.Sqrt(disc)) / (2 * qa), t2 = (-qb + Math.Sqrt(disc)) / (2 * qa);
             return Math.Abs(t1 - near) < Math.Abs(t2 - near) ? t1 : t2;
         }

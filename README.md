@@ -11,7 +11,7 @@ kunnen worden ingelezen.
 
 Wat er kan: duwen/trekken (ook cilinders en afrondingen), lijnen, rechthoeken, cirkels, veelhoeken, bogen, taartpunten,
 losse lijnen, offset, afronden, verplaatsen, draaien, schalen, spiegelen, ronddraaien (Follow Me), verenigen (platte
-vlakken), meetlint en hulplijnen, verf, lasso en gum. Het programma is in het Nederlands.
+vlakken), meetlint en hulplijnen, verf, lasso en gum. Het programma is in het Nederlands en het Engels (🌐-knop).
 
 ![Een vlak rondgedraaid tot een kwart bol](docs/ronddraaien.png)
 
@@ -39,8 +39,8 @@ Testen: `dotnet test tests/PushPullMe.Tests`.
 
 PushPullMe is a playful 3D modelling app in the spirit of SketchUp, with the habits of DesignSpark Mechanical. It
 works with exact geometry (planes, cylinders, cones, spheres, tori) and reads and writes DesignSpark files (`.rsdocx`)
-through [StlConverter](https://github.com/gj2830/StlConverter); STL and 3MF can be imported too. The app is in Dutch
-for now. Download a ready-to-run Windows build from [Releases](https://github.com/gj2830/PushPullMe/releases), or
+through [StlConverter](https://github.com/gj2830/StlConverter); STL and 3MF can be imported too. The app speaks Dutch and English (the 🌐
+button). Download a ready-to-run Windows build from [Releases](https://github.com/gj2830/PushPullMe/releases), or
 build it yourself with the .NET 10 SDK as shown above.
 
 ## Licentie / License

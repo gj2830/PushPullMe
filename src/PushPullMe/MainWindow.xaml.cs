@@ -71,7 +71,10 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        Lang.English = LoadLanguage();
         InitializeComponent();
+        XamlTexts.Apply(this);
+        LanguageButton.Content = Lang.English ? "🌐  EN" : "🌐  NL";
         // the highlight and the sketch sit just in front of the faces as seen from the camera: again when it moves
         View.CameraChanged += (_, _) =>
         {
@@ -95,8 +98,8 @@ public partial class MainWindow : Window
             e.Handled = true;
             EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _typed = "";
             Render();
-            ShowToast("😬 Er ging iets mis", "Dat is afgebroken; je model is er nog. (De fout staat in %LOCALAPPDATA%\\PushPullMe\\fouten.log.)");
-            StatusText.Text = "😬 Er ging iets mis; afgebroken.";
+            ShowToast(T("😬 Er ging iets mis", "😬 Something went wrong"), T("Dat is afgebroken; je model is er nog. (De fout staat in %LOCALAPPDATA%\\PushPullMe\\fouten.log.)", "That was stopped; your model is still there. (The error is in %LOCALAPPDATA%\\PushPullMe\\fouten.log.)"));
+            StatusText.Text = T("😬 Er ging iets mis; afgebroken.", "😬 Something went wrong; stopped.");
         };
     }
 
@@ -106,7 +109,7 @@ public partial class MainWindow : Window
 
     private async Task OpenDialog()
     {
-        var dlg = new OpenFileDialog { Filter = "3D-modellen (*.stl;*.3mf;*.rsdocx)|*.stl;*.3mf;*.rsdocx|DesignSpark (*.rsdocx)|*.rsdocx|Alle bestanden|*.*" };
+        var dlg = new OpenFileDialog { Filter = T("3D-modellen (*.stl;*.3mf;*.rsdocx)|*.stl;*.3mf;*.rsdocx|DesignSpark (*.rsdocx)|*.rsdocx|Alle bestanden|*.*", "3D models (*.stl;*.3mf;*.rsdocx)|*.stl;*.3mf;*.rsdocx|DesignSpark (*.rsdocx)|*.rsdocx|All files|*.*") };
         if (dlg.ShowDialog(this) == true) await Open(dlg.FileName);
     }
 
@@ -120,26 +123,27 @@ public partial class MainWindow : Window
     private async Task Open(string path)
     {
         if (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase)) { await Load(path); return; }
-        RsConverterUI.MainWindow converter;
-        try { converter = new RsConverterUI.MainWindow(path) { Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner }; }
+        StlConverter.MainWindow converter;
+        StlConverter.Lang.English = Lang.English; // (the converter speaks as this app does)
+        try { converter = new StlConverter.MainWindow(path) { Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner }; }
         catch (Exception ex) when (ex is System.Windows.Markup.XamlParseException or IOException or InvalidOperationException)
         {
             // (the converter cannot open: recognised here, as before)
             Log("converter: " + ex.Message);
-            ShowToast("😕 De converter opent niet", "Het bestand wordt hier herkend.");
+            ShowToast(T("😕 De converter opent niet", "😕 The converter does not open"), T("Het bestand wordt hier herkend.", "The file is recognised here."));
             await Load(path);
             return;
         }
         Log($"converter opened for {path}");
-        StatusText.Text = "🔄 Herken de vormen in de converter en kies ✅ Overnemen in PushPullMe.";
+        StatusText.Text = T("🔄 Herken de vormen in de converter en kies ✅ Overnemen in PushPullMe.", "🔄 Recognise the shapes in the converter and choose ✅ Take over in PushPullMe.");
         if (converter.ShowDialog() != true || converter.Result is not { } r)
         {
-            StatusText.Text = _doc == null ? "Open een model om te beginnen." : "De converter is gesloten zonder over te nemen.";
+            StatusText.Text = _doc == null ? T("Open een model om te beginnen.", "Open a model to begin.") : T("De converter is gesloten zonder over te nemen.", "The converter was closed without taking anything over.");
             Log("converter closed without handing over");
             return;
         }
         var doc = await Task.Run(() => SketchDocument.FromRecognized(r.Bodies, r.Labels));
-        Adopt(doc, path, r.Note.Length > 0 ? ("🔄 Uit de converter", r.Note) : null);
+        Adopt(doc, path, r.Note.Length > 0 ? (T("🔄 Uit de converter", "🔄 From the converter"), r.Note) : null);
         Log($"converter handed over: {doc.Bodies.Sum(b => b.Faces.Count)} faces{(r.Note.Length > 0 ? " " + r.Note : "")}");
     }
 
@@ -155,7 +159,7 @@ public partial class MainWindow : Window
         EmptyHint.Visibility = Visibility.Collapsed;
         SaveButton.IsEnabled = true;
         int faces = doc.Bodies.Sum(b => b.Faces.Count), planes = doc.Bodies.Sum(b => b.Faces.Count(f => f.Surface is BrepPlane));
-        StatusText.Text = $"📦 {faces:N0} vlakken, waarvan {planes:N0} plat. Kies ⇕ (of druk P) en klik een plat vlak om het te verschuiven.";
+        StatusText.Text = T($"📦 {faces:N0} vlakken, waarvan {planes:N0} plat. Kies ⇕ (of druk P) en klik een plat vlak om het te verschuiven.", $"📦 {faces:N0} faces, {planes:N0} of them flat. Choose ⇕ (or press P) and click a flat face to move it.");
         if (note is { } n) ShowToast(n.Title, n.Text);
         Log($"open {path}: {faces} faces, {planes} planar");
     }
@@ -163,7 +167,7 @@ public partial class MainWindow : Window
     private async Task Load(string path)
     {
         Busy.Visibility = Visibility.Visible;
-        BusyText.Text = "Vormen herkennen…";
+        BusyText.Text = T("Vormen herkennen…", "Recognising shapes…");
         try
         {
             SketchDocument doc;
@@ -171,11 +175,11 @@ public partial class MainWindow : Window
             if (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase))
             {
                 // exact shapes already: read as they are
-                BusyText.Text = "Bestand lezen…";
+                BusyText.Text = T("Bestand lezen…", "Reading the file…");
                 int hidden = 0;
                 doc = await Task.Run(() => SketchDocument.FromRsDocx(path, out hidden));
                 if (hidden > 0)
-                    note = $"{hidden} {(hidden == 1 ? "lichaam staat" : "lichamen staan")} in DesignSpark op onzichtbaar; hier zie je {(hidden == 1 ? "het" : "ze")} gewoon.";
+                    note = T($"{hidden} {(hidden == 1 ? "lichaam staat" : "lichamen staan")} in DesignSpark op onzichtbaar; hier zie je {(hidden == 1 ? "het" : "ze")} gewoon.", $"{hidden} {(hidden == 1 ? "body is" : "bodies are")} hidden in DesignSpark; here you see {(hidden == 1 ? "it" : "them")} all the same.");
             }
             else
             {
@@ -185,18 +189,18 @@ public partial class MainWindow : Window
                 catch (MeshException)
                 {
                     // not closed, or touching itself: cleaned first (as 🧹 in the converter)
-                    BusyText.Text = "Mesh opschonen…";
+                    BusyText.Text = T("Mesh opschonen…", "Cleaning up the mesh…");
                     var clean = await Task.Run(() => MeshRepair.Repair(stl, new MeshRepairOptions(), out _));
-                    BusyText.Text = "Vormen herkennen…";
+                    BusyText.Text = T("Vormen herkennen…", "Recognising shapes…");
                     doc = await Task.Run(() => SketchDocument.FromMesh(clean, opt));
-                    note = "De mesh was niet helemaal dicht en is eerst opgeschoond.";
+                    note = T("De mesh was niet helemaal dicht en is eerst opgeschoond.", "The mesh was not quite closed and has been cleaned up first.");
                 }
             }
-            Adopt(doc, path, note == null ? null : (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase) ? "👻 Onzichtbare lichamen" : "🧹 Eerst opgeschoond", note));
+            Adopt(doc, path, note == null ? null : (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase) ? T("👻 Onzichtbare lichamen", "👻 Hidden bodies") : T("🧹 Eerst opgeschoond", "🧹 Cleaned up first"), note));
         }
         catch (Exception ex) when (ex is MeshException or IOException or StlFormatException or InvalidDataException or RsDocxReadException)
         {
-            ShowToast("😕 Dit bestand lukt niet", ex.Message);
+            ShowToast(T("😕 Dit bestand lukt niet", "😕 This file does not work"), ex.Message);
         }
         finally { Busy.Visibility = Visibility.Collapsed; }
     }
@@ -208,7 +212,7 @@ public partial class MainWindow : Window
         bool stl = _path != null && _path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase);
         var dlg = new SaveFileDialog
         {
-            Filter = "DesignSpark Mechanical (*.rsdocx)|*.rsdocx|STL voor de printer (*.stl)|*.stl",
+            Filter = T("DesignSpark Mechanical (*.rsdocx)|*.rsdocx|STL voor de printer (*.stl)|*.stl", "DesignSpark Mechanical (*.rsdocx)|*.rsdocx|STL for the printer (*.stl)|*.stl"),
             FilterIndex = stl ? 2 : 1,
             FileName = Path.GetFileNameWithoutExtension(_path ?? "model"),
             InitialDirectory = _path != null ? Path.GetDirectoryName(Path.GetFullPath(_path)) : null,
@@ -227,16 +231,16 @@ public partial class MainWindow : Window
             _path = path; FileText.Text = Path.GetFileName(path);
             if (_doc.Colors.Any(c => c.Count > 0) && path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase))
             {
-                ShowToast("💾 Opgeslagen, zonder kleuren", Path.GetFileName(path) + ": een STL kan geen kleuren bevatten. Sla op als .rsdocx om ze te bewaren (DesignSpark ziet ze dan ook).");
+                ShowToast(T("💾 Opgeslagen, zonder kleuren", "💾 Saved, without colours"), Path.GetFileName(path) + T(": een STL kan geen kleuren bevatten. Sla op als .rsdocx om ze te bewaren (DesignSpark ziet ze dan ook).", ": an STL cannot hold colours. Save as .rsdocx to keep them (DesignSpark sees them too)."));
                 Log($"saved {path} (colours left out)");
                 return;
             }
-            ShowToast("💾 Opgeslagen", Path.GetFileName(path));
+            ShowToast(T("💾 Opgeslagen", "💾 Saved"), Path.GetFileName(path));
             Log($"saved {path}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
         {
-            ShowToast("😕 Opslaan lukt niet", ex.Message);
+            ShowToast(T("😕 Opslaan lukt niet", "😕 Saving does not work"), ex.Message);
         }
     }
 
@@ -262,7 +266,7 @@ public partial class MainWindow : Window
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         Render();
         UpdateUndoButtons();
-        StatusText.Text = "↩ Ongedaan gemaakt.";
+        StatusText.Text = T("↩ Ongedaan gemaakt.", "↩ Undone.");
         Log("undo");
     }
 
@@ -274,7 +278,7 @@ public partial class MainWindow : Window
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         Render();
         UpdateUndoButtons();
-        StatusText.Text = "↪ Opnieuw gedaan.";
+        StatusText.Text = T("↪ Opnieuw gedaan.", "↪ Redone.");
         Log("redo");
     }
 
@@ -540,29 +544,29 @@ public partial class MainWindow : Window
         EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null; HideTag(); MeasureUnit.Text = "mm";
         Render();
         if (!LassoMode) EndLasso();
-        StatusText.Text = MirrorMode ? "⇋ Spiegelen: klik een plat vlak; het lichaam spiegelt erin. Ctrl+klik: een gespiegelde kopie erbij."
-            : LassoMode ? "➰ Lasso: klik, trek een lus om vlakken heen en klik nog eens. Shift: erbij · Ctrl: eraf · Esc: keuze leeg."
-            : ScaleMode ? "⇲ Schalen: klik het punt dat blijft staan (op het lichaam). Ctrl: een geschaalde kopie."
-            : RotateMode ? "↻ Draaien: klik een vlak voor het draaipunt (de as staat er haaks op; pijltjes: rode, groene of blauwe as). Ctrl: een gedraaide kopie."
-            : RoundMode ? "◠ Afronden: wijs een scherpe rechte rand aan en klik; beweeg voor de straal en klik, of typ de straal + Enter."
-            : OffsetMode ? "▣ Offset: klik een plat vlak en beweeg de muis naar binnen; klik om vast te zetten. Of typ de afstand + Enter."
-            : PushMode ? "⇕ Push/Pull: klik een plat vlak, beweeg de muis en klik nog eens. Of typ de afstand en Enter."
-            : RectMode ? "▭ Rechthoek: klik een hoek op een plat vlak en dan de andere hoek. Of typ breedte;hoogte + Enter."
-            : LineMode ? "╱ Lijn: klik punt na punt op een plat vlak. Terug op het beginpunt: een eigen vlak; van rand tot rand: het vlak wordt gedeeld. Pijltjes: rood, groen, blauw."
-            : CircleMode ? "◯ Cirkel: klik het middelpunt op een plat vlak en dan de rand. Of typ de straal + Enter."
-            : CentreArcMode ? "◜ Boog vanaf het middelpunt: klik het middelpunt op een plat vlak, dan het beginpunt, en beweeg voor de hoek."
-            : PieMode ? "◔ Taartpunt: klik het middelpunt op een plat vlak, dan het beginpunt, en beweeg voor de hoek."
-            : RotRectMode ? "◇ Rechthoek onder een hoek: klik een hoek op een plat vlak, dan de tweede hoek (de eerste zijde), en beweeg voor de breedte."
-            : FollowMode ? "↝ Ronddraaien: klik het platte vlak dat eruit moet draaien."
-            : UnionMode ? "∪ Verenigen: klik het eerste deel."
-            : Arc3Mode ? "⌓ Boog door drie punten: klik het beginpunt op een plat vlak, dan een punt op de boog, dan het eindpunt."
-            : ArcMode ? "⌒ Boog: klik het beginpunt op een plat vlak, dan het eindpunt, en beweeg voor de bolling. Van rand tot rand deelt hij het vlak."
-            : PolygonMode ? $"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): klik het middelpunt op een plat vlak, beweeg en klik. Of typ de straal + Enter."
-            : PaintMode ? "🎨 Verfemmer: kies een kleur en klik een vlak. Ctrl: het hele lichaam · Shift: alle vlakken in dezelfde kleur · Alt: kleur overnemen."
-            : TapeMode ? "📏 Meetlint: klik een punt en beweeg om te meten; klik een rand en trek eraf voor een hulplijn. Delete: alle hulplijnen weg."
-            : MoveMode ? "✥ Verplaatsen: klik een hoekpunt, rand of vlak, beweeg en klik nog eens; wat eraan vastzit buigt mee. Shift: het hele lichaam · Ctrl: een kopie."
-            : EraserMode ? "⌫ Gum: klik een getekende lijn, rechthoek of cirkel; de vlakken worden weer één."
-            : "↖ Selecteren: klik een vlak.";
+        StatusText.Text = MirrorMode ? T("⇋ Spiegelen: klik een plat vlak; het lichaam spiegelt erin. Ctrl+klik: een gespiegelde kopie erbij.", "⇋ Mirror: click a flat face; the body is mirrored in it. Ctrl+click: add a mirrored copy.")
+            : LassoMode ? T("➰ Lasso: klik, trek een lus om vlakken heen en klik nog eens. Shift: erbij · Ctrl: eraf · Esc: keuze leeg.", "➰ Lasso: click, draw a loop round faces and click again. Shift: add · Ctrl: remove · Esc: clear the selection.")
+            : ScaleMode ? T("⇲ Schalen: klik het punt dat blijft staan (op het lichaam). Ctrl: een geschaalde kopie.", "⇲ Scale: click the point that stays put (on the body). Ctrl: a scaled copy.")
+            : RotateMode ? T("↻ Draaien: klik een vlak voor het draaipunt (de as staat er haaks op; pijltjes: rode, groene of blauwe as). Ctrl: een gedraaide kopie.", "↻ Rotate: click a face for the pivot (the axis is square to it; arrow keys: red, green or blue axis). Ctrl: a rotated copy.")
+            : RoundMode ? T("◠ Afronden: wijs een scherpe rechte rand aan en klik; beweeg voor de straal en klik, of typ de straal + Enter.", "◠ Round: point at a sharp straight edge and click; move for the radius and click, or type the radius + Enter.")
+            : OffsetMode ? T("▣ Offset: klik een plat vlak en beweeg de muis naar binnen; klik om vast te zetten. Of typ de afstand + Enter.", "▣ Offset: click a flat face and move the mouse inwards; click to set it. Or type the distance + Enter.")
+            : PushMode ? T("⇕ Push/Pull: klik een plat vlak, beweeg de muis en klik nog eens. Of typ de afstand en Enter.", "⇕ Push/Pull: click a flat face, move the mouse and click again. Or type the distance and Enter.")
+            : RectMode ? T("▭ Rechthoek: klik een hoek op een plat vlak en dan de andere hoek. Of typ breedte;hoogte + Enter.", "▭ Rectangle: click a corner on a flat face and then the other corner. Or type width;height + Enter.")
+            : LineMode ? T("╱ Lijn: klik punt na punt op een plat vlak. Terug op het beginpunt: een eigen vlak; van rand tot rand: het vlak wordt gedeeld. Pijltjes: rood, groen, blauw.", "╱ Line: click point after point on a flat face. Back on the start point: a face of its own; from edge to edge: the face is divided. Arrow keys: red, green, blue.")
+            : CircleMode ? T("◯ Cirkel: klik het middelpunt op een plat vlak en dan de rand. Of typ de straal + Enter.", "◯ Circle: click the centre on a flat face and then the edge. Or type the radius + Enter.")
+            : CentreArcMode ? T("◜ Boog vanaf het middelpunt: klik het middelpunt op een plat vlak, dan het beginpunt, en beweeg voor de hoek.", "◜ Arc from the centre: click the centre on a flat face, then the start point, and move for the angle.")
+            : PieMode ? T("◔ Taartpunt: klik het middelpunt op een plat vlak, dan het beginpunt, en beweeg voor de hoek.", "◔ Pie: click the centre on a flat face, then the start point, and move for the angle.")
+            : RotRectMode ? T("◇ Rechthoek onder een hoek: klik een hoek op een plat vlak, dan de tweede hoek (de eerste zijde), en beweeg voor de breedte.", "◇ Rotated rectangle: click a corner on a flat face, then the second corner (the first side), and move for the width.")
+            : FollowMode ? T("↝ Ronddraaien: klik het platte vlak dat eruit moet draaien.", "↝ Follow Me: click the flat face that is to turn out.")
+            : UnionMode ? T("∪ Verenigen: klik het eerste deel.", "∪ Union: click the first part.")
+            : Arc3Mode ? T("⌓ Boog door drie punten: klik het beginpunt op een plat vlak, dan een punt op de boog, dan het eindpunt.", "⌓ 3 point arc: click the start point on a flat face, then a point on the arc, then the end point.")
+            : ArcMode ? T("⌒ Boog: klik het beginpunt op een plat vlak, dan het eindpunt, en beweeg voor de bolling. Van rand tot rand deelt hij het vlak.", "⌒ Arc: click the start point on a flat face, then the end point, and move for the bulge. From edge to edge it divides the face.")
+            : PolygonMode ? T($"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): klik het middelpunt op een plat vlak, beweeg en klik. Of typ de straal + Enter.", $"⬡ Polygon ({_polySides} sides; ↑/↓: more/fewer): click the centre on a flat face, move and click. Or type the radius + Enter.")
+            : PaintMode ? T("🎨 Verfemmer: kies een kleur en klik een vlak. Ctrl: het hele lichaam · Shift: alle vlakken in dezelfde kleur · Alt: kleur overnemen.", "🎨 Paint bucket: choose a colour and click a face. Ctrl: the whole body · Shift: all faces of the same colour · Alt: pick up a colour.")
+            : TapeMode ? T("📏 Meetlint: klik een punt en beweeg om te meten; klik een rand en trek eraf voor een hulplijn. Delete: alle hulplijnen weg.", "📏 Tape measure: click a point and move to measure; click an edge and pull away for a guide line. Delete: remove all guide lines.")
+            : MoveMode ? T("✥ Verplaatsen: klik een hoekpunt, rand of vlak, beweeg en klik nog eens; wat eraan vastzit buigt mee. Shift: het hele lichaam · Ctrl: een kopie.", "✥ Move: click a vertex, edge or face, move and click again; what is attached to it follows. Shift: the whole body · Ctrl: a copy.")
+            : EraserMode ? T("⌫ Gum: klik een getekende lijn, rechthoek of cirkel; de vlakken worden weer één.", "⌫ Eraser: click a drawn line, rectangle or circle; the faces become one again.")
+            : T("↖ Selecteren: klik een vlak.", "↖ Select: click a face.");
     }
 
     private void View_MouseMove(object sender, MouseEventArgs e)
@@ -595,12 +599,12 @@ public partial class MainWindow : Window
         if (EraserMode) HoverErase(hit, pos);
         if (MoveMode) HoverMove(hit, pos);
         // ⇕ over a rounding, pin or hole: its radius next to the mouse (as DesignSpark)
-        if (PushMode && h is { } rh && HasRadius(_doc, rh)) ShowTag("R " + Mm(RadiusOf(_doc, rh)) + " mm", pos);
+        if (PushMode && h is { } rh && HasRadius(_doc, rh)) ShowTag("R " + Mm(RadiusOf(_doc, rh)) + T(" mm", " mm"), pos);
         else HideTag();
         // ⇕ close to a sharp edge: a click rounds it (as DesignSpark's pull on an edge)
         if (PushMode)
         {
-            if (SharpEdgeNear(hit, pos) is { } se) { ShowRoundEdges(se.Body, se.Edge); StatusText.Text = "⇕ Klik en sleep om deze rand af te ronden (of typ de straal + Enter na de klik)."; }
+            if (SharpEdgeNear(hit, pos) is { } se) { ShowRoundEdges(se.Body, se.Edge); StatusText.Text = T("⇕ Klik en sleep om deze rand af te ronden (of typ de straal + Enter na de klik).", "⇕ Click and drag to round this edge (or type the radius + Enter after the click)."); }
             else if (_roundSel == null && _sketch != null && _roundEdge == null) ShowSketch([]);
         }
         if (TapeMode) HoverTape(hit, pos);
@@ -652,8 +656,8 @@ public partial class MainWindow : Window
             _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
             UpdateHighlight();
             ShowRoundEdges();
-            MeasureLabel.Text = "Straal"; MeasureBox.Text = "";
-            StatusText.Text = "⇕ Beweeg de muis van de rand af voor de straal; klik om vast te zetten, of typ de straal + Enter. Esc breekt af.";
+            MeasureLabel.Text = T("Straal", "Radius"); MeasureBox.Text = "";
+            StatusText.Text = T("⇕ Beweeg de muis van de rand af voor de straal; klik om vast te zetten, of typ de straal + Enter. Esc breekt af.", "⇕ Move the mouse away from the edge for the radius; click to set it, or type the radius + Enter. Esc cancels.");
             return handled;
         }
         if (RoundMode) { handled = true; StartRound(FaceAt(pos), pos); return handled; }
@@ -662,7 +666,7 @@ public partial class MainWindow : Window
         {
             if (hit is not { } oh) return handled;
             handled = true;
-            if (!IsPlanar(oh.Face)) { StatusText.Text = "▣ Offset kan alleen op platte vlakken."; return handled; }
+            if (!IsPlanar(oh.Face)) { StatusText.Text = T("▣ Offset kan alleen op platte vlakken.", "▣ Offset only works on flat faces."); return handled; }
             StartOffset(oh.Face);
             return handled;
         }
@@ -674,7 +678,7 @@ public partial class MainWindow : Window
         {
             if (hit is not { } dh) return handled;
             handled = true;
-            if (!IsPlanar(dh.Face)) { StatusText.Text = "Tekenen kan (nog) alleen op platte vlakken."; return handled; }
+            if (!IsPlanar(dh.Face)) { StatusText.Text = T("Tekenen kan (nog) alleen op platte vlakken.", "Drawing only works on flat faces (for now)."); return handled; }
             StartDraw(dh.Face, V(dh.Point), (Point?)pos);
             return handled;
         }
@@ -693,7 +697,7 @@ public partial class MainWindow : Window
             return handled;
         }
         if (hit is not { } h) return handled;
-        if (!Pushable(h.Face)) { StatusText.Text = "⇕ Alleen platte vlakken en cilinders kunnen (nog) geduwd of getrokken worden."; return handled; }
+        if (!Pushable(h.Face)) { StatusText.Text = T("⇕ Alleen platte vlakken en cilinders kunnen (nog) geduwd of getrokken worden.", "⇕ Only flat faces and cylinders can be pushed or pulled (for now)."); return handled; }
         handled = true;
         StartDrag(h.Face, h.Point);
         return handled;
@@ -705,19 +709,51 @@ public partial class MainWindow : Window
         double area = _doc.TrianglesOf(f).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length / 2) * Display * Display;
         string kind = face.Surface switch
         {
-            BrepPlane => "plat vlak",
-            BrepCylinder c => $"cilinder Ø {c.Radius * 2 * Display:0.##} mm",
-            BrepSphere s => $"bol Ø {s.Radius * 2 * Display:0.##} mm",
-            BrepCone => "kegel",
-            BrepTorus => "torus",
-            _ => "vlak",
+            BrepPlane => T("plat vlak", "flat face"),
+            BrepCylinder c => T($"cilinder Ø {c.Radius * 2 * Display:0.##} mm", $"cylinder Ø {c.Radius * 2 * Display:0.##} mm"),
+            BrepSphere s => T($"bol Ø {s.Radius * 2 * Display:0.##} mm", $"sphere Ø {s.Radius * 2 * Display:0.##} mm"),
+            BrepCone => T("kegel", "cone"),
+            BrepTorus => T("torus", "torus"),
+            _ => T("vlak", "face"),
         };
-        return $"↖ {kind}, {area:0.##} mm² (vlak {f.Face})";
+        return T($"↖ {kind}, {area:0.##} mm² (vlak {f.Face})", $"↖ {kind}, {area:0.##} mm² (face {f.Face})");
     }
 
     // ------------------------------------------------------------------ drawing: rectangle and line
 
     private static Vec3 V(Point3D p) => new(p.X / Display, p.Y / Display, p.Z / Display);
+
+    // ------------------------------------------------------------------ language
+
+    private static string LanguageFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe", "taal.txt");
+
+    /// <summary>English or Dutch: as chosen before, else as Windows speaks (Dutch for Dutch, English otherwise).</summary>
+    private static bool LoadLanguage()
+    {
+        // (the test aid: PPM_LANG=en or nl, without touching the choice kept)
+        if (Environment.GetEnvironmentVariable("PPM_LANG") is "en" or "nl") return Environment.GetEnvironmentVariable("PPM_LANG") == "en";
+        try { if (File.Exists(LanguageFile)) return File.ReadAllText(LanguageFile).Trim() == "en"; } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName != "nl";
+    }
+
+    /// <summary>🌐: the other language, at once (what the status bar says changes with the next step), and kept.</summary>
+    private void Language_Click(object sender, RoutedEventArgs e)
+    {
+        Lang.English = !Lang.English;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LanguageFile)!);
+            File.WriteAllText(LanguageFile, Lang.English ? "en" : "nl");
+        }
+        catch (IOException) { } catch (UnauthorizedAccessException) { }
+        XamlTexts.Apply(this);
+        LanguageButton.Content = Lang.English ? "🌐  EN" : "🌐  NL";
+        StatusText.Text = T("Taal: Nederlands.", "Language: English.");
+        Log($"language: {(Lang.English ? "en" : "nl")}");
+    }
+
+    /// <summary>A text in the language chosen (see <see cref="Lang"/>).</summary>
+    private static string T(string nl, string en) => Lang.T(nl, en);
 
     private static string Mm(double metres) => (metres * Display).ToString("0.##", CultureInfo.CurrentCulture);
 
@@ -746,7 +782,7 @@ public partial class MainWindow : Window
 
     /// <summary>The point on the face's outer edge to snap to near the mouse (a corner or a middle within 12 pixels,
     /// otherwise the nearest point on an edge within 20 pixels), with what it is.</summary>
-    private (Vec3 Point, string Kind)? EdgeSnap(FaceRef f, Vec3 at, Point pos)
+    private (Vec3 Point, Snap Kind)? EdgeSnap(FaceRef f, Vec3 at, Point pos)
     {
         var body = _doc!.Bodies[f.Body];
         var n = NormalOf(f);
@@ -759,12 +795,12 @@ public partial class MainWindow : Window
                 .SelectMany(g => PlaneFaces(f).SelectMany(pf => body.Faces[pf].Loops[0]).Select(c => body.Edges[c.Edge]).Where(e => e.Curve is BrepLine && e.Start >= 0)
                     .Select(e => Guides.MeetSegment(g, body.Vertices[e.Start], body.Vertices[e.End])))
                 .Where(q => q != null).Select(q => q!.Value).Select(q => (Q: q, Px: (Screen(q) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
-            if (crossings.Count > 0) return (crossings[0].Q, "snijpunt met de hulplijn");
+            if (crossings.Count > 0) return (crossings[0].Q, Snap.GuideCrossing);
         }
-        if (body.Faces[f.Face].Surface is BrepPlane cpl && CentreSnap(n, cpl.Origin, pos) is { } cs) return (cs, "middelpunt");
+        if (body.Faces[f.Face].Surface is BrepPlane cpl && CentreSnap(n, cpl.Origin, pos) is { } cs) return (cs, Snap.Centre);
         var loose = body.Faces[f.Face].Surface is BrepPlane lpl ? LooseSnap(n, lpl.Origin, at, pos) : null;
-        if (loose is { Kind: "eindpunt van een losse lijn" or "midden van een losse lijn" } lk) return (lk.Point, lk.Kind);
-        var onEdge = PushPullMe.Core.Drawing.NearestOnEdges(body, PlaneFaces(f), at, tol) is { } s && (Screen(s.Point) - pos).Length < 20 ? s : ((Vec3 Point, string Kind)?)null;
+        if (loose is { Kind: Snap.LooseEnd or Snap.LooseMiddle } lk) return (lk.Point, lk.Kind);
+        var onEdge = PushPullMe.Core.Drawing.NearestOnEdges(body, PlaneFaces(f), at, tol) is { } s && (Screen(s.Point) - pos).Length < 20 ? s : ((Vec3 Point, Snap Kind)?)null;
         if (loose is { } lo && (onEdge is not { } oe || (Screen(lo.Point) - pos).Length < (Screen(oe.Point) - pos).Length)) return (lo.Point, lo.Kind);
         return onEdge;
     }
@@ -794,9 +830,9 @@ public partial class MainWindow : Window
         if (CircleMode)
         {
             ShowSketch([dh.Point], n);
-            MeasureLabel.Text = "Straal";
+            MeasureLabel.Text = T("Straal", "Radius");
             MeasureBox.Text = "";
-            StatusText.Text = "◯ Klik het middelpunt van de cirkel.";
+            StatusText.Text = T("◯ Klik het middelpunt van de cirkel.", "◯ Click the centre of the circle.");
             return;
         }
         if (RectMode)
@@ -805,23 +841,23 @@ public partial class MainWindow : Window
             var c = PushPullMe.Core.Drawing.NearestCorner(body, dh.Face.Face, dh.Point);
             var u = RectAxis(n); var v = n.Cross(u);
             ShowSketch([c], n);
-            MeasureLabel.Text = "Vanaf hoek";
+            MeasureLabel.Text = T("Vanaf hoek", "From corner");
             MeasureBox.Text = $"{Mm(Math.Abs((dh.Point - c).Dot(u)))};{Mm(Math.Abs((dh.Point - c).Dot(v)))}";
-            StatusText.Text = "▭ Klik de eerste hoek, of typ x;y + Enter: zo ver van de gemarkeerde hoek van het vlak.";
+            StatusText.Text = T("▭ Klik de eerste hoek, of typ x;y + Enter: zo ver van de gemarkeerde hoek van het vlak.", "▭ Click the first corner, or type x;y + Enter: that far from the marked corner of the face.");
             return;
         }
         var start = LineCandidate(dh.Face, dh.Point, pos);
         ShowSketch([start.P], n);
-        if (start.Kind != null && PushPullMe.Core.Drawing.EdgeAt(body, dh.Face.Face, start.P) is { } edge && start.OnEdge)
+        if (start.Label != null && PushPullMe.Core.Drawing.EdgeAt(body, dh.Face.Face, start.P) is { } edge && start.OnEdge)
         {
-            MeasureLabel.Text = "Vanaf hoek";
+            MeasureLabel.Text = T("Vanaf hoek", "From corner");
             MeasureBox.Text = Mm((start.P - edge.Corner).Length);
-            StatusText.Text = $"╱ {start.Kind} · klik om de lijn hier te beginnen, of typ een afstand + Enter: zo ver van de dichtstbijzijnde hoek langs deze rand.";
+            StatusText.Text = T($"╱ {start.Label} · klik om de lijn hier te beginnen, of typ een afstand + Enter: zo ver van de dichtstbijzijnde hoek langs deze rand.", $"╱ {start.Label} · click to start the line here, or type a distance + Enter: that far from the nearest corner along this edge.");
         }
         else
         {
             MeasureBox.Text = "";
-            StatusText.Text = $"╱ {(start.Kind != null ? start.Kind + " · " : "")}klik waar de lijn begint (op een rand, of ergens op het vlak).";
+            StatusText.Text = T($"╱ {(start.Label != null ? start.Label + " · " : "")}klik waar de lijn begint (op een rand, of ergens op het vlak).", $"╱ {(start.Label != null ? start.Label + " · " : "")}click where the line starts (on an edge, or anywhere on the face).");
         }
     }
 
@@ -837,13 +873,13 @@ public partial class MainWindow : Window
         _drawEdgeDir = LineMode && PushPullMe.Core.Drawing.EdgeAt(body, f.Face, at) is { } e ? (e.Other - e.Corner).Normalized() : null;
         _selected = null; _hover = null; _last = null; _drawHover = null;
         UpdateHighlight();
-        MeasureLabel.Text = RectMode ? "Maten" : CircleMode ? "Straal" : "Lengte";
+        MeasureLabel.Text = RectMode ? T("Maten", "Size") : CircleMode ? T("Straal", "Radius") : T("Lengte", "Length");
         MeasureBox.Text = "";
-        StatusText.Text = RectMode ? "▭ Klik de andere hoek, of typ breedte;hoogte + Enter. Esc breekt af."
-            : CircleMode ? "◯ Klik de rand van de cirkel, of typ de straal + Enter. Esc breekt af."
-            : "╱ Klik op een andere rand van het vlak, of typ een lengte + Enter. Esc breekt af.";
+        StatusText.Text = RectMode ? T("▭ Klik de andere hoek, of typ breedte;hoogte + Enter. Esc breekt af.", "▭ Click the other corner, or type width;height + Enter. Esc cancels.")
+            : CircleMode ? T("◯ Klik de rand van de cirkel, of typ de straal + Enter. Esc breekt af.", "◯ Click the edge of the circle, or type the radius + Enter. Esc cancels.")
+            : T("╱ Klik op een andere rand van het vlak, of typ een lengte + Enter. Esc breekt af.", "╱ Click another edge of the face, or type a length + Enter. Esc cancels.");
         ShowSketch([at], n);
-        if (LineMode) { _linePts.Add(at); StatusText.Text = "╱ Klik het volgende punt. Sluit op het beginpunt voor een vlak, of eindig op een rand om het vlak te delen. Typ een lengte + Enter. Esc: klaar."; }
+        if (LineMode) { _linePts.Add(at); StatusText.Text = T("╱ Klik het volgende punt. Sluit op het beginpunt voor een vlak, of eindig op een rand om het vlak te delen. Typ een lengte + Enter. Esc: klaar.", "╱ Click the next point. Close on the start point for a face, or end on an edge to divide the face. Type a length + Enter. Esc: done."); }
     }
 
     /// <summary>The rectangle from the first corner to <paramref name="end"/>: its corners, and its width and height along
@@ -873,7 +909,7 @@ public partial class MainWindow : Window
     /// across when that is near; a point on an edge or a guide line; else the point itself. With what it is, its colour
     /// and whether it lies on the face's outer edge.
     /// </summary>
-    private (Vec3 P, string? Kind, Color? Color, bool OnEdge) LineCandidate(FaceRef f, Vec3 p, Point pos)
+    private (Vec3 P, string? Label, Color? Color, bool OnEdge) LineCandidate(FaceRef f, Vec3 p, Point pos)
     {
         var body = _doc!.Bodies[f.Body];
         var face = body.Faces[f.Face];
@@ -884,25 +920,25 @@ public partial class MainWindow : Window
         // the edges to line up with: of the face the line is on, and of the face under the mouse (in the same plane)
         var lineUp = new List<int> { f.Face };
         if (FaceAt(pos) is { } under && under.Face.Body == f.Body && under.Face.Face != f.Face && plane.Contains(under.Face.Face)) lineUp.Add(under.Face.Face);
-        if (_linePts.Count >= 3 && (Screen(_linePts[0]) - pos).Length < 12) return (_linePts[0], "beginpunt: de vorm sluiten", null, false);
+        if (_linePts.Count >= 3 && (Screen(_linePts[0]) - pos).Length < 12) return (_linePts[0], Snap.CloseShape.Name(), null, false);
         var es = EdgeSnap(f, p, pos);
-        if (es is { Kind: "middelpunt" or "eindpunt van een losse lijn" or "midden van een losse lijn" } pc) return (pc.Point, pc.Kind, null, OnEdge(pc.Point));
-        if (es is { Kind: "eindpunt" or "midden" or "snijpunt met de hulplijn" } pe) return (pe.Point, pe.Kind, null, true);
-        if (GuideSnap(p, pos, n, o) is { Kind: "snijpunt met de hulplijn" } gx) return (gx.Point, gx.Kind, null, OnEdge(gx.Point));
+        if (es is { Kind: Snap.Centre or Snap.LooseEnd or Snap.LooseMiddle } pc) return (pc.Point, pc.Kind.Name(), null, OnEdge(pc.Point));
+        if (es is { Kind: Snap.Endpoint or Snap.Midpoint or Snap.GuideCrossing } pe) return (pe.Point, pe.Kind.Name(), null, true);
+        if (GuideSnap(p, pos, n, o) is { Kind: Snap.GuideCrossing } gx) return (gx.Point, gx.Kind.Name(), null, OnEdge(gx.Point));
         if (_linePts.Count > 0)
         {
             var last = _linePts[^1];
             var d = p - last;
             var dirs = new List<(Vec3 Dir, string Name, Color Color)>();
-            if (_lineAxis is int held) { if (Math.Abs(Axes[held].Dir.Dot(n)) < 1e-6) dirs.Add((Axes[held].Dir, "langs de " + Axes[held].Name, Axes[held].Color)); }
+            if (_lineAxis is int held) { if (Math.Abs(Axes[held].Dir.Dot(n)) < 1e-6) dirs.Add((Axes[held].Dir, T("langs de ", "along the ") + Axes[held].Name, Axes[held].Color)); }
             else
             {
-                foreach (var ax in Axes.Where(a => Math.Abs(a.Dir.Dot(n)) < 1e-6)) dirs.Add((ax.Dir, "langs de " + ax.Name, ax.Color));
+                foreach (var ax in Axes.Where(a => Math.Abs(a.Dir.Dot(n)) < 1e-6)) dirs.Add((ax.Dir, T("langs de ", "along the ") + ax.Name, ax.Color));
                 foreach (var e in lineUp.SelectMany(lf => body.Faces[lf].Loops).SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Curve is BrepLine && e.Start >= 0))
                 {
                     var ed = (body.Vertices[e.End] - body.Vertices[e.Start]).Normalized();
-                    dirs.Add((ed, "evenwijdig aan een rand", InferColor));
-                    dirs.Add((n.Cross(ed), "loodrecht op een rand", InferColor));
+                    dirs.Add((ed, T("evenwijdig aan een rand", "parallel to an edge"), InferColor));
+                    dirs.Add((n.Cross(ed), T("loodrecht op een rand", "square to an edge"), InferColor));
                 }
             }
             if (d.Length > 1e-9)
@@ -915,12 +951,12 @@ public partial class MainWindow : Window
                     // on to the edge across, when the mouse is near it, or when the rounded length is within a rounding step of it
                     if (PushPullMe.Core.Drawing.RayToEdges(body, plane, last, sdir) is { } across
                         && ((Screen(across) - pos).Length < 15 || Math.Abs((q - last).Length - (across - last).Length) < 0.06 / Display))
-                        return (across, name + ", tot de rand", color, true);
+                        return (across, name + T(", tot de rand", ", to the edge"), color, true);
                     return (q, name, color, OnEdge(q));
                 }
         }
-        if (es is { } on) return (on.Point, on.Kind, null, on.Kind != "op een losse lijn" || OnEdge(on.Point));
-        if (GuideSnap(p, pos, n, o) is { } g) return (g.Point, g.Kind, null, OnEdge(g.Point));
+        if (es is { } on) return (on.Point, on.Kind.Name(), null, on.Kind != Snap.OnLoose || OnEdge(on.Point));
+        if (GuideSnap(p, pos, n, o) is { } g) return (g.Point, g.Kind.Name(), null, OnEdge(g.Point));
         return (p, null, null, OnEdge(p));
     }
 
@@ -964,7 +1000,7 @@ public partial class MainWindow : Window
         ShowSketch(shown, n, color: c.Color);
         double len = (c.P - _linePts[^1]).Length;
         MeasureBox.Text = Mm(len);
-        StatusText.Text = $"╱ {Mm(len)} mm{(c.Kind != null ? " · " + c.Kind : "")} · klik voor het volgende punt, of typ een lengte + Enter. Esc: klaar.";
+        StatusText.Text = T($"╱ {Mm(len)} mm{(c.Label != null ? " · " + c.Label : "")} · klik voor het volgende punt, of typ een lengte + Enter. Esc: klaar.", $"╱ {Mm(len)} mm{(c.Label != null ? " · " + c.Label : "")} · click for the next point, or type a length + Enter. Esc: done.");
     }
 
     /// <summary>
@@ -994,7 +1030,7 @@ public partial class MainWindow : Window
             _linePts.Add(c);
             Render();
             ShowSketch([c], NormalOf(f));
-            StatusText.Text = $"╱ {_chainLines.Count} {(_chainLines.Count == 1 ? "lijn" : "lijnen")} · klik het volgende punt. Sluit op het beginpunt voor een vlak, of eindig op een rand om het vlak te delen. Esc: klaar.";
+            StatusText.Text = T($"╱ {_chainLines.Count} {(_chainLines.Count == 1 ? "lijn" : "lijnen")} · klik het volgende punt. Sluit op het beginpunt voor een vlak, of eindig op een rand om het vlak te delen. Esc: klaar.", $"╱ {_chainLines.Count} {(_chainLines.Count == 1 ? "line" : "lines")} · click the next point. Close on the start point for a face, or end on an edge to divide the face. Esc: done.");
             Log(string.Create(CultureInfo.InvariantCulture, $"loose line ({seg.Start.X * Display:0.####},{seg.Start.Y * Display:0.####},{seg.Start.Z * Display:0.####}) → ({c.X * Display:0.####},{c.Y * Display:0.####},{c.Z * Display:0.####})"));
             return;
         }
@@ -1006,14 +1042,14 @@ public partial class MainWindow : Window
             Commit(before, doc);
             _last = null; _selected = nf; _lastDrawn = nf;
             Render();
-            StatusText.Text = closed ? "✅ Vlak getekend. Kies ⇕ (P) om het eruit te trekken of in te duwen."
-                : "✅ Het vlak is gedeeld. Teken verder vanaf hier, of Esc (en ⇕ P om een deel te verschuiven).";
+            StatusText.Text = closed ? T("✅ Vlak getekend. Kies ⇕ (P) om het eruit te trekken of in te duwen.", "✅ Face drawn. Choose ⇕ (P) to pull it out or push it in.")
+                : T("✅ Het vlak is gedeeld. Teken verder vanaf hier, of Esc (en ⇕ P om een deel te verschuiven).", "✅ The face is divided. Draw on from here, or Esc (and ⇕ P to move a part).");
             if (!closed)
             {
                 // as SketchUp: the line goes on from where it ended (on the same plane; f keeps its number)
                 _drawFace = f; _drawStart = c; _drawEnd = c; _drawEndOk = false; _typed = "";
                 _linePts.Add(c);
-                MeasureLabel.Text = "Lengte";
+                MeasureLabel.Text = T("Lengte", "Length");
                 ShowSketch(_linePts, NormalOf(f));
             }
             Log($"path on face {f.Face} ({string.Join(") (", pts.Select(q => string.Create(CultureInfo.InvariantCulture, $"{q.X * Display:0.####},{q.Y * Display:0.####},{q.Z * Display:0.####}")))}): ok, new face {nf.Face}");
@@ -1029,7 +1065,7 @@ public partial class MainWindow : Window
             if (!closed) { _chainLines.Add(seg); _linePts.Add(c); }
             Render();
             if (!closed) ShowSketch([c], NormalOf(f));
-            StatusText.Text = $"╱ Geen vlak geworden ({ex.Message.TrimEnd('.')}); de lijnen blijven staan." + (closed ? "" : " Klik het volgende punt, of Esc: klaar.");
+            StatusText.Text = T($"╱ Geen vlak geworden ({ex.Message.TrimEnd('.')}); de lijnen blijven staan.", $"╱ No face came of it ({ex.Message.TrimEnd('.')}); the lines stay.") + (closed ? "" : T(" Klik het volgende punt, of Esc: klaar.", " Click the next point, or Esc: done."));
             Log($"path on face {f.Face} ({string.Join(") (", pts.Select(q => string.Create(CultureInfo.InvariantCulture, $"{q.X * Display:0.####},{q.Y * Display:0.####},{q.Z * Display:0.####}")))}): {ex.Message}");
         }
     }
@@ -1051,10 +1087,10 @@ public partial class MainWindow : Window
         {
             _drawFace = f; _drawStart = c; _drawEnd = c; _drawEndOk = false; _typed = "";
             _linePts.Add(c);
-            MeasureLabel.Text = "Lengte";
+            MeasureLabel.Text = T("Lengte", "Length");
             ShowSketch([c], NormalOf(f));
         }
-        StatusText.Text = $"✅ Met de lijnen die er al lagen {(made.Count == 1 ? "is een vlak" : $"zijn {made.Count} vlakken")} gesloten." + (end ? "" : " Teken verder vanaf hier, of Esc.");
+        StatusText.Text = T($"✅ Met de lijnen die er al lagen {(made.Count == 1 ? "is een vlak" : $"zijn {made.Count} vlakken")} gesloten.", $"✅ With the lines already there {(made.Count == 1 ? "a face is" : $"{made.Count} faces are")} closed.") + (end ? "" : T(" Teken verder vanaf hier, of Esc.", " Draw on from here, or Esc."));
         Log($"loose lines closed on face {f.Face}: {made.Count} new face(s), {doc.Lines.Count} loose left");
         return true;
     }
@@ -1091,11 +1127,11 @@ public partial class MainWindow : Window
         if (CircleMode)
         {
             // the radius, after the centre is clicked
-            if (_drawFace is not { } cf) { StatusText.Text = "◯ Klik eerst het middelpunt, en typ dan de straal."; return; }
-            if (parts.Length != 1 || a <= 0) { StatusText.Text = "◯ Typ de straal in mm + Enter."; return; }
+            if (_drawFace is not { } cf) { StatusText.Text = T("◯ Klik eerst het middelpunt, en typ dan de straal.", "◯ Click the centre first, then type the radius."); return; }
+            if (parts.Length != 1 || a <= 0) { StatusText.Text = T("◯ Typ de straal in mm + Enter.", "◯ Type the radius in mm + Enter."); return; }
             var (cs, cu) = (_drawStart, _drawU);
             EndDraw();
-            DrawShape(_doc!, cf, cs, cs + cu * (a / Display), cu, "circle");
+            DrawShape(_doc!, cf, cs, cs + cu * (a / Display), cu, DrawKind.Circle);
             return;
         }
         if (_drawFace is not { } f)
@@ -1105,51 +1141,54 @@ public partial class MainWindow : Window
             var n = NormalOf(dh.Face);
             if (RectMode)
             {
-                if (!two || a < 0 || b < 0) { StatusText.Text = "▭ Typ x;y in mm, bijvoorbeeld 10;5, en Enter."; return; }
+                if (!two || a < 0 || b < 0) { StatusText.Text = T("▭ Typ x;y in mm, bijvoorbeeld 10;5, en Enter.", "▭ Type x;y in mm, for example 10;5, and Enter."); return; }
                 var c = PushPullMe.Core.Drawing.NearestCorner(body, dh.Face.Face, dh.Point);
                 var u = RectAxis(n); var v = n.Cross(u);
                 // into the face, whichever way that is from the corner
                 var start = new[] { (1, 1), (-1, 1), (1, -1), (-1, -1) }
                     .Select(sg => c + u * (sg.Item1 * a / Display) + v * (sg.Item2 * b / Display))
                     .Cast<Vec3?>().FirstOrDefault(pt => PushPullMe.Core.Drawing.Contains(body, dh.Face.Face, pt!.Value));
-                if (start is not { } st) { StatusText.Text = "▭ Zo ver van de hoek ligt geen punt van dit vlak."; return; }
+                if (start is not { } st) { StatusText.Text = T("▭ Zo ver van de hoek ligt geen punt van dit vlak.", "▭ No point of this face lies that far from the corner."); return; }
                 StartDraw(dh.Face, st, null);
-                StatusText.Text = $"▭ Eerste hoek op {typed} mm van de hoek. Klik de andere hoek, of typ breedte;hoogte + Enter.";
+                StatusText.Text = T($"▭ Eerste hoek op {typed} mm van de hoek. Klik de andere hoek, of typ breedte;hoogte + Enter.", $"▭ First corner {typed} mm from the corner. Click the other corner, or type width;height + Enter.");
                 return;
             }
             if (PushPullMe.Core.Drawing.EdgeAt(body, dh.Face.Face, dh.Point) is not { } edge || parts.Length != 1 || a <= 0)
-            { StatusText.Text = "╱ Wijs een rand aan en typ een afstand in mm + Enter."; return; }
+            { StatusText.Text = T("╱ Wijs een rand aan en typ een afstand in mm + Enter.", "╱ Point at an edge and type a distance in mm + Enter."); return; }
             var along = edge.Other - edge.Corner;
-            if (a / Display >= along.Length) { StatusText.Text = $"╱ Deze rand is maar {Mm(along.Length)} mm lang."; return; }
+            if (a / Display >= along.Length) { StatusText.Text = T($"╱ Deze rand is maar {Mm(along.Length)} mm lang.", $"╱ This edge is only {Mm(along.Length)} mm long."); return; }
             StartDraw(dh.Face, edge.Corner + along.Normalized() * (a / Display), null);
-            StatusText.Text = $"╱ Lijn begint {typed} mm van de hoek. Klik op een andere rand, of typ een lengte + Enter.";
+            StatusText.Text = T($"╱ Lijn begint {typed} mm van de hoek. Klik op een andere rand, of typ een lengte + Enter.", $"╱ The line starts {typed} mm from the corner. Click another edge, or type a length + Enter.");
             return;
         }
         if (RectMode)
         {
-            if (!two || a <= 0 || b <= 0) { StatusText.Text = "▭ Typ breedte;hoogte in mm, bijvoorbeeld 30;20, en Enter."; return; }
+            if (!two || a <= 0 || b <= 0) { StatusText.Text = T("▭ Typ breedte;hoogte in mm, bijvoorbeeld 30;20, en Enter.", "▭ Type width;height in mm, for example 30;20, and Enter."); return; }
             // in the directions the mouse is pulling the rectangle
             var (_, cw, ch) = Rect(_drawEnd);
             var c = _drawStart + _drawU * (a / Display * (cw < 0 ? -1 : 1)) + NormalOf(f).Cross(_drawU) * (b / Display * (ch < 0 ? -1 : 1));
             var (st, u) = (_drawStart, _drawU);
             EndDraw();
-            DrawShape(_doc!, f, st, c, u, "rect");
+            DrawShape(_doc!, f, st, c, u, DrawKind.Rectangle);
             return;
         }
-        if (parts.Length != 1 || a <= 0) { StatusText.Text = "╱ Typ een lengte in mm + Enter."; return; }
+        if (parts.Length != 1 || a <= 0) { StatusText.Text = T("╱ Typ een lengte in mm + Enter.", "╱ Type a length in mm + Enter."); return; }
         // along the way the line is going now (the axis held, or towards the point under the mouse)
         var lastPt = _linePts[^1];
         var dirTyped = _lineAxis is int la ? Axes[la].Dir * ((_drawEnd - lastPt).Dot(Axes[la].Dir) < 0 ? -1 : 1) : (_drawEnd - lastPt);
-        if (dirTyped.Length < 1e-9) { StatusText.Text = "╱ Beweeg de muis eerst in de richting van de lijn."; return; }
+        if (dirTyped.Length < 1e-9) { StatusText.Text = T("╱ Beweeg de muis eerst in de richting van de lijn.", "╱ Move the mouse in the direction of the line first."); return; }
         AddLinePoint(lastPt + dirTyped.Normalized() * (a / Display));
     }
 
     /// <summary>What is being drawn: "rect", "line" or "circle".</summary>
-    private string Kind => RectMode ? "rect" : CircleMode ? "circle" : "line";
+    private DrawKind Kind => RectMode ? DrawKind.Rectangle : CircleMode ? DrawKind.Circle : DrawKind.Line;
+
+    /// <summary>What ▭, ╱ and ◯ draw.</summary>
+    private enum DrawKind { Rectangle, Line, Circle }
 
     /// <summary>A rectangle (corners a and c, first side along u), a line (a to c) or a circle (centre a, through c)
     /// drawn on face f of <paramref name="before"/>.</summary>
-    private void DrawShape(SketchDocument before, FaceRef f, Vec3 a, Vec3 c, Vec3 u, string kind)
+    private void DrawShape(SketchDocument before, FaceRef f, Vec3 a, Vec3 c, Vec3 u, DrawKind kind)
     {
         static string P(Vec3 v) => string.Create(CultureInfo.InvariantCulture, $"{v.X * Display:0.####},{v.Y * Display:0.####},{v.Z * Display:0.####}");
         string where = $"{kind} on face {f.Face} ({P(a)}) ({P(c)})";
@@ -1157,8 +1196,8 @@ public partial class MainWindow : Window
         {
             var (doc, nf) = kind switch
             {
-                "rect" => before.DrawRectangle(f, a, c, u),
-                "circle" => before.DrawCircle(f, a, (c - a).Length),
+                DrawKind.Rectangle => before.DrawRectangle(f, a, c, u),
+                DrawKind.Circle => before.DrawCircle(f, a, (c - a).Length),
                 _ => before.DrawLine(f, a, c),
             };
             Commit(before, doc);
@@ -1166,16 +1205,16 @@ public partial class MainWindow : Window
             Render();
             StatusText.Text = kind switch
             {
-                "rect" => "✅ Rechthoek getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.",
-                "circle" => $"✅ Cirkel getekend (straal {Mm((c - a).Length)} mm). Kies ⇕ (P): eruit trekken geeft een staaf, tot de achterkant duwen een gat.",
-                _ => "✅ Het vlak is in tweeën gedeeld. Kies ⇕ (P) om een deel te verschuiven.",
+                DrawKind.Rectangle => T("✅ Rechthoek getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.", "✅ Rectangle drawn. Choose ⇕ (P) to pull it out or push it in."),
+                DrawKind.Circle => T($"✅ Cirkel getekend (straal {Mm((c - a).Length)} mm). Kies ⇕ (P): eruit trekken geeft een staaf, tot de achterkant duwen een gat.", $"✅ Circle drawn (radius {Mm((c - a).Length)} mm). Choose ⇕ (P): pulling it out gives a rod, pushing it through to the back a hole."),
+                _ => T("✅ Het vlak is in tweeën gedeeld. Kies ⇕ (P) om een deel te verschuiven.", "✅ The face is divided in two. Choose ⇕ (P) to move a part."),
             };
             Log($"{where}: ok, new face {nf.Face}");
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log($"{where}: {ex.Message}");
         }
@@ -1186,7 +1225,7 @@ public partial class MainWindow : Window
         _drawFace = null; _drawEndOk = false; _drawEdgeDir = null;
         _linePts.Clear(); _lineAxis = null; _chainLines.Clear();
         ShowSketch([]);
-        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
+        MeasureLabel.Text = T("Afstand", "Distance"); MeasureUnit.Text = "mm";
     }
 
     /// <summary>
@@ -1238,7 +1277,7 @@ public partial class MainWindow : Window
     private static readonly Color AxisX = Color.FromRgb(0xE1, 0x1D, 0x48), AxisY = Color.FromRgb(0x16, 0xA3, 0x4A), AxisZ = Color.FromRgb(0x25, 0x63, 0xEB);
     private static readonly (Vec3 Dir, string Name, Color Color)[] Axes =
     [
-        (new Vec3(1, 0, 0), "rode as", AxisX), (new Vec3(0, 1, 0), "groene as", AxisY), (new Vec3(0, 0, 1), "blauwe as", AxisZ),
+        (new Vec3(1, 0, 0), T("rode as", "red axis"), AxisX), (new Vec3(0, 1, 0), T("groene as", "green axis"), AxisY), (new Vec3(0, 0, 1), T("blauwe as", "blue axis"), AxisZ),
     ];
 
     // a move in progress: what is picked up (body, selection, a word for it), where it was grabbed, the document it
@@ -1263,25 +1302,25 @@ public partial class MainWindow : Window
     {
         if (hit is not { } h || _doc == null) return null;
         // Ctrl: a copy of the whole body (as SketchUp's Move with Ctrl); Shift: the whole body
-        if ((Mods & ModifierKeys.Control) != 0) return (h.Face.Body, MoveSelection.Copy(), "lichaam (als kopie)", V(h.Point));
-        if ((Mods & ModifierKeys.Shift) != 0) return (h.Face.Body, MoveSelection.WholeBody(), "lichaam", V(h.Point));
+        if ((Mods & ModifierKeys.Control) != 0) return (h.Face.Body, MoveSelection.Copy(), T("lichaam (als kopie)", "body (as a copy)"), V(h.Point));
+        if ((Mods & ModifierKeys.Shift) != 0) return (h.Face.Body, MoveSelection.WholeBody(), T("lichaam", "body"), V(h.Point));
         // (a face of the choice, with more chosen: all of them together)
         if (_multi is { } mm && mm.Body == h.Face.Body && mm.Faces.Count > 1 && mm.Faces.Contains(h.Face.Face))
-            return (mm.Body, new MoveSelection(mm.Faces.ToList(), [], []), $"geheel van {mm.Faces.Count} vlakken", V(h.Point));
+            return (mm.Body, new MoveSelection(mm.Faces.ToList(), [], []), T($"geheel van {mm.Faces.Count} vlakken", $"group of {mm.Faces.Count} faces"), V(h.Point));
         var body = _doc.Bodies[h.Face.Body];
         Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
         var corners = body.Faces[h.Face.Face].Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0)
             .SelectMany(e => new[] { e.Start, e.End }).Distinct()
             .Select(v => (V: v, Px: (Screen(body.Vertices[v]) - pos).Length)).Where(x => x.Px < 10).OrderBy(x => x.Px).ToList();
-        if (corners.Count > 0) return (h.Face.Body, MoveSelection.Vertex(corners[0].V), "hoekpunt", body.Vertices[corners[0].V]);
+        if (corners.Count > 0) return (h.Face.Body, MoveSelection.Vertex(corners[0].V), T("hoekpunt", "vertex"), body.Vertices[corners[0].V]);
         if (EdgeAt(hit, pos) is { } e && ScreenDistanceToEdge(body, e.Edge, pos) < 8)
         {
             var ed = body.Edges[e.Edge];
             var pts = FaceGeometry.EdgePoints(body, ed);
             var grab = pts.MinBy(p => (Screen(p) - pos).Length);
-            return (e.Body, MoveSelection.Edge(e.Edge), "rand", grab);
+            return (e.Body, MoveSelection.Edge(e.Edge), T("rand", "edge"), grab);
         }
-        return (h.Face.Body, MoveSelection.Face(h.Face.Face), "vlak", V(h.Point));
+        return (h.Face.Body, MoveSelection.Face(h.Face.Face), T("vlak", "face"), V(h.Point));
     }
 
     private double ScreenDistanceToEdge(BrepBody body, int edge, Point pos)
@@ -1308,10 +1347,10 @@ public partial class MainWindow : Window
 
     private void HoverMove((FaceRef Face, Point3D Point)? hit, Point pos)
     {
-        if (MovePickAt(hit, pos) is not { } p) { ShowSketch([]); StatusText.Text = "✥ Wijs een hoekpunt, rand of vlak aan om te verplaatsen."; return; }
+        if (MovePickAt(hit, pos) is not { } p) { ShowSketch([]); StatusText.Text = T("✥ Wijs een hoekpunt, rand of vlak aan om te verplaatsen.", "✥ Point at a vertex, edge or face to move."); return; }
         if (p.Pick.Faces.Count == 0 && _hover != null) { _hover = null; UpdateHighlight(); }
         ShowPick(p.Body, p.Pick, p.Grab);
-        StatusText.Text = $"✥ Klik om dit {p.What} op te pakken.{(p.Pick.Whole == MoveWhole.None ? " Shift: het hele lichaam · Ctrl: een kopie." : "")}";
+        StatusText.Text = T($"✥ Klik om dit {p.What} op te pakken.{(p.Pick.Whole == MoveWhole.None ? " Shift: het hele lichaam · Ctrl: een kopie." : "")}", $"✥ Click to pick up this {p.What}.{(p.Pick.Whole == MoveWhole.None ? " Shift: the whole body · Ctrl: a copy." : "")}");
     }
 
     private void StartMove((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -1321,8 +1360,8 @@ public partial class MainWindow : Window
         _moveOffset = default; _moveValid = false; _typed = ""; _last = null; _lastMove = null; _selected = null;
         if (p.Pick.Faces.Count > 0) _hover = new FaceRef(p.Body, p.Pick.Faces.First());
         UpdateHighlight();
-        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm"; MeasureBox.Text = "0";
-        StatusText.Text = $"✥ Beweeg om het {p.What} te verplaatsen; klik om neer te zetten, of typ de afstand + Enter. Pijltjes: rood, groen, blauw. Esc breekt af.";
+        MeasureLabel.Text = T("Afstand", "Distance"); MeasureUnit.Text = "mm"; MeasureBox.Text = "0";
+        StatusText.Text = T($"✥ Beweeg om het {p.What} te verplaatsen; klik om neer te zetten, of typ de afstand + Enter. Pijltjes: rood, groen, blauw. Esc breekt af.", $"✥ Move to shift the {p.What}; click to put it down, or type the distance + Enter. Arrow keys: red, green, blue. Esc cancels.");
     }
 
     private void EndMove()
@@ -1359,8 +1398,8 @@ public partial class MainWindow : Window
                     double px = (Screen(v) - pos).Length;
                     if (px < 12 && (near == null || px < near.Value.Px)) near = (v, px);
                 }
-            if (near is { } nv) return (nv.V - _moveGrab, "naar dit punt", null);
-            if (GuideCrossingNear(pos) is { } gc) return (gc - _moveGrab, "naar het snijpunt met de hulplijn", null);
+            if (near is { } nv) return (nv.V - _moveGrab, T("naar dit punt", "to this point"), null);
+            if (GuideCrossingNear(pos) is { } gc) return (gc - _moveGrab, T("naar het snijpunt met de hulplijn", "to the intersection with the guide line"), null);
         }
         // the point on the line through the grab point along a direction nearest to the mouse ray
         Vec3? OnLine(Vec3 d)
@@ -1413,7 +1452,7 @@ public partial class MainWindow : Window
             var (doc, _) = _moveBase.Move(mp.Body, mp.Pick, offset, checkCrossing: false);
             _moveValid = true;
             Render(doc);
-            StatusText.Text = $"✥ {Mm(offset.Length)} mm{(axis is int ax ? " langs de " + Axes[ax].Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · klik om neer te zetten, of typ de afstand + Enter. Esc breekt af.";
+            StatusText.Text = T($"✥ {Mm(offset.Length)} mm{(axis is int ax ? " langs de " + Axes[ax].Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · klik om neer te zetten, of typ de afstand + Enter. Esc breekt af.", $"✥ {Mm(offset.Length)} mm{(axis is int ax2 ? " along the " + Axes[ax2].Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · click to put it down, or type the distance + Enter. Esc cancels.");
         }
         catch (PushPullException ex) { _moveValid = false; StatusText.Text = "⛔ " + ex.Message; }
     }
@@ -1442,13 +1481,13 @@ public partial class MainWindow : Window
             _last = null; _selected = null;
             Render();
             MeasureBox.Text = Mm(offset.Length);
-            StatusText.Text = $"✅ {(pick.Whole == MoveWhole.Copy ? "Gekopieerd" : "Verplaatst")}: {Mm(offset.Length)} mm. Typ een andere afstand + Enter om het aan te passen.";
+            StatusText.Text = T($"✅ {(pick.Whole == MoveWhole.Copy ? "Gekopieerd" : "Verplaatst")}: {Mm(offset.Length)} mm. Typ een andere afstand + Enter om het aan te passen.", $"✅ {(pick.Whole == MoveWhole.Copy ? "Copied" : "Moved")}: {Mm(offset.Length)} mm. Type another distance + Enter to change it.");
             Log($"move {what} of body {body} by ({off}) mm: ok, {doc.Bodies[body].Faces.Count} faces");
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log($"move {what} of body {body} by ({off}) mm: {ex.Message}");
         }
@@ -1489,10 +1528,10 @@ public partial class MainWindow : Window
     /// where guide lines meet each other or an edge of a face in that plane (within 12 pixels), else the nearest point on
     /// a guide line in that plane (within 8 pixels); with what it is.
     /// </summary>
-    private (Vec3 Point, string Kind)? GuideSnap(Vec3 p, Point pos, Vec3 n, Vec3 o)
+    private (Vec3 Point, Snap Kind)? GuideSnap(Vec3 p, Point pos, Vec3 n, Vec3 o)
     {
         if (_doc == null) return null;
-        if (CentreSnap(n, o, pos) is { } cs) return (cs, "middelpunt");
+        if (CentreSnap(n, o, pos) is { } cs) return (cs, Snap.Centre);
         if (_guides.Count == 0) return null;
         Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
         var inPlane = _guides.Where(g => Guides.InPlane(g, o, n)).ToList();
@@ -1508,9 +1547,9 @@ public partial class MainWindow : Window
                 foreach (var g in inPlane) if (Guides.MeetSegment(g, a, c) is { } m) crossings.Add(m);
             }
         var best = crossings.Select(q => (Q: q, Px: (Screen(q) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
-        if (best.Count > 0) return (best[0].Q, "snijpunt met de hulplijn");
+        if (best.Count > 0) return (best[0].Q, Snap.GuideCrossing);
         var on = inPlane.Select(g => Guides.Closest(g, p)).Select(q => (Q: q, Px: (Screen(q) - pos).Length)).Where(x => x.Px < 8).OrderBy(x => x.Px).ToList();
-        return on.Count > 0 ? (on[0].Q, "op de hulplijn") : null;
+        return on.Count > 0 ? (on[0].Q, Snap.OnGuide) : null;
     }
 
     // ------------------------------------------------------------------ loose lines
@@ -1568,13 +1607,13 @@ public partial class MainWindow : Window
 
     /// <summary>A point of a loose line in the plane through o with normal n near the mouse: its end or middle (within 12
     /// pixels), else the nearest point on it (within 20 pixels); with what it is.</summary>
-    private (Vec3 Point, string Kind)? LooseSnap(Vec3 n, Vec3 o, Vec3 at, Point pos)
+    private (Vec3 Point, Snap Kind)? LooseSnap(Vec3 n, Vec3 o, Vec3 at, Point pos)
     {
         if (_doc == null || _doc.Lines.Count == 0) return null;
         Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
         bool InPlane(Vec3 q) => Math.Abs((q - o).Dot(n)) < 1e-7;
         var inPlane = _doc.Lines.Where(l => InPlane(l.Start) && InPlane(l.End)).ToList();
-        var key = inPlane.SelectMany(l => new[] { (P: l.Start, K: "eindpunt van een losse lijn"), (P: l.End, K: "eindpunt van een losse lijn"), (P: l.Middle, K: "midden van een losse lijn") })
+        var key = inPlane.SelectMany(l => new[] { (P: l.Start, K: Snap.LooseEnd), (P: l.End, K: Snap.LooseEnd), (P: l.Middle, K: Snap.LooseMiddle) })
             .Select(x => (x.P, x.K, Px: (Screen(x.P) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
         if (key.Count > 0) return (key[0].P, key[0].K);
         (Vec3 P, double Px)? best = null;
@@ -1589,7 +1628,7 @@ public partial class MainWindow : Window
                 if (px < 20 && (best == null || px < best.Value.Px)) best = (q, px);
             }
         }
-        return best is { } bp ? (bp.P, "op een losse lijn") : null;
+        return best is { } bp ? (bp.P, Snap.OnLoose) : null;
     }
 
     // ------------------------------------------------------------------ snap marks (as DesignSpark)
@@ -1627,7 +1666,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void UpdateMarks(Point pos)
     {
-        var marks = new List<(Vec3 P, char Kind)>();
+        var marks = new List<(Vec3 P, Mark Kind)>();
         if (_doc != null && _movePick == null && _dragFace == null && _lasso == null)
         {
             var faces = new List<FaceRef>();
@@ -1648,16 +1687,16 @@ public partial class MainWindow : Window
                 }
                 return d;
             }
-            (double D, List<(Vec3, char)> Marks)? best = null;
+            (double D, List<(Vec3, Mark)> Marks)? best = null;
             foreach (var (body, e) in faces.Distinct().SelectMany(f => _doc.Bodies[f.Body].Faces[f.Face].Loops.SelectMany(l => l)
                          .Select(c => (Body: _doc.Bodies[f.Body], E: _doc.Bodies[f.Body].Edges[c.Edge]))).Distinct())
             {
-                List<(Vec3, char)> m; double d;
+                List<(Vec3, Mark)> m; double d;
                 if (e.Curve is BrepLine && e.Start >= 0)
                 {
                     Vec3 a = body.Vertices[e.Start], b = body.Vertices[e.End];
                     d = Dist([a, b], false);
-                    m = [(a, '.'), (b, '.'), ((a + b) * 0.5, '^')];
+                    m = [(a, Mark.Dot), (b, Mark.Dot), ((a + b) * 0.5, Mark.Triangle)];
                 }
                 else if (e.Curve is BrepCircle c)
                 {
@@ -1665,7 +1704,7 @@ public partial class MainWindow : Window
                     var a = e.Start >= 0 ? body.Vertices[e.Start] : c.Centre + c.XAxis.Normalized() * c.Radius;
                     var b = e.Start >= 0 ? body.Vertices[e.End] : a;
                     d = Math.Min(Dist(PushPullMe.Core.Drawing.ArcPoints(c, a, b, 32), ring), (Screen(c.Centre) - pos).Length < 12 ? 0 : double.MaxValue);
-                    m = ring ? [(c.Centre, '+')] : [(a, '.'), (b, '.'), (c.Centre, '+')];
+                    m = ring ? [(c.Centre, Mark.Cross)] : [(a, Mark.Dot), (b, Mark.Dot), (c.Centre, Mark.Cross)];
                 }
                 else continue;
                 if (d < 8 && (best == null || d < best.Value.D)) best = (d, m);
@@ -1674,7 +1713,7 @@ public partial class MainWindow : Window
             {
                 double d = Dist(l.Points(), false);
                 if (l.Centre is { } lc && (Screen(lc) - pos).Length < 12) d = 0;
-                List<(Vec3, char)> m = l.Centre is { } c ? [(l.Start, '.'), (l.End, '.'), (c, '+')] : [(l.Start, '.'), (l.End, '.'), (l.Middle, '^')];
+                List<(Vec3, Mark)> m = l.Centre is { } c ? [(l.Start, Mark.Dot), (l.End, Mark.Dot), (c, Mark.Cross)] : [(l.Start, Mark.Dot), (l.End, Mark.Dot), (l.Middle, Mark.Triangle)];
                 if (d < 8 && (best == null || d < best.Value.D)) best = (d, m);
             }
             if (best is { } bm) marks.AddRange(bm.Marks);
@@ -1682,7 +1721,10 @@ public partial class MainWindow : Window
         ShowMarks(marks);
     }
 
-    private void ShowMarks(List<(Vec3 P, char Kind)> marks)
+    /// <summary>A snap mark: a dot on an end, a triangle on a middle, a cross on a centre.</summary>
+    private enum Mark { Dot, Triangle, Cross }
+
+    private void ShowMarks(List<(Vec3 P, Mark Kind)> marks)
     {
         if (_marks != null) { View.Children.Remove(_marks); _marks = null; }
         if (marks.Count == 0 || View.Camera is not ProjectionCamera cam) return;
@@ -1701,13 +1743,13 @@ public partial class MainWindow : Window
             void L(double x0, double y0, double x1, double y1) { lines.Add(q + right * (x0 * u) + up * (y0 * u)); lines.Add(q + right * (x1 * u) + up * (y1 * u)); }
             switch (kind)
             {
-                case '.': // a dot: a small filled square
+                case Mark.Dot: // a small filled square
                     for (double y = -2; y <= 2; y += 1) L(-2, y, 2, y);
                     break;
-                case '^': // a triangle
+                case Mark.Triangle:
                     L(-4, -3, 4, -3); L(4, -3, 0, 4); L(0, 4, -4, -3);
                     break;
-                default: // a cross
+                default: // Mark.Cross
                     L(-6, 0, 6, 0); L(0, -6, 0, 6);
                     break;
             }
@@ -1751,7 +1793,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>The point the tape points at: a corner close by (12 pixels), else where the mouse hits the model.</summary>
-    private (Vec3 Point, string? Kind)? TapePoint((FaceRef Face, Point3D Point)? hit, Point pos)
+    private (Vec3 Point, Snap? Kind)? TapePoint((FaceRef Face, Point3D Point)? hit, Point pos)
     {
         if (_doc == null) return null;
         Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
@@ -1762,7 +1804,7 @@ public partial class MainWindow : Window
                 double px = (Screen(v) - pos).Length;
                 if (px < 12 && (near == null || px < near.Value.Px)) near = (v, px);
             }
-        if (near is { } nv) return (nv.V, "hoekpunt");
+        if (near is { } nv) return (nv.V, Snap.Vertex);
         if (hit is not { } h) return null;
         var p = V(h.Point);
         var face = _doc.Bodies[h.Face.Body].Faces[h.Face.Face];
@@ -1771,7 +1813,7 @@ public partial class MainWindow : Window
     }
 
     private static string Measure(Vec3 d) =>
-        $"{Mm(d.Length)} mm (x {Mm(Math.Abs(d.X))} · y {Mm(Math.Abs(d.Y))} · z {Mm(Math.Abs(d.Z))})";
+        T($"{Mm(d.Length)} mm (x {Mm(Math.Abs(d.X))} · y {Mm(Math.Abs(d.Y))} · z {Mm(Math.Abs(d.Z))})", $"{Mm(d.Length)} mm (x {Mm(Math.Abs(d.X))} · y {Mm(Math.Abs(d.Y))} · z {Mm(Math.Abs(d.Z))})");
 
     private void HoverTape((FaceRef Face, Point3D Point)? hit, Point pos)
     {
@@ -1779,12 +1821,12 @@ public partial class MainWindow : Window
         if (MovePickAt(hit, pos) is { Pick.Edges.Count: > 0 } p && _doc!.Bodies[p.Body].Edges[p.Pick.Edges.First()] is { Curve: BrepLine } edge)
         {
             ShowSketch([_doc.Bodies[p.Body].Vertices[edge.Start], _doc.Bodies[p.Body].Vertices[edge.End]], default, color: SelectColor);
-            StatusText.Text = "📏 Klik om vanaf deze rand een hulplijn te trekken (evenwijdig eraan).";
+            StatusText.Text = T("📏 Klik om vanaf deze rand een hulplijn te trekken (evenwijdig eraan).", "📏 Click to pull a guide line off this edge (parallel to it).");
             return;
         }
         var tp = TapePoint(hit, pos);
         ShowSketch(tp is { } t ? [t.Point] : []);
-        StatusText.Text = tp is { Kind: { } k } ? $"📏 {k} · klik om vanaf hier te meten." : "📏 Klik een punt om te meten, of een rand voor een hulplijn. Delete: alle hulplijnen weg.";
+        StatusText.Text = tp is { Kind: { } k } ? T($"📏 {k.Name()} · klik om vanaf hier te meten.", $"📏 {k.Name()} · click to measure from here.") : T("📏 Klik een punt om te meten, of een rand voor een hulplijn. Delete: alle hulplijnen weg.", "📏 Click a point to measure, or an edge for a guide line. Delete: remove all guide lines.");
     }
 
     private void StartTape((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -1796,14 +1838,14 @@ public partial class MainWindow : Window
             var b = _doc.Bodies[p.Body];
             _tapeEdge = (b.Vertices[edge.Start], (b.Vertices[edge.End] - b.Vertices[edge.Start]).Normalized(), h.Face);
             _tapeStart = p.Grab; _tapeOffset = default;
-            MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
-            StatusText.Text = "📏 Trek de hulplijn van de rand af; klik om hem te plaatsen, of typ de afstand + Enter. Esc breekt af.";
+            MeasureLabel.Text = T("Afstand", "Distance"); MeasureUnit.Text = "mm";
+            StatusText.Text = T("📏 Trek de hulplijn van de rand af; klik om hem te plaatsen, of typ de afstand + Enter. Esc breekt af.", "📏 Pull the guide line off the edge; click to place it, or type the distance + Enter. Esc cancels.");
             return;
         }
         if (TapePoint(hit, pos) is not { } tp) return;
         _tapeStart = tp.Point; _tapeEdge = null;
-        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
-        StatusText.Text = "📏 Beweeg naar het punt om te meten en klik. Esc breekt af.";
+        MeasureLabel.Text = T("Afstand", "Distance"); MeasureUnit.Text = "mm";
+        StatusText.Text = T("📏 Beweeg naar het punt om te meten en klik. Esc breekt af.", "📏 Move to the point to measure and click. Esc cancels.");
     }
 
     private void TapeTo((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -1821,13 +1863,13 @@ public partial class MainWindow : Window
             double len = Math.Max(_modelSize, 10) * 1.5 / Display;
             ShowSketch([g.Point - g.Dir * len, g.Point + g.Dir * len], default, color: GuideColor);
             MeasureBox.Text = Mm(off.Length);
-            StatusText.Text = $"📏 Hulplijn op {Mm(off.Length)} mm van de rand · klik om hem te plaatsen, of typ de afstand + Enter. Esc breekt af.";
+            StatusText.Text = T($"📏 Hulplijn op {Mm(off.Length)} mm van de rand · klik om hem te plaatsen, of typ de afstand + Enter. Esc breekt af.", $"📏 Guide line {Mm(off.Length)} mm from the edge · click to place it, or type the distance + Enter. Esc cancels.");
             return;
         }
         if (TapePoint(hit, pos) is not { } tp) return;
         ShowSketch([start, tp.Point]);
         MeasureBox.Text = Mm((tp.Point - start).Length);
-        StatusText.Text = $"📏 {Measure(tp.Point - start)}{(tp.Kind != null ? " · 🎯 " + tp.Kind : "")} · klik om de maat vast te houden.";
+        StatusText.Text = T($"📏 {Measure(tp.Point - start)}{(tp.Kind is { } tk ? " · 🎯 " + tk.Name() : "")} · klik om de maat vast te houden.", $"📏 {Measure(tp.Point - start)}{(tp.Kind is { } tk2 ? " · 🎯 " + tk2.Name() : "")} · click to keep the measurement.");
     }
 
     private void FinishTape((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -1835,7 +1877,7 @@ public partial class MainWindow : Window
         if (_tapeStart is not { } start) return;
         if (_tapeEdge is { } te)
         {
-            if (_tapeOffset.Length < 1e-9) { StatusText.Text = "📏 Trek de hulplijn eerst een stukje van de rand af."; return; }
+            if (_tapeOffset.Length < 1e-9) { StatusText.Text = T("📏 Trek de hulplijn eerst een stukje van de rand af.", "📏 Pull the guide line a little way off the edge first."); return; }
             AddGuide(new Guide(te.A + _tapeOffset, te.Dir), _tapeOffset.Length);
             EndTape();
             return;
@@ -1844,7 +1886,7 @@ public partial class MainWindow : Window
         EndTape();
         ShowSketch([start, tp.Point]);
         MeasureBox.Text = Mm((tp.Point - start).Length);
-        StatusText.Text = $"📏 Gemeten: {Measure(tp.Point - start)}.";
+        StatusText.Text = T($"📏 Gemeten: {Measure(tp.Point - start)}.", $"📏 Measured: {Measure(tp.Point - start)}.");
         Log($"measured {Measure(tp.Point - start)}");
     }
 
@@ -1852,7 +1894,7 @@ public partial class MainWindow : Window
     private void TypedTape(double mm)
     {
         if (_tapeEdge is not { } te) return;
-        if (_tapeOffset.Length < 1e-12) { StatusText.Text = "📏 Trek eerst een stukje de kant op waar de hulplijn moet komen."; return; }
+        if (_tapeOffset.Length < 1e-12) { StatusText.Text = T("📏 Trek eerst een stukje de kant op waar de hulplijn moet komen.", "📏 First pull a little way towards where the guide line is to go."); return; }
         var off = _tapeOffset.Normalized() * (Math.Abs(mm) / Display);
         AddGuide(new Guide(te.A + off, te.Dir), off.Length);
         EndTape();
@@ -1864,7 +1906,7 @@ public partial class MainWindow : Window
         RenderGuides();
         ShowSketch([]);
         MeasureBox.Text = Mm(offset);
-        StatusText.Text = $"✅ Hulplijn op {Mm(offset)} mm. Rechthoek, cirkel, lijn en verplaatsen klikken erop vast.";
+        StatusText.Text = T($"✅ Hulplijn op {Mm(offset)} mm. Rechthoek, cirkel, lijn en verplaatsen klikken erop vast.", $"✅ Guide line at {Mm(offset)} mm. Rectangle, circle, line and move snap to it.");
         Log($"guide at {Mm(offset)} mm");
     }
 
@@ -1881,11 +1923,11 @@ public partial class MainWindow : Window
     /// <summary>The palette: name and colour (null: the standard colour, the paint taken off).</summary>
     private static readonly (string Name, uint? Color)[] Palette =
     [
-        ("standaard (geen kleur)", null),
-        ("wit", 0xFFF8FAFC), ("lichtgrijs", 0xFFCBD5E1), ("grijs", 0xFF64748B), ("antraciet", 0xFF1E293B), ("zwart", 0xFF0F172A),
-        ("rood", 0xFFE11D48), ("oranje", 0xFFF97316), ("geel", 0xFFFACC15), ("lichtgroen", 0xFF84CC16), ("groen", 0xFF16A34A),
-        ("turkoois", 0xFF14B8A6), ("lichtblauw", 0xFF38BDF8), ("blauw", 0xFF2563EB), ("paars", 0xFF7C3AED), ("roze", 0xFFEC4899),
-        ("bruin", 0xFF92400E), ("hout", 0xFFC8A27A),
+        (T("standaard (geen kleur)", "standard (no colour)"), null),
+        (T("wit", "white"), 0xFFF8FAFC), (T("lichtgrijs", "light grey"), 0xFFCBD5E1), (T("grijs", "grey"), 0xFF64748B), (T("antraciet", "anthracite"), 0xFF1E293B), (T("zwart", "black"), 0xFF0F172A),
+        (T("rood", "red"), 0xFFE11D48), (T("oranje", "orange"), 0xFFF97316), (T("geel", "yellow"), 0xFFFACC15), (T("lichtgroen", "light green"), 0xFF84CC16), (T("groen", "green"), 0xFF16A34A),
+        (T("turkoois", "turquoise"), 0xFF14B8A6), (T("lichtblauw", "light blue"), 0xFF38BDF8), (T("blauw", "blue"), 0xFF2563EB), (T("paars", "purple"), 0xFF7C3AED), (T("roze", "pink"), 0xFFEC4899),
+        (T("bruin", "brown"), 0xFF92400E), (T("hout", "wood"), 0xFFC8A27A),
     ];
 
     /// <summary>The colour the bucket holds (null: none, taking paint off).</summary>
@@ -1917,7 +1959,7 @@ public partial class MainWindow : Window
             sw.BorderBrush = Equals(sw.Tag, color) ? new SolidColorBrush(SelectColor) : new SolidColorBrush(Color.FromRgb(0xE2, 0xE8, 0xF0));
         PaintName.Text = Palette.First(p => p.Color == color).Name;
         if (EraserMode || !PaintMode) return;
-        StatusText.Text = $"🎨 Verf: {PaintName.Text}. Klik een vlak · Ctrl: het hele lichaam · Shift: alle vlakken in dezelfde kleur · Alt: kleur overnemen.";
+        StatusText.Text = T($"🎨 Verf: {PaintName.Text}. Klik een vlak · Ctrl: het hele lichaam · Shift: alle vlakken in dezelfde kleur · Alt: kleur overnemen.", $"🎨 Paint: {PaintName.Text}. Click a face · Ctrl: the whole body · Shift: all faces of the same colour · Alt: pick up a colour.");
     }
 
     /// <summary>The pipette (💧): the next click with the bucket takes up a colour (as Alt+click).</summary>
@@ -1927,7 +1969,7 @@ public partial class MainWindow : Window
     {
         PaintTool.IsChecked = true;
         _sampleOnce = true;
-        StatusText.Text = "💧 Pipet: klik een vlak om zijn kleur over te nemen.";
+        StatusText.Text = T("💧 Pipet: klik een vlak om zijn kleur over te nemen.", "💧 Eyedropper: click a face to pick up its colour.");
     }
 
     /// <summary>⛶: the whole model in view.</summary>
@@ -1943,7 +1985,7 @@ public partial class MainWindow : Window
         {
             _sampleOnce = false;
             SetPaint(before.ColorOf(h.Face));
-            StatusText.Text = $"🎨 Kleur overgenomen: {PaintName.Text}.";
+            StatusText.Text = T($"🎨 Kleur overgenomen: {PaintName.Text}.", $"🎨 Colour picked up: {PaintName.Text}.");
             return;
         }
         var body = before.Bodies[h.Face.Body];
@@ -1958,7 +2000,7 @@ public partial class MainWindow : Window
         Commit(before, doc);
         _last = null; _lastMove = null;
         Render();
-        StatusText.Text = $"✅ {(list.Count == 1 ? "Vlak" : $"{list.Count} vlakken")} geverfd: {PaintName.Text}.";
+        StatusText.Text = T($"✅ {(list.Count == 1 ? "Vlak" : $"{list.Count} vlakken")} geverfd: {PaintName.Text}.", $"✅ {(list.Count == 1 ? "Face" : $"{list.Count} faces")} painted: {PaintName.Text}.");
         Log($"paint {list.Count} face(s) of body {h.Face.Body} {(_paint is { } c ? $"#{c:X8}" : "none")}");
     }
 
@@ -1993,20 +2035,20 @@ public partial class MainWindow : Window
         {
             double len = Math.Max(_modelSize, 10) * 1.5 / Display;
             ShowSketch([_guides[gi].Point - _guides[gi].Dir * len, _guides[gi].Point + _guides[gi].Dir * len], default, color: EraseColor);
-            StatusText.Text = "⌫ Klik om deze hulplijn weg te halen.";
+            StatusText.Text = T("⌫ Klik om deze hulplijn weg te halen.", "⌫ Click to remove this guide line.");
             return;
         }
         if (LooseAt(pos) is int li)
         {
             ShowSketch(_doc!.Lines[li].Points(), default, color: EraseColor);
-            StatusText.Text = "⌫ Klik om deze losse lijn weg te halen.";
+            StatusText.Text = T("⌫ Klik om deze losse lijn weg te halen.", "⌫ Click to remove this loose line.");
             return;
         }
-        if (EdgeAt(hit, pos) is not { } e) { ShowSketch([]); StatusText.Text = "⌫ Wijs een getekende lijn, rechthoek of cirkel aan."; return; }
+        if (EdgeAt(hit, pos) is not { } e) { ShowSketch([]); StatusText.Text = T("⌫ Wijs een getekende lijn, rechthoek of cirkel aan.", "⌫ Point at a drawn line, rectangle or circle."); return; }
         var body = _doc!.Bodies[e.Body];
         var face = body.Faces[hit!.Value.Face.Face];
         ShowSketch(FaceGeometry.EdgePoints(body, body.Edges[e.Edge]), face.Surface is BrepPlane ? FaceGeometry.Normal(face) : default, color: EraseColor);
-        StatusText.Text = "⌫ Klik om deze rand te wissen.";
+        StatusText.Text = T("⌫ Klik om deze rand te wissen.", "⌫ Click to erase this edge.");
     }
 
     private void EraseAt((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -2017,7 +2059,7 @@ public partial class MainWindow : Window
             Commit(lbefore, lbefore.RemoveLines([lbefore.Lines[li]]));
             ShowSketch([]);
             Render();
-            StatusText.Text = "✅ Losse lijn weggehaald.";
+            StatusText.Text = T("✅ Losse lijn weggehaald.", "✅ Loose line removed.");
             Log($"loose line {li} erased");
             return;
         }
@@ -2029,7 +2071,7 @@ public partial class MainWindow : Window
             _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
             ShowSketch([]);
             Render();
-            StatusText.Text = "✅ Gewist: de vlakken zijn weer één.";
+            StatusText.Text = T("✅ Gewist: de vlakken zijn weer één.", "✅ Erased: the faces are one again.");
             Log($"erase edge {e.Edge} of body {e.Body}: ok, {doc.Bodies[e.Body].Faces.Count} faces");
         }
         catch (PushPullException ex)
@@ -2092,13 +2134,13 @@ public partial class MainWindow : Window
         _dragNormal = new Vector3D(n.X, n.Y, n.Z);
         _selected = null;
         _dragRadius = HasRadius(_doc, f);
-        MeasureLabel.Text = _dragRadius ? "Straal" : "Afstand";
+        MeasureLabel.Text = _dragRadius ? T("Straal", "Radius") : T("Afstand", "Distance");
         MeasureBox.Text = _dragRadius ? Mm(RadiusOf(_doc, f)) : "0";
         StatusText.Text = _dragRadius
-            ? $"⇕ {CylinderText(_doc, f)} · beweeg de muis om de straal te veranderen; klik om vast te zetten, of typ de straal + Enter. Esc breekt af."
+            ? T($"⇕ {CylinderText(_doc, f)} · beweeg de muis om de straal te veranderen; klik om vast te zetten, of typ de straal + Enter. Esc breekt af.", $"⇕ {CylinderText(_doc, f)} · move the mouse to change the radius; click to set it, or type the radius + Enter. Esc cancels.")
             : face.Surface is BrepCylinder
-            ? $"⇕ {CylinderText(_doc, f)} · beweeg de muis om de straal te veranderen; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af."
-            : "⇕ Beweeg de muis om het vlak te verschuiven; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.";
+            ? T($"⇕ {CylinderText(_doc, f)} · beweeg de muis om de straal te veranderen; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", $"⇕ {CylinderText(_doc, f)} · move the mouse to change the radius; click to set it, or type the distance + Enter. Esc cancels.")
+            : T("⇕ Beweeg de muis om het vlak te verschuiven; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", "⇕ Move the mouse to shift the face; click to set it, or type the distance + Enter. Esc cancels.");
     }
 
     private void EndDrag()
@@ -2147,7 +2189,7 @@ public partial class MainWindow : Window
                 }
                 catch (PushPullException) { }
             foreach (double depth in _through)
-                if (Math.Abs(m + depth) < Math.Max(0.4, 0.03 * depth)) { mm = -depth; flush = "door tot de achterkant (een gat)"; break; }
+                if (Math.Abs(m + depth) < Math.Max(0.4, 0.03 * depth)) { mm = -depth; flush = T("door tot de achterkant (een gat)", "through to the back (a hole)"); break; }
         }
         if (Math.Abs(mm / Display - _dragDist) < 1e-12 && (_preview != null || Math.Abs(mm) < 1e-9)) { UpdateHighlight(); ShowDragStatus(flush); ShowRadiusTag(pos); return; }
         Preview(mm / Display, flush);
@@ -2190,9 +2232,9 @@ public partial class MainWindow : Window
             var corners = face.Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End })
                 .Distinct().Where(v => !movingVerts.Contains(v)).Select(v => body.Vertices[v]).ToList();
             var near = corners.Select(v => (V: v, Px: (Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v)) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
-            if (near.Count > 0) return ((near[0].V - origin).Dot(n) * Display, "gelijk met dit punt", new FaceRef(m.Body, baseIndex));
+            if (near.Count > 0) return ((near[0].V - origin).Dot(n) * Display, T("gelijk met dit punt", "level with this point"), new FaceRef(m.Body, baseIndex));
             if (face.Surface is BrepPlane pl && Math.Abs(pl.Normal.Normalized().Dot(n)) > 1 - 1e-6)
-                return ((pl.Origin - origin).Dot(n) * Display, "gelijk met dit vlak", new FaceRef(m.Body, baseIndex));
+                return ((pl.Origin - origin).Dot(n) * Display, T("gelijk met dit vlak", "level with this face"), new FaceRef(m.Body, baseIndex));
             return null;
         }
         return null;
@@ -2209,8 +2251,8 @@ public partial class MainWindow : Window
         if (!_dragValid) return;
         string cyl = _preview != null && _previewFace is { } pf && _preview.Bodies[pf.Body].Faces[pf.Face].Surface is BrepCylinder ? " · " + CylinderText(_preview, pf) : "";
         StatusText.Text = _dragRadius
-            ? $"⇕ {cyl.TrimStart(' ', '·')} · klik om vast te zetten, of typ de straal + Enter. Esc breekt af."
-            : $"⇕ {_dragDist * Display:0.##} mm{cyl}{(flush != null ? " · 🎯 " + flush : "")} · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.";
+            ? T($"⇕ {cyl.TrimStart(' ', '·')} · klik om vast te zetten, of typ de straal + Enter. Esc breekt af.", $"⇕ {cyl.TrimStart(' ', '·')} · click to set it, or type the radius + Enter. Esc cancels.")
+            : T($"⇕ {_dragDist * Display:0.##} mm{cyl}{(flush != null ? " · 🎯 " + flush : "")} · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", $"⇕ {_dragDist * Display:0.##} mm{cyl}{(flush != null ? " · 🎯 " + flush : "")} · click to set it, or type the distance + Enter. Esc cancels.");
     }
 
     /// <summary>The tag next to the mouse with a text (the radius of a rounding, pin or hole).</summary>
@@ -2230,7 +2272,7 @@ public partial class MainWindow : Window
     {
         if (!_dragRadius || _dragFace is not { } f || _dragBase == null) { HideTag(); return; }
         string r = RadiusText(_dragBase, f, _dragDist);
-        if (r.Length > 0 && _dragValid) ShowTag("R " + r + " mm", pos); else HideTag();
+        if (r.Length > 0 && _dragValid) ShowTag("R " + r + T(" mm", " mm"), pos); else HideTag();
     }
 
     private static double RadiusOf(SketchDocument doc, FaceRef f) => doc.Bodies[f.Body].Faces[f.Face].Surface switch
@@ -2252,11 +2294,11 @@ public partial class MainWindow : Window
     private static string CylinderText(SketchDocument doc, FaceRef f)
     {
         var face = doc.Bodies[f.Body].Faces[f.Face];
-        if (face.Surface is BrepSphere sp) return $"bolhoek R {sp.Radius * Display:0.##} mm";
-        if (face.Surface is BrepTorus tr) return $"hoekstuk R {tr.MinorRadius * Display:0.##} mm";
+        if (face.Surface is BrepSphere sp) return T($"bolhoek R {sp.Radius * Display:0.##} mm", $"ball corner R {sp.Radius * Display:0.##} mm");
+        if (face.Surface is BrepTorus tr) return T($"hoekstuk R {tr.MinorRadius * Display:0.##} mm", $"corner piece R {tr.MinorRadius * Display:0.##} mm");
         if (face.Surface is not BrepCylinder c) return "";
-        if (PushPullMe.Core.PushPull.IsRounding(doc.Bodies[f.Body], f.Face)) return $"ronding R {c.Radius * Display:0.##} mm";
-        return $"{(face.Reversed ? "gat" : "cilinder")} R {c.Radius * Display:0.##} mm (Ø {c.Radius * 2 * Display:0.##})";
+        if (PushPullMe.Core.PushPull.IsRounding(doc.Bodies[f.Body], f.Face)) return T($"ronding R {c.Radius * Display:0.##} mm", $"rounding R {c.Radius * Display:0.##} mm");
+        return T($"{(face.Reversed ? "gat" : "cilinder")} R {c.Radius * Display:0.##} mm (Ø {c.Radius * 2 * Display:0.##})", $"{(face.Reversed ? "hole" : "cylinder")} R {c.Radius * Display:0.##} mm (Ø {c.Radius * 2 * Display:0.##})");
     }
 
     private void Preview(double dist, string? flush = null)
@@ -2268,7 +2310,7 @@ public partial class MainWindow : Window
         try
         {
             var (doc, r) = _dragBase.PushPull(f, dist, checkCrossing: false);
-            if (r.FaceMap[f.Face] < 0 && !r.Punched) throw new PushPullException("Zo verdwijnt het vlak helemaal.");
+            if (r.FaceMap[f.Face] < 0 && !r.Punched) throw new PushPullException(T("Zo verdwijnt het vlak helemaal.", "That way the face disappears completely."));
             _preview = doc; _previewFace = new FaceRef(f.Body, r.FaceMap[f.Face]); _dragValid = true;
             _previewMap = r.FaceMap; _previewNew = r.NewFaces.ToHashSet();
             Render(doc);
@@ -2303,20 +2345,20 @@ public partial class MainWindow : Window
             _selected = r.FaceMap[f.Face] >= 0 ? new FaceRef(f.Body, r.FaceMap[f.Face]) : null;
             Render();
             bool rounding = HasRadius(before, f); // (pin, hole or rounding: shown by its radius)
-            MeasureLabel.Text = rounding ? "Straal" : "Afstand";
+            MeasureLabel.Text = rounding ? T("Straal", "Radius") : T("Afstand", "Distance");
             MeasureBox.Text = rounding ? RadiusText(before, f, dist) : (dist * Display).ToString("0.##", CultureInfo.CurrentCulture);
             StatusText.Text = rounding
-                ? $"✅ Nu {CylinderText(doc, new FaceRef(f.Body, Math.Max(0, r.FaceMap[f.Face])))}. Typ een andere straal + Enter om het aan te passen."
+                ? T($"✅ Nu {CylinderText(doc, new FaceRef(f.Body, Math.Max(0, r.FaceMap[f.Face])))}. Typ een andere straal + Enter om het aan te passen.", $"✅ Now {CylinderText(doc, new FaceRef(f.Body, Math.Max(0, r.FaceMap[f.Face])))}. Type another radius + Enter to change it.")
                 : before.Bodies[f.Body].Faces[f.Face].Surface is BrepCylinder
-                ? $"✅ {(dist > 0 ? "Getrokken" : "Geduwd")}: {Math.Abs(dist) * Display:0.##} mm, nu {CylinderText(doc, f)}. Typ een andere afstand + Enter om het aan te passen."
-                : r.Punched ? $"✅ Doorgeduwd: er gaat nu een gat doorheen ({Math.Abs(dist) * Display:0.##} mm)."
-                : $"✅ {(dist > 0 ? "Getrokken" : "Geduwd")}: {Math.Abs(dist) * Display:0.##} mm. Typ een andere afstand + Enter om het aan te passen.";
+                ? T($"✅ {(dist > 0 ? "Getrokken" : "Geduwd")}: {Math.Abs(dist) * Display:0.##} mm, nu {CylinderText(doc, f)}. Typ een andere afstand + Enter om het aan te passen.", $"✅ {(dist > 0 ? "Pulled" : "Pushed")}: {Math.Abs(dist) * Display:0.##} mm, now {CylinderText(doc, f)}. Type another distance + Enter to change it.")
+                : r.Punched ? T($"✅ Doorgeduwd: er gaat nu een gat doorheen ({Math.Abs(dist) * Display:0.##} mm).", $"✅ Pushed through: there is a hole through it now ({Math.Abs(dist) * Display:0.##} mm).")
+                : T($"✅ {(dist > 0 ? "Getrokken" : "Geduwd")}: {Math.Abs(dist) * Display:0.##} mm. Typ een andere afstand + Enter om het aan te passen.", $"✅ {(dist > 0 ? "Pulled" : "Pushed")}: {Math.Abs(dist) * Display:0.##} mm. Type another distance + Enter to change it.");
             Log($"pushpull face {f.Face} {dist * Display:0.###} mm: ok, {doc.Bodies[f.Body].Faces.Count} faces");
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log($"pushpull face {f.Face} {dist * Display:0.###} mm: {ex.Message}");
         }
@@ -2335,13 +2377,13 @@ public partial class MainWindow : Window
     private void StartSweep((FaceRef Face, Point3D Point)? hit, Point pos)
     {
         if (hit is not { } h || _doc == null) return;
-        if (!IsPlanar(h.Face)) { StatusText.Text = $"{SweepIcon} Dat kan alleen op een plat vlak."; return; }
+        if (!IsPlanar(h.Face)) { StatusText.Text = T($"{SweepIcon} Dat kan alleen op een plat vlak.", $"{SweepIcon} That only works on a flat face."); return; }
         _swFace = h.Face; _swStage = 1; _swAngle = 0; _swDir = default; _typed = "";
         _swCentre = ArcPoint(h.Face, pos) ?? V(h.Point);
         _selected = null; _hover = null; UpdateHighlight();
-        MeasureLabel.Text = "Straal"; MeasureBox.Text = "";
+        MeasureLabel.Text = T("Straal", "Radius"); MeasureBox.Text = "";
         ShowSketch([_swCentre], NormalOf(h.Face));
-        StatusText.Text = $"{SweepIcon} Klik het beginpunt (de straal), of typ de straal + Enter. Esc breekt af.";
+        StatusText.Text = T($"{SweepIcon} Klik het beginpunt (de straal), of typ de straal + Enter. Esc breekt af.", $"{SweepIcon} Click the start point (the radius), or type the radius + Enter. Esc cancels.");
     }
 
     private void EndSweep()
@@ -2381,11 +2423,11 @@ public partial class MainWindow : Window
         deg = Math.Abs(deg - snapped) < 2.5 ? snapped : Math.Round(deg * 2) / 2;
         if (Math.Abs(deg) >= 359.5) deg = 359.5 * Math.Sign(deg);
         _swAngle = deg * Math.PI / 180;
-        MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(deg).ToString("0.#", CultureInfo.CurrentCulture);
+        MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(deg).ToString("0.#", CultureInfo.CurrentCulture);
         if (Math.Abs(deg) < 0.4) { ShowSketch([_swCentre, _swStart], n); return; }
         var arc = Enumerable.Range(0, 49).Select(k => SweepPoint(n, _swAngle * k / 48)).ToList();
         ShowSketch(PieMode ? arc.Prepend(_swCentre).Append(_swCentre).ToList() : arc, n);
-        StatusText.Text = $"{SweepIcon} {Math.Abs(deg).ToString("0.#", CultureInfo.CurrentCulture)}°, straal {Mm((_swStart - _swCentre).Length)} mm · klik, of typ de hoek + Enter. Esc breekt af.";
+        StatusText.Text = T($"{SweepIcon} {Math.Abs(deg).ToString("0.#", CultureInfo.CurrentCulture)}°, straal {Mm((_swStart - _swCentre).Length)} mm · klik, of typ de hoek + Enter. Esc breekt af.", $"{SweepIcon} {Math.Abs(deg).ToString("0.#", CultureInfo.CurrentCulture)}°, radius {Mm((_swStart - _swCentre).Length)} mm · click, or type the angle + Enter. Esc cancels.");
     }
 
     private void SweepClick(Point pos)
@@ -2398,7 +2440,7 @@ public partial class MainWindow : Window
             var d = p - _swCentre; d -= n * d.Dot(n);
             if (d.Length < 1e-6) return;
             _swStart = _swCentre + d; _swStage = 2; _swAngle = 0;
-            StatusText.Text = $"{SweepIcon} Beweeg voor de hoek en klik, of typ de hoek + Enter. Esc breekt af.";
+            StatusText.Text = T($"{SweepIcon} Beweeg voor de hoek en klik, of typ de hoek + Enter. Esc breekt af.", $"{SweepIcon} Move for the angle and click, or type the angle + Enter. Esc cancels.");
             return;
         }
         SweepTo(pos);
@@ -2414,11 +2456,11 @@ public partial class MainWindow : Window
         var t = new BrepTransform.Turn(centre, n, angle);
         var end = t.Point(start);
         var through = new BrepTransform.Turn(centre, n, angle / 2).Point(start);
-        string what = pie ? "taartpunt" : "boog";
+        string what = pie ? "pie" : "centre arc";
         if (!pie && !(OnPlaneEdge(f, start) && OnPlaneEdge(f, end)))
         {
             AddLooseArc(before, f, start, end, through);
-            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
+            MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
             return;
         }
         try
@@ -2427,14 +2469,14 @@ public partial class MainWindow : Window
             Commit(before, doc);
             _last = null; _selected = nf; _lastDrawn = nf;
             Render();
-            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
-            StatusText.Text = $"✅ {(pie ? "Taartpunt" : "Boog")} getekend ({Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture)}°). Kies ⇕ (P) om hem eruit te trekken of in te duwen.";
+            MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
+            StatusText.Text = T($"✅ {(pie ? "Taartpunt" : "Boog")} getekend ({Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture)}°). Kies ⇕ (P) om hem eruit te trekken of in te duwen.", $"✅ {(pie ? "Pie" : "Arc")} drawn ({Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture)}°). Choose ⇕ (P) to pull it out or push it in.");
             Log(string.Create(CultureInfo.InvariantCulture, $"{(pie ? "pie" : "centre arc")} on face {f.Face} r {(start - centre).Length * Display:0.###} mm {angle * 180 / Math.PI:0.#}°: ok, new face {nf.Face}"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log(string.Create(CultureInfo.InvariantCulture, $"{what} on face {f.Face} {angle * 180 / Math.PI:0.#}°: {ex.Message}"));
         }
@@ -2451,10 +2493,10 @@ public partial class MainWindow : Window
         if (_unionFirst is not { } first)
         {
             _unionFirst = h.Face; _selected = h.Face; UpdateHighlight();
-            StatusText.Text = "∪ Klik het tweede deel (dat het eerste overlapt of met een vlak raakt). Esc breekt af.";
+            StatusText.Text = T("∪ Klik het tweede deel (dat het eerste overlapt of met een vlak raakt). Esc breekt af.", "∪ Click the second part (one that overlaps the first or touches it with a face). Esc cancels.");
             return;
         }
-        if (h.Face.Body == first.Body) { StatusText.Text = "∪ Dat is hetzelfde deel; klik een ander deel."; return; }
+        if (h.Face.Body == first.Body) { StatusText.Text = T("∪ Dat is hetzelfde deel; klik een ander deel.", "∪ That is the same part; click another part."); return; }
         _unionFirst = null;
         try
         {
@@ -2463,13 +2505,13 @@ public partial class MainWindow : Window
             _last = null; _lastMove = null; _selected = null; _hover = null;
             Render();
             int body = first.Body > h.Face.Body ? first.Body - 1 : first.Body;
-            StatusText.Text = $"✅ Verenigd: één deel met {doc.Bodies[body].Faces.Count} vlakken.";
+            StatusText.Text = T($"✅ Verenigd: één deel met {doc.Bodies[body].Faces.Count} vlakken.", $"✅ United: one part with {doc.Bodies[body].Faces.Count} faces.");
             Log(string.Create(CultureInfo.InvariantCulture, $"union of bodies {first.Body} and {h.Face.Body}: ok, {doc.Bodies[body].Faces.Count} faces, volume {doc.Volume() * 1e9:0.###} mm³"));
         }
         catch (PushPullException ex)
         {
             _selected = null; UpdateHighlight();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log($"union of bodies {first.Body} and {h.Face.Body}: {ex.Message}");
         }
@@ -2489,10 +2531,10 @@ public partial class MainWindow : Window
     private void StartFollow((FaceRef Face, Point3D Point)? hit)
     {
         if (hit is not { } h || _doc == null) return;
-        if (!IsPlanar(h.Face)) { StatusText.Text = "↝ Ronddraaien kan alleen met een plat vlak."; return; }
+        if (!IsPlanar(h.Face)) { StatusText.Text = T("↝ Ronddraaien kan alleen met een plat vlak.", "↝ Follow Me only works with a flat face."); return; }
         _fmFace = h.Face; _fmStage = 1; _fmBase = _doc; _typed = "";
         _selected = h.Face; _hover = null; UpdateHighlight();
-        StatusText.Text = "↝ Klik de as: een rechte rand, losse lijn of hulplijn in het vlak van dit vlak. Esc breekt af.";
+        StatusText.Text = T("↝ Klik de as: een rechte rand, losse lijn of hulplijn in het vlak van dit vlak. Esc breekt af.", "↝ Click the axis: a straight edge, loose line or guide line in the plane of this face. Esc cancels.");
     }
 
     private void EndFollow()
@@ -2500,7 +2542,7 @@ public partial class MainWindow : Window
         if (_fmFace == null) return;
         _fmFace = null; _fmStage = 0; _fmBase = null; _fmOk = false;
         ShowSketch([]);
-        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
+        MeasureLabel.Text = T("Afstand", "Distance"); MeasureUnit.Text = "mm";
     }
 
     /// <summary>A straight line in the face's plane near the mouse (within 8 pixels): an edge of a body, a loose line or a
@@ -2545,8 +2587,8 @@ public partial class MainWindow : Window
         if (_fmFace is not { } f || _fmBase is not { } baseDoc) return;
         if (_fmStage == 1)
         {
-            if (AxisAt(f, pos) is { } ax) { ShowSketch([ax.A, ax.B], default, color: AxisZ); StatusText.Text = "↝ Klik om deze lijn als as te nemen."; }
-            else { ShowSketch([]); StatusText.Text = "↝ Klik de as: een rechte rand, losse lijn of hulplijn in het vlak van dit vlak. Esc breekt af."; }
+            if (AxisAt(f, pos) is { } ax) { ShowSketch([ax.A, ax.B], default, color: AxisZ); StatusText.Text = T("↝ Klik om deze lijn als as te nemen.", "↝ Click to take this line as the axis."); }
+            else { ShowSketch([]); StatusText.Text = T("↝ Klik de as: een rechte rand, losse lijn of hulplijn in het vlak van dit vlak. Esc breekt af.", "↝ Click the axis: a straight edge, loose line or guide line in the plane of this face. Esc cancels."); }
             return;
         }
         if (_typed.Length > 0) return;
@@ -2575,7 +2617,7 @@ public partial class MainWindow : Window
             var (doc, _) = baseDoc.Revolve(f, _fmAxisP, _fmAxisDir, _fmAngle);
             _fmOk = true;
             Render(doc);
-            StatusText.Text = $"↝ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 ? " · 🎯 15°-stap" : "")} · klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.";
+            StatusText.Text = T($"↝ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 ? " · 🎯 15°-stap" : "")} · klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.", $"↝ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 ? " · 🎯 15° step" : "")} · click to set it, or type the angle + Enter. Esc cancels.");
         }
         catch (PushPullException ex) { _fmOk = false; Render(baseDoc); StatusText.Text = "⛔ " + ex.Message; }
     }
@@ -2595,8 +2637,8 @@ public partial class MainWindow : Window
                 _fmRef = r.Length > 1e-9 ? r.Normalized() : NormalOf(f).Cross(_fmAxisDir).Normalized();
                 _fmStage = 2; _fmAngle = 0; _fmOk = false;
                 ShowSketch([ax.A, ax.B], default, color: AxisZ);
-                MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = "";
-                StatusText.Text = "↝ Beweeg om het vlak eruit te draaien (stappen van 15°) en klik, of typ de hoek + Enter. Esc breekt af.";
+                MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = "";
+                StatusText.Text = T("↝ Beweeg om het vlak eruit te draaien (stappen van 15°) en klik, of typ de hoek + Enter. Esc breekt af.", "↝ Move to turn the face out (steps of 15°) and click, or type the angle + Enter. Esc cancels.");
             }
             catch (PushPullException ex) { StatusText.Text = "⛔ " + ex.Message; }
             return;
@@ -2616,14 +2658,14 @@ public partial class MainWindow : Window
             Commit(before, doc);
             _last = null; _selected = cap;
             Render();
-            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = (angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
-            StatusText.Text = $"✅ Rondgedraaid: {(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture)}°.";
+            MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = (angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
+            StatusText.Text = T($"✅ Rondgedraaid: {(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture)}°.", $"✅ Turned: {(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture)}°.");
             Log(string.Create(CultureInfo.InvariantCulture, $"follow me face {f.Face} round ({p.X * Display:0.###},{p.Y * Display:0.###},{p.Z * Display:0.###}) along ({dir.X:0.###},{dir.Y:0.###},{dir.Z:0.###}) {angle * 180 / Math.PI:0.#}°: ok, {doc.Bodies[f.Body].Faces.Count} faces, volume {doc.Volume() * 1e9:0.###} mm³"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log(string.Create(CultureInfo.InvariantCulture, $"follow me face {f.Face} {angle * 180 / Math.PI:0.#}°: {ex.Message}"));
         }
@@ -2647,13 +2689,13 @@ public partial class MainWindow : Window
     private void StartRotRect((FaceRef Face, Point3D Point)? hit, Point pos)
     {
         if (hit is not { } h || _doc == null) return;
-        if (!IsPlanar(h.Face)) { StatusText.Text = "◇ Dat kan alleen op een plat vlak."; return; }
+        if (!IsPlanar(h.Face)) { StatusText.Text = T("◇ Dat kan alleen op een plat vlak.", "◇ That only works on a flat face."); return; }
         _rrFace = h.Face; _rrStage = 1; _rrWidth = 0; _typed = "";
         _rrA = ArcPoint(h.Face, pos) ?? V(h.Point);
         _selected = null; _hover = null; UpdateHighlight();
-        MeasureLabel.Text = "Lengte"; MeasureBox.Text = "";
+        MeasureLabel.Text = T("Lengte", "Length"); MeasureBox.Text = "";
         ShowSketch([_rrA], NormalOf(h.Face));
-        StatusText.Text = "◇ Klik de tweede hoek (de eerste zijde). Esc breekt af.";
+        StatusText.Text = T("◇ Klik de tweede hoek (de eerste zijde). Esc breekt af.", "◇ Click the second corner (the first side). Esc cancels.");
     }
 
     private void EndRotRect()
@@ -2678,8 +2720,8 @@ public partial class MainWindow : Window
         if (Math.Abs(width) < 1e-7) { ShowSketch([_rrA, _rrB], n); return; }
         _rrWidth = width;
         ShowSketch(RotRectCorners(_rrA, _rrB, width, n), n, closed: true);
-        MeasureLabel.Text = "Breedte"; MeasureBox.Text = Mm(Math.Abs(width));
-        StatusText.Text = $"◇ {Mm((_rrB - _rrA).Length)} × {Mm(Math.Abs(width))} mm · klik, of typ de breedte + Enter. Esc breekt af.";
+        MeasureLabel.Text = T("Breedte", "Width"); MeasureBox.Text = Mm(Math.Abs(width));
+        StatusText.Text = T($"◇ {Mm((_rrB - _rrA).Length)} × {Mm(Math.Abs(width))} mm · klik, of typ de breedte + Enter. Esc breekt af.", $"◇ {Mm((_rrB - _rrA).Length)} × {Mm(Math.Abs(width))} mm · click, or type the width + Enter. Esc cancels.");
     }
 
     private void RotRectClick(Point pos)
@@ -2689,7 +2731,7 @@ public partial class MainWindow : Window
         {
             if (ArcPoint(f, pos) is not { } p || (p - _rrA).Length < 1e-6) return;
             _rrB = p; _rrStage = 2; _rrWidth = 0;
-            StatusText.Text = "◇ Beweeg voor de breedte en klik, of typ de breedte + Enter. Esc breekt af.";
+            StatusText.Text = T("◇ Beweeg voor de breedte en klik, of typ de breedte + Enter. Esc breekt af.", "◇ Move for the width and click, or type the width + Enter. Esc cancels.");
             return;
         }
         RotRectTo(pos);
@@ -2708,14 +2750,14 @@ public partial class MainWindow : Window
             Commit(before, doc);
             _last = null; _selected = nf; _lastDrawn = nf;
             Render();
-            MeasureLabel.Text = "Breedte"; MeasureBox.Text = Mm(Math.Abs(width));
-            StatusText.Text = $"✅ Rechthoek {Mm((b - a).Length)} × {Mm(Math.Abs(width))} mm getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.";
+            MeasureLabel.Text = T("Breedte", "Width"); MeasureBox.Text = Mm(Math.Abs(width));
+            StatusText.Text = T($"✅ Rechthoek {Mm((b - a).Length)} × {Mm(Math.Abs(width))} mm getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.", $"✅ Rectangle {Mm((b - a).Length)} × {Mm(Math.Abs(width))} mm drawn. Choose ⇕ (P) to pull it out or push it in.");
             Log(string.Create(CultureInfo.InvariantCulture, $"rotated rectangle {(b - a).Length * Display:0.###} x {Math.Abs(width) * Display:0.###} mm on face {f.Face}: ok, new face {nf.Face}"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
         }
     }
@@ -2742,13 +2784,13 @@ public partial class MainWindow : Window
     private void StartArc((FaceRef Face, Point3D Point)? hit, Point pos)
     {
         if (hit is not { } h || _doc == null) return;
-        if (!IsPlanar(h.Face)) { StatusText.Text = "⌒ Een boog tekenen kan alleen op een plat vlak."; return; }
+        if (!IsPlanar(h.Face)) { StatusText.Text = T("⌒ Een boog tekenen kan alleen op een plat vlak.", "⌒ An arc can only be drawn on a flat face."); return; }
         _arcFace = h.Face; _arcStage = 1; _typed = ""; _arc3 = Arc3Mode; _arcC = null;
         _arcA = ArcPoint(h.Face, pos) ?? V(h.Point);
         _selected = null; _hover = null; UpdateHighlight();
-        MeasureLabel.Text = _arc3 ? "Lengte" : "Bolling"; MeasureBox.Text = "";
+        MeasureLabel.Text = _arc3 ? T("Lengte", "Length") : T("Bolling", "Bulge"); MeasureBox.Text = "";
         ShowSketch([_arcA], NormalOf(h.Face));
-        StatusText.Text = _arc3 ? "⌓ Klik een punt waar de boog doorheen gaat. Esc breekt af." : "⌒ Klik het eindpunt van de boog. Esc breekt af.";
+        StatusText.Text = _arc3 ? T("⌓ Klik een punt waar de boog doorheen gaat. Esc breekt af.", "⌓ Click a point the arc goes through. Esc cancels.") : T("⌒ Klik het eindpunt van de boog. Esc breekt af.", "⌒ Click the end point of the arc. Esc cancels.");
     }
 
     private void EndArc()
@@ -2772,12 +2814,12 @@ public partial class MainWindow : Window
             // the end under the mouse; the arc from A through B to it
             _arcC = null;
             if (ArcPoint(f, pos) is not { } e) return;
-            if (!Bends(_arcA, _arcB, e, n)) { ShowSketch([_arcA, _arcB, e], n); StatusText.Text = "⌓ De drie punten liggen (bijna) op een lijn; beweeg verder opzij."; return; }
+            if (!Bends(_arcA, _arcB, e, n)) { ShowSketch([_arcA, _arcB, e], n); StatusText.Text = T("⌓ De drie punten liggen (bijna) op een lijn; beweeg verder opzij.", "⌓ The three points lie (almost) on a line; move further aside."); return; }
             _arcC = e;
             var c3 = PushPullMe.Core.Drawing.ArcThrough(_arcA, _arcB, e, n);
             ShowSketch(PushPullMe.Core.Drawing.ArcPoints(c3, _arcA, e), n);
             MeasureBox.Text = Mm((e - _arcA).Length);
-            StatusText.Text = $"⌓ Straal {Mm(c3.Radius)} mm · klik het eindpunt. Esc breekt af.";
+            StatusText.Text = T($"⌓ Straal {Mm(c3.Radius)} mm · klik het eindpunt. Esc breekt af.", $"⌓ Radius {Mm(c3.Radius)} mm · click the end point. Esc cancels.");
             return;
         }
         if (OnPlane(f, pos) is not { } q) return;
@@ -2794,7 +2836,7 @@ public partial class MainWindow : Window
         var c = PushPullMe.Core.Drawing.ArcThrough(_arcA, through, _arcB, n);
         ShowSketch(PushPullMe.Core.Drawing.ArcPoints(c, _arcA, _arcB), n);
         MeasureBox.Text = Mm(Math.Abs(bulge));
-        StatusText.Text = $"⌒ Bolling {Mm(Math.Abs(bulge))} mm, straal {Mm(c.Radius)} mm{(semi ? " · 🎯 halve cirkel" : "")} · klik, of typ de bolling + Enter. Esc breekt af.";
+        StatusText.Text = T($"⌒ Bolling {Mm(Math.Abs(bulge))} mm, straal {Mm(c.Radius)} mm{(semi ? " · 🎯 halve cirkel" : "")} · klik, of typ de bolling + Enter. Esc breekt af.", $"⌒ Bulge {Mm(Math.Abs(bulge))} mm, radius {Mm(c.Radius)} mm{(semi ? " · 🎯 half circle" : "")} · click, or type the bulge + Enter. Esc cancels.");
     }
 
     private void ArcClick(Point pos)
@@ -2804,7 +2846,7 @@ public partial class MainWindow : Window
         {
             if (ArcPoint(f, pos) is not { } p || (p - _arcA).Length < 1e-6) return;
             _arcB = p; _arcStage = 2; _arcBulge = 0;
-            StatusText.Text = _arc3 ? "⌓ Klik het eindpunt van de boog. Esc breekt af." : "⌒ Beweeg voor de bolling en klik, of typ de bolling + Enter. Esc breekt af.";
+            StatusText.Text = _arc3 ? T("⌓ Klik het eindpunt van de boog. Esc breekt af.", "⌓ Click the end point of the arc. Esc cancels.") : T("⌒ Beweeg voor de bolling en klik, of typ de bolling + Enter. Esc breekt af.", "⌒ Move for the bulge and click, or type the bulge + Enter. Esc cancels.");
             return;
         }
         if (_arc3)
@@ -2843,7 +2885,7 @@ public partial class MainWindow : Window
         if (!(OnPlaneEdge(f, a) && OnPlaneEdge(f, b)))
         {
             AddLooseArc(before, f, a, b, through);
-            MeasureLabel.Text = bulgeText.Length > 0 ? "Bolling" : "Lengte"; MeasureBox.Text = bulgeText.Length > 0 ? bulgeText : Mm((b - a).Length);
+            MeasureLabel.Text = bulgeText.Length > 0 ? T("Bolling", "Bulge") : T("Lengte", "Length"); MeasureBox.Text = bulgeText.Length > 0 ? bulgeText : Mm((b - a).Length);
             return;
         }
         try
@@ -2852,14 +2894,14 @@ public partial class MainWindow : Window
             Commit(before, doc);
             _last = null; _selected = nf; _lastDrawn = nf;
             Render();
-            MeasureLabel.Text = bulgeText.Length > 0 ? "Bolling" : "Lengte"; MeasureBox.Text = bulgeText.Length > 0 ? bulgeText : Mm((b - a).Length);
-            StatusText.Text = "✅ Boog getekend. Kies ⇕ (P) om een deel eruit te trekken of in te duwen (zijn zijkant wordt rond).";
+            MeasureLabel.Text = bulgeText.Length > 0 ? T("Bolling", "Bulge") : T("Lengte", "Length"); MeasureBox.Text = bulgeText.Length > 0 ? bulgeText : Mm((b - a).Length);
+            StatusText.Text = T("✅ Boog getekend. Kies ⇕ (P) om een deel eruit te trekken of in te duwen (zijn zijkant wordt rond).", "✅ Arc drawn. Choose ⇕ (P) to pull a part out or push it in (its side becomes round).");
             Log(string.Create(CultureInfo.InvariantCulture, $"arc on face {f.Face} ({a.X * Display:0.###},{a.Y * Display:0.###},{a.Z * Display:0.###}) → ({b.X * Display:0.###},{b.Y * Display:0.###},{b.Z * Display:0.###}) through ({through.X * Display:0.###},{through.Y * Display:0.###},{through.Z * Display:0.###}): ok, new face {nf.Face}"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log(string.Create(CultureInfo.InvariantCulture, $"arc on face {f.Face} ({a.X * Display:0.###},{a.Y * Display:0.###},{a.Z * Display:0.###}) → ({b.X * Display:0.###},{b.Y * Display:0.###},{b.Z * Display:0.###}) through ({through.X * Display:0.###},{through.Y * Display:0.###},{through.Z * Display:0.###}): {ex.Message}"));
         }
@@ -2879,14 +2921,14 @@ public partial class MainWindow : Window
             if (made.Count > 0) { _selected = made[^1]; _lastDrawn = made[^1]; }
             Render();
             StatusText.Text = made.Count > 0
-                ? $"✅ Boog getekend; met de lijnen die er al lagen {(made.Count == 1 ? "is een vlak" : $"zijn {made.Count} vlakken")} gesloten. Kies ⇕ (P) om het eruit te trekken of in te duwen."
-                : $"✅ Losse boog getekend (straal {Mm(c.Radius)} mm). Sluit hem met lijnen of randen tot een vorm, dan wordt het een vlak.";
+                ? T($"✅ Boog getekend; met de lijnen die er al lagen {(made.Count == 1 ? "is een vlak" : $"zijn {made.Count} vlakken")} gesloten. Kies ⇕ (P) om het eruit te trekken of in te duwen.", $"✅ Arc drawn; with the lines already there {(made.Count == 1 ? "a face is" : $"{made.Count} faces are")} closed. Choose ⇕ (P) to pull it out or push it in.")
+                : T($"✅ Losse boog getekend (straal {Mm(c.Radius)} mm). Sluit hem met lijnen of randen tot een vorm, dan wordt het een vlak.", $"✅ Loose arc drawn (radius {Mm(c.Radius)} mm). Close it into a shape with lines or edges and it becomes a face.");
             Log(string.Create(CultureInfo.InvariantCulture, $"loose arc on face {f.Face} ({a.X * Display:0.###},{a.Y * Display:0.###},{a.Z * Display:0.###}) → ({b.X * Display:0.###},{b.Y * Display:0.###},{b.Z * Display:0.###}) r {c.Radius * Display:0.###}: {made.Count} face(s) closed"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
         }
     }
@@ -2910,16 +2952,16 @@ public partial class MainWindow : Window
     private void StartPolygon((FaceRef Face, Point3D Point)? hit)
     {
         if (hit is not { } h || _doc == null) return;
-        if (!IsPlanar(h.Face)) { StatusText.Text = "⬡ Een veelhoek tekenen kan alleen op een plat vlak."; return; }
+        if (!IsPlanar(h.Face)) { StatusText.Text = T("⬡ Een veelhoek tekenen kan alleen op een plat vlak.", "⬡ A polygon can only be drawn on a flat face."); return; }
         var n = NormalOf(h.Face);
         var p = V(h.Point);
         // (on a guide line's crossing or an edge's middle or corner, as the rectangle and circle do)
         if (_doc.Bodies[h.Face.Body].Faces[h.Face.Face].Surface is BrepPlane pl && GuideSnap(p, Mouse.GetPosition(View.Viewport), n, pl.Origin) is { } gs) p = gs.Point;
         _polyFace = h.Face; _polyCentre = p; _polyDir = default; _polyRadius = 0; _typed = "";
         _selected = null; _hover = null; UpdateHighlight();
-        MeasureLabel.Text = "Straal"; MeasureBox.Text = "";
+        MeasureLabel.Text = T("Straal", "Radius"); MeasureBox.Text = "";
         ShowSketch([p], n);
-        StatusText.Text = $"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): beweeg voor de grootte en de stand, klik; of typ de straal + Enter. Esc breekt af.";
+        StatusText.Text = T($"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): beweeg voor de grootte en de stand, klik; of typ de straal + Enter. Esc breekt af.", $"⬡ Polygon ({_polySides} sides; ↑/↓: more/fewer): move for the size and the turn, click; or type the radius + Enter. Esc cancels.");
     }
 
     private void EndPolygon()
@@ -2940,7 +2982,7 @@ public partial class MainWindow : Window
         _polyDir = d.Normalized(); _polyRadius = r;
         ShowSketch(PolygonCorners(_polyCentre, _polyDir, r, n), n, closed: true);
         MeasureBox.Text = Mm(r);
-        StatusText.Text = $"⬡ {_polySides} hoeken, straal {Mm(r)} mm (zijde {Mm(2 * r * Math.Sin(Math.PI / _polySides))} mm) · klik, of typ de straal + Enter. ↑/↓: meer/minder hoeken. Esc breekt af.";
+        StatusText.Text = T($"⬡ {_polySides} hoeken, straal {Mm(r)} mm (zijde {Mm(2 * r * Math.Sin(Math.PI / _polySides))} mm) · klik, of typ de straal + Enter. ↑/↓: meer/minder hoeken. Esc breekt af.", $"⬡ {_polySides} sides, radius {Mm(r)} mm (side {Mm(2 * r * Math.Sin(Math.PI / _polySides))} mm) · click, or type the radius + Enter. ↑/↓: more/fewer sides. Esc cancels.");
     }
 
     private void FinishPolygon()
@@ -2961,14 +3003,14 @@ public partial class MainWindow : Window
             Commit(before, doc);
             _last = null; _selected = nf; _lastDrawn = nf;
             Render();
-            MeasureLabel.Text = "Straal"; MeasureBox.Text = Mm(r);
-            StatusText.Text = $"✅ Veelhoek ({_polySides} hoeken, straal {Mm(r)} mm) getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.";
+            MeasureLabel.Text = T("Straal", "Radius"); MeasureBox.Text = Mm(r);
+            StatusText.Text = T($"✅ Veelhoek ({_polySides} hoeken, straal {Mm(r)} mm) getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.", $"✅ Polygon ({_polySides} sides, radius {Mm(r)} mm) drawn. Choose ⇕ (P) to pull it out or push it in.");
             Log(string.Create(CultureInfo.InvariantCulture, $"polygon {_polySides} corners r {r * Display:0.###} mm on face {f.Face}: ok, new face {nf.Face}"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log(string.Create(CultureInfo.InvariantCulture, $"polygon {_polySides} corners r {r * Display:0.###} mm on face {f.Face}: {ex.Message}"));
         }
@@ -2981,7 +3023,7 @@ public partial class MainWindow : Window
     {
         if (hit is not { } h || _doc is not { } before) return;
         var face = before.Bodies[h.Face.Body].Faces[h.Face.Face];
-        if (face.Surface is not BrepPlane pl) { StatusText.Text = "⇋ Spiegelen kan in een plat vlak."; return; }
+        if (face.Surface is not BrepPlane pl) { StatusText.Text = T("⇋ Spiegelen kan in een plat vlak.", "⇋ Mirroring works in a flat face."); return; }
         bool copy = (Mods & ModifierKeys.Control) != 0;
         var n = FaceGeometry.Normal(face);
         try
@@ -2990,12 +3032,12 @@ public partial class MainWindow : Window
             Commit(before, doc);
             _last = null; _lastMove = null; _selected = null; _hover = null;
             Render();
-            StatusText.Text = copy ? "✅ Gespiegelde kopie erbij." : "✅ Gespiegeld.";
+            StatusText.Text = copy ? T("✅ Gespiegelde kopie erbij.", "✅ Mirrored copy added.") : T("✅ Gespiegeld.", "✅ Mirrored.");
             Log(string.Create(CultureInfo.InvariantCulture, $"mirror body {h.Face.Body}{(copy ? " (copy)" : "")} in face {h.Face.Face}: ok"));
         }
         catch (PushPullException ex)
         {
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
         }
     }
@@ -3019,15 +3061,15 @@ public partial class MainWindow : Window
     }
 
     private string ChoiceText() => _multi is { } m
-        ? $"✔ {m.Faces.Count} {(m.Faces.Count == 1 ? "vlak" : "vlakken")} gekozen · ✥ verplaatst ze samen, 🎨 verft ze in één keer · Esc: keuze leeg."
-        : "Niets gekozen.";
+        ? T($"✔ {m.Faces.Count} {(m.Faces.Count == 1 ? "vlak" : "vlakken")} gekozen · ✥ verplaatst ze samen, 🎨 verft ze in één keer · Esc: keuze leeg.", $"✔ {m.Faces.Count} {(m.Faces.Count == 1 ? "face" : "faces")} selected · ✥ moves them together, 🎨 paints them at once · Esc: clear the selection.")
+        : T("Niets gekozen.", "Nothing selected.");
 
     private void StartLasso(Point pos)
     {
         _lasso = [pos];
         LassoLine.Points = new PointCollection([View.Viewport.TranslatePoint(pos, TagLayer)]);
         LassoLine.Visibility = Visibility.Visible;
-        StatusText.Text = "➰ Trek de lus om de vlakken en klik om hem te sluiten. Esc breekt af.";
+        StatusText.Text = T("➰ Trek de lus om de vlakken en klik om hem te sluiten. Esc breekt af.", "➰ Draw the loop round the faces and click to close it. Esc cancels.");
     }
 
     private void LassoTo(Point pos)
@@ -3051,7 +3093,7 @@ public partial class MainWindow : Window
     {
         if (_lasso is not { } poly || _doc == null) return;
         EndLasso();
-        if (poly.Count < 3) { StatusText.Text = "➰ Trek een lus: klik, beweeg om de vlakken heen en klik nog eens."; return; }
+        if (poly.Count < 3) { StatusText.Text = T("➰ Trek een lus: klik, beweeg om de vlakken heen en klik nog eens.", "➰ Draw a loop: click, move round the faces and click again."); return; }
         bool Inside(Point p)
         {
             bool inside = false;
@@ -3074,7 +3116,7 @@ public partial class MainWindow : Window
                 if (Inside(Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(mid)))) hits.Add(new FaceRef(b, f));
             }
         var mods = Mods;
-        if (hits.Count == 0 && (mods & (ModifierKeys.Shift | ModifierKeys.Control)) == 0) { _multi = null; UpdateHighlight(); StatusText.Text = "➰ Geen vlak binnen de lus."; return; }
+        if (hits.Count == 0 && (mods & (ModifierKeys.Shift | ModifierKeys.Control)) == 0) { _multi = null; UpdateHighlight(); StatusText.Text = T("➰ Geen vlak binnen de lus.", "➰ No face inside the loop."); return; }
         int body = _multi is { } cur && (mods & (ModifierKeys.Shift | ModifierKeys.Control)) != 0 ? cur.Body
             : hits.GroupBy(h => h.Body).OrderByDescending(g => g.Count()).First().Key;
         var set = (mods & (ModifierKeys.Shift | ModifierKeys.Control)) != 0 && _multi is { } c0 && c0.Body == body ? new HashSet<int>(c0.Faces) : new HashSet<int>();
@@ -3083,7 +3125,7 @@ public partial class MainWindow : Window
         _multi = set.Count > 0 ? (body, set) : null;
         _selected = null;
         UpdateHighlight();
-        StatusText.Text = ChoiceText() + (hits.Any(h => h.Body != body) ? " (alleen van één lichaam)" : "");
+        StatusText.Text = ChoiceText() + (hits.Any(h => h.Body != body) ? T(" (alleen van één lichaam)", " (of one body only)") : "");
         Log($"lasso: {set.Count} face(s) of body {body}");
     }
 
@@ -3109,9 +3151,9 @@ public partial class MainWindow : Window
         _scFixed = V(h.Point); _scAxis = null; _scFactor = 1; _scOk = false;
         _scBase = _doc; _scStage = 1; _lastScale = null; _last = null; _lastMove = null; _lastRotate = null; _typed = "";
         _selected = null; _hover = null; UpdateHighlight();
-        MeasureLabel.Text = "Factor"; MeasureUnit.Text = "×"; MeasureBox.Text = "";
+        MeasureLabel.Text = T("Factor", "Factor"); MeasureUnit.Text = "×"; MeasureBox.Text = "";
         ShowSketch([_scFixed]);
-        StatusText.Text = $"⇲ Schalen{(_scCopy ? " (kopie)" : "")}: dit punt blijft staan. Klik het punt waaraan je trekt, of typ de factor + Enter. Esc breekt af.";
+        StatusText.Text = T($"⇲ Schalen{(_scCopy ? " (kopie)" : "")}: dit punt blijft staan. Klik het punt waaraan je trekt, of typ de factor + Enter. Esc breekt af.", $"⇲ Scale{(_scCopy ? " (copy)" : "")}: this point stays put. Click the point you pull at, or type the factor + Enter. Esc cancels.");
     }
 
     private void EndScale()
@@ -3159,7 +3201,7 @@ public partial class MainWindow : Window
         // the factor: how far the mouse is from the fixed point compared with the point pulled at (along the axis held)
         var dir = _scAxis ?? (_scGrab - _scFixed);
         double baseLen = (_scGrab - _scFixed).Dot(dir.Normalized());
-        if (Math.Abs(baseLen) < 1e-9) { StatusText.Text = "⇲ Het punt waaraan je trekt ligt niet langs deze as; kies een andere (pijltjes) of typ de factor."; return; }
+        if (Math.Abs(baseLen) < 1e-9) { StatusText.Text = T("⇲ Het punt waaraan je trekt ligt niet langs deze as; kies een andere (pijltjes) of typ de factor.", "⇲ The point you pull at does not lie along this axis; choose another (arrow keys) or type the factor."); return; }
         if (NearestOnLine(pos, _scGrab, dir) is not { } q) return;
         double f = (q - _scFixed).Dot(dir.Normalized()) / baseLen;
         f = Math.Max(0.01, Math.Round(f * 100) / 100);
@@ -3174,7 +3216,7 @@ public partial class MainWindow : Window
             var (doc, _) = _scBase.ScaleBody(_scBody, _scFixed, f, _scAxis, _scCopy);
             _scOk = true;
             Render(doc);
-            StatusText.Text = $"⇲ {f.ToString("0.##", CultureInfo.CurrentCulture)}×{(axisName != null ? " langs de " + axisName : "")} · klik om vast te zetten, of typ de factor + Enter. Pijltjes: langs één as. Esc breekt af.";
+            StatusText.Text = T($"⇲ {f.ToString("0.##", CultureInfo.CurrentCulture)}×{(axisName != null ? " langs de " + axisName : "")} · klik om vast te zetten, of typ de factor + Enter. Pijltjes: langs één as. Esc breekt af.", $"⇲ {f.ToString("0.##", CultureInfo.CurrentCulture)}×{(axisName != null ? " along the " + axisName : "")} · click to set it, or type the factor + Enter. Arrow keys: along one axis. Esc cancels.");
         }
         catch (PushPullException ex) { _scOk = false; Render(_scBase); StatusText.Text = "⛔ " + ex.Message; }
     }
@@ -3185,7 +3227,7 @@ public partial class MainWindow : Window
         {
             if (ScalePoint(pos) is not { } p || (p - _scFixed).Length < 1e-6) return;
             _scGrab = p; _scStage = 2;
-            StatusText.Text = "⇲ Beweeg om te schalen; klik om vast te zetten, of typ de factor + Enter. Pijltjes: langs één as. Esc breekt af.";
+            StatusText.Text = T("⇲ Beweeg om te schalen; klik om vast te zetten, of typ de factor + Enter. Pijltjes: langs één as. Esc breekt af.", "⇲ Move to scale; click to set it, or type the factor + Enter. Arrow keys: along one axis. Esc cancels.");
             return;
         }
         ScaleTo(pos);
@@ -3205,14 +3247,14 @@ public partial class MainWindow : Window
             _lastScale = (before, body, fixedPoint, along, copy);
             _last = null; _lastMove = null; _selected = null;
             Render();
-            MeasureLabel.Text = "Factor"; MeasureUnit.Text = "×"; MeasureBox.Text = factor.ToString("0.###", CultureInfo.CurrentCulture);
-            StatusText.Text = $"✅ {(copy ? "Geschaalde kopie" : "Geschaald")}: {factor.ToString("0.###", CultureInfo.CurrentCulture)}×. Typ een andere factor + Enter om het aan te passen.";
+            MeasureLabel.Text = T("Factor", "Factor"); MeasureUnit.Text = "×"; MeasureBox.Text = factor.ToString("0.###", CultureInfo.CurrentCulture);
+            StatusText.Text = T($"✅ {(copy ? "Geschaalde kopie" : "Geschaald")}: {factor.ToString("0.###", CultureInfo.CurrentCulture)}×. Typ een andere factor + Enter om het aan te passen.", $"✅ {(copy ? "Scaled copy" : "Scaled")}: {factor.ToString("0.###", CultureInfo.CurrentCulture)}×. Type another factor + Enter to change it.");
             Log(string.Create(CultureInfo.InvariantCulture, $"scale body {body}{(copy ? " (copy)" : "")} {factor:0.###}x{(along is { } a ? $" along ({a.X:0},{a.Y:0},{a.Z:0})" : "")} from ({fixedPoint.X * Display:0.###},{fixedPoint.Y * Display:0.###},{fixedPoint.Z * Display:0.###}): ok"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
         }
     }
@@ -3253,10 +3295,10 @@ public partial class MainWindow : Window
             _rotCentre = a + ax * (V(h.Point) - a).Dot(ax); _rotAxis = ax; _rotFaceAxis = ax; _rotRef = into.Normalized();
             _rotBase = _doc; _lastRotate = null; _last = null; _lastMove = null; _typed = "";
             _selected = null; _hover = null; UpdateHighlight();
-            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = "";
+            MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = "";
             _rotStage = 2; _rotOk = false; _rotAngle = 0;
             ShowProtractor(_rotRef, null);
-            StatusText.Text = "↻ Kantelen om deze rand: beweeg (stappen van 15°) en klik, of typ de hoek + Enter. Esc breekt af.";
+            StatusText.Text = T("↻ Kantelen om deze rand: beweeg (stappen van 15°) en klik, of typ de hoek + Enter. Esc breekt af.", "↻ Tilt round this edge: move (steps of 15°) and click, or type the angle + Enter. Esc cancels.");
             return;
         }
         _rotBody = h.Face.Body; _rotCopy = (Mods & ModifierKeys.Control) != 0;
@@ -3264,7 +3306,7 @@ public partial class MainWindow : Window
         _rotFaceAxis = face.Surface is BrepPlane ? FaceGeometry.Normal(face) : Axes[2].Dir;
         _rotBase = _doc; _lastRotate = null; _last = null; _lastMove = null; _typed = "";
         _selected = null; _hover = null; UpdateHighlight();
-        MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = "";
+        MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = "";
         SetRotateAxis(_rotFaceAxis);
     }
 
@@ -3272,8 +3314,8 @@ public partial class MainWindow : Window
     {
         _rotAxis = axis.Normalized(); _rotStage = 1; _rotOk = false; _rotAngle = 0;
         if (_rotBase != null) Render(_rotBase);
-        string which = Axes.FirstOrDefault(a => Math.Abs(a.Dir.Dot(_rotAxis)) > 1 - 1e-9).Name ?? "as haaks op het vlak";
-        StatusText.Text = $"↻ Draaien{(_rotCopy ? " (kopie)" : "")} om de {which}: klik de beginrichting, of typ de hoek + Enter. Pijltjes: andere as. Esc breekt af.";
+        string which = Axes.FirstOrDefault(a => Math.Abs(a.Dir.Dot(_rotAxis)) > 1 - 1e-9).Name ?? T("as haaks op het vlak", "axis square to the face");
+        StatusText.Text = T($"↻ Draaien{(_rotCopy ? " (kopie)" : "")} om de {which}: klik de beginrichting, of typ de hoek + Enter. Pijltjes: andere as. Esc breekt af.", $"↻ Rotate{(_rotCopy ? " (copy)" : "")} round the {which}: click the start direction, or type the angle + Enter. Arrow keys: another axis. Esc cancels.");
         ShowProtractor(null, null);
     }
 
@@ -3341,7 +3383,7 @@ public partial class MainWindow : Window
                 : _rotBase.RotateBody(_rotBody, _rotCentre, _rotAxis, _rotAngle, _rotCopy).Doc;
             _rotOk = true;
             Render(doc);
-            StatusText.Text = $"↻ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 && deg != 0 ? " · 🎯 15°-stap" : "")} · klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.";
+            StatusText.Text = T($"↻ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 && deg != 0 ? " · 🎯 15°-stap" : "")} · klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.", $"↻ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 && deg != 0 ? " · 🎯 15° step" : "")} · click to set it, or type the angle + Enter. Esc cancels.");
         }
         catch (PushPullException ex) { _rotOk = false; StatusText.Text = "⛔ " + ex.Message; }
     }
@@ -3354,7 +3396,7 @@ public partial class MainWindow : Window
             var v = p - _rotCentre; v -= _rotAxis * v.Dot(_rotAxis);
             if (v.Length < 1e-7) return;
             _rotRef = v.Normalized(); _rotStage = 2;
-            StatusText.Text = "↻ Beweeg om te draaien; klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.";
+            StatusText.Text = T("↻ Beweeg om te draaien; klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.", "↻ Move to rotate; click to set it, or type the angle + Enter. Esc cancels.");
             return;
         }
         RotateTo(pos);
@@ -3375,14 +3417,14 @@ public partial class MainWindow : Window
             _lastRotate = (before, body, centre, axis, copy, Math.Sign(angle) == 0 ? 1 : Math.Sign(angle), tilt);
             _last = null; _lastMove = null; _selected = null;
             Render();
-            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = deg.ToString("0.#", CultureInfo.CurrentCulture);
-            StatusText.Text = $"✅ {(tilt != null ? "Gekanteld" : copy ? "Gedraaide kopie" : "Gedraaid")}: {deg.ToString("0.#", CultureInfo.CurrentCulture)}°. Typ een andere hoek + Enter om het aan te passen.";
+            MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = deg.ToString("0.#", CultureInfo.CurrentCulture);
+            StatusText.Text = T($"✅ {(tilt != null ? "Gekanteld" : copy ? "Gedraaide kopie" : "Gedraaid")}: {deg.ToString("0.#", CultureInfo.CurrentCulture)}°. Typ een andere hoek + Enter om het aan te passen.", $"✅ {(tilt != null ? "Tilted" : copy ? "Rotated copy" : "Rotated")}: {deg.ToString("0.#", CultureInfo.CurrentCulture)}°. Type another angle + Enter to change it.");
             Log(string.Create(CultureInfo.InvariantCulture, $"rotate {(tilt is { } lt ? $"face {lt.Face} of" : "")} body {body}{(copy ? " (copy)" : "")} {deg:0.###}° round ({axis.X:0.###},{axis.Y:0.###},{axis.Z:0.###}) at ({centre.X * Display:0.###},{centre.Y * Display:0.###},{centre.Z * Display:0.###}): ok"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
         }
     }
@@ -3422,7 +3464,7 @@ public partial class MainWindow : Window
     }
 
     private string RoundSelText() => _roundSel is { } sel && sel.Edges.Count > 0
-        ? $"{sel.Edges.Count} {(sel.Edges.Count == 1 ? "rand" : "randen")} gekozen · klik een rand om de straal met de muis te geven, of typ de straal + Enter · "
+        ? T($"{sel.Edges.Count} {(sel.Edges.Count == 1 ? "rand" : "randen")} gekozen · klik een rand om de straal met de muis te geven, of typ de straal + Enter · ", $"{sel.Edges.Count} {(sel.Edges.Count == 1 ? "edge" : "edges")} selected · click an edge to give the radius with the mouse, or type the radius + Enter · ")
         : "";
 
     private void HoverRound((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -3430,8 +3472,8 @@ public partial class MainWindow : Window
         var e = EdgeAt(hit, pos);
         ShowRoundEdges(e?.Body, e?.Edge);
         StatusText.Text = "◠ " + RoundSelText() + (e is { } he && _doc!.Bodies[he.Body].Edges[he.Edge].Curve is not BrepLine
-            ? "alleen rechte randen kunnen (nog) afgerond worden."
-            : "klik een rand · Shift: rand erbij/eraf · Ctrl: alle randen van het vlak · Ctrl+Shift: alle randen van het lichaam.");
+            ? T("alleen rechte randen kunnen (nog) afgerond worden.", "only straight edges can be rounded (for now).")
+            : T("klik een rand · Shift: rand erbij/eraf · Ctrl: alle randen van het vlak · Ctrl+Shift: alle randen van het lichaam.", "click an edge · Shift: add/remove an edge · Ctrl: all edges of the face · Ctrl+Shift: all edges of the body."));
     }
 
     /// <summary>A click with ◠: Shift toggles an edge, Ctrl takes all edges of the face (with Shift: of the body), a plain
@@ -3453,7 +3495,7 @@ public partial class MainWindow : Window
             return;
         }
         if (EdgeAt(hit, pos) is not { } e) return;
-        if (!Straight(e.Edge)) { StatusText.Text = "◠ Alleen een rechte rand kan (nog) afgerond worden."; return; }
+        if (!Straight(e.Edge)) { StatusText.Text = T("◠ Alleen een rechte rand kan (nog) afgerond worden.", "◠ Only a straight edge can be rounded (for now)."); return; }
         if (shift)
         {
             var list = sel.ToList();
@@ -3461,7 +3503,7 @@ public partial class MainWindow : Window
             _roundSel = (e.Body, list);
             _lastRound = null;
             ShowRoundEdges();
-            StatusText.Text = "◠ " + (list.Count > 0 ? RoundSelText() : "Geen randen gekozen.");
+            StatusText.Text = "◠ " + (list.Count > 0 ? RoundSelText() : T("Geen randen gekozen.", "No edges selected."));
             return;
         }
         if (!sel.Contains(e.Edge)) _roundSel = (e.Body, sel.Append(e.Edge).ToList());
@@ -3469,8 +3511,8 @@ public partial class MainWindow : Window
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         UpdateHighlight();
         ShowRoundEdges();
-        MeasureLabel.Text = "Straal"; MeasureBox.Text = "";
-        StatusText.Text = "◠ Beweeg de muis van de rand af voor de straal; klik om vast te zetten, of typ de straal + Enter. Esc breekt af.";
+        MeasureLabel.Text = T("Straal", "Radius"); MeasureBox.Text = "";
+        StatusText.Text = T("◠ Beweeg de muis van de rand af voor de straal; klik om vast te zetten, of typ de straal + Enter. Esc breekt af.", "◠ Move the mouse away from the edge for the radius; click to set it, or type the radius + Enter. Esc cancels.");
     }
 
     /// <summary>A sharp straight edge between two flat faces within 6 pixels of the mouse (for ⇕: a click rounds it).</summary>
@@ -3513,8 +3555,8 @@ public partial class MainWindow : Window
             var (doc, _) = _doc.RoundEdges(sel.Body, sel.Edges, r);
             _roundOk = true;
             Render(doc);
-            StatusText.Text = $"◠ Straal {Mm(r)} mm · klik om vast te zetten, of typ de straal + Enter. Esc breekt af.";
-            ShowTag("R " + Mm(r) + " mm", pos);
+            StatusText.Text = T($"◠ Straal {Mm(r)} mm · klik om vast te zetten, of typ de straal + Enter. Esc breekt af.", $"◠ Radius {Mm(r)} mm · click to set it, or type the radius + Enter. Esc cancels.");
+            ShowTag("R " + Mm(r) + T(" mm", " mm"), pos);
         }
         catch (PushPullException ex) { _roundOk = false; Render(); StatusText.Text = "⛔ " + ex.Message; }
     }
@@ -3539,14 +3581,14 @@ public partial class MainWindow : Window
             _lastRound = (before, body, edges, radius);
             _selected = faces[0];
             Render();
-            MeasureLabel.Text = "Straal"; MeasureBox.Text = Mm(radius);
-            StatusText.Text = $"✅ {(edges.Count == 1 ? "Afgerond" : $"{edges.Count} randen afgerond")} met R {Mm(radius)} mm. Typ een andere straal + Enter om het aan te passen.";
+            MeasureLabel.Text = T("Straal", "Radius"); MeasureBox.Text = Mm(radius);
+            StatusText.Text = T($"✅ {(edges.Count == 1 ? "Afgerond" : $"{edges.Count} randen afgerond")} met R {Mm(radius)} mm. Typ een andere straal + Enter om het aan te passen.", $"✅ {(edges.Count == 1 ? "Rounded" : $"{edges.Count} edges rounded")} with R {Mm(radius)} mm. Type another radius + Enter to change it.");
             Log(string.Create(CultureInfo.InvariantCulture, $"round {which} of body {body} r {radius * Display:0.###} mm: ok, {faces.Count} new faces"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log(string.Create(CultureInfo.InvariantCulture, $"round {which} of body {body} r {radius * Display:0.###} mm: {ex.Message}"));
         }
@@ -3567,9 +3609,9 @@ public partial class MainWindow : Window
         _offsetFace = f; _offsetDist = 0; _offsetOk = false; _typed = "";
         _selected = null; _hover = null; _lastOffset = null;
         UpdateHighlight();
-        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
+        MeasureLabel.Text = T("Afstand", "Distance"); MeasureUnit.Text = "mm";
         MeasureBox.Text = "0";
-        StatusText.Text = "▣ Beweeg de muis naar binnen; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.";
+        StatusText.Text = T("▣ Beweeg de muis naar binnen; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", "▣ Move the mouse inwards; click to set it, or type the distance + Enter. Esc cancels.");
     }
 
     private void EndOffset()
@@ -3587,7 +3629,7 @@ public partial class MainWindow : Window
         var body = _doc.Bodies[f.Body];
         var face = body.Faces[f.Face];
         _offsetOk = false;
-        if (!PushPullMe.Core.Drawing.Contains(body, f.Face, p)) { ShowSketch([]); MeasureBox.Text = "0"; StatusText.Text = "▣ Beweeg de muis naar binnen, op het vlak."; return; }
+        if (!PushPullMe.Core.Drawing.Contains(body, f.Face, p)) { ShowSketch([]); MeasureBox.Text = "0"; StatusText.Text = T("▣ Beweeg de muis naar binnen, op het vlak.", "▣ Move the mouse inwards, on the face."); return; }
         var outline = FaceGeometry.LoopPoints(body, face.Loops[0]);
         double d = double.MaxValue;
         for (int i = 0; i < outline.Count; i++)
@@ -3605,7 +3647,7 @@ public partial class MainWindow : Window
             var pts = corners ?? Enumerable.Range(0, 60).Select(i => circle!.Centre + (circle.XAxis * Math.Cos(i * Math.PI / 30) + circle.Normal.Cross(circle.XAxis) * Math.Sin(i * Math.PI / 30)) * circle.Radius).ToList();
             ShowSketch(pts, n, closed: true);
             _offsetOk = true;
-            StatusText.Text = $"▣ {Mm(_offsetDist)} mm naar binnen · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.";
+            StatusText.Text = T($"▣ {Mm(_offsetDist)} mm naar binnen · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", $"▣ {Mm(_offsetDist)} mm inwards · click to set it, or type the distance + Enter. Esc cancels.");
         }
         catch (PushPullException ex)
         {
@@ -3635,13 +3677,13 @@ public partial class MainWindow : Window
             _selected = inner; _lastDrawn = inner;
             Render();
             MeasureBox.Text = Mm(dist);
-            StatusText.Text = $"✅ Nieuwe rand {Mm(dist)} mm naar binnen. Typ een andere afstand + Enter om het aan te passen, of kies ⇕ (P) om het binnenvlak te verschuiven.";
+            StatusText.Text = T($"✅ Nieuwe rand {Mm(dist)} mm naar binnen. Typ een andere afstand + Enter om het aan te passen, of kies ⇕ (P) om het binnenvlak te verschuiven.", $"✅ New edge {Mm(dist)} mm inwards. Type another distance + Enter to change it, or choose ⇕ (P) to move the inner face.");
             Log(string.Create(CultureInfo.InvariantCulture, $"offset face {f.Face} {dist * Display:0.###} mm: ok, new face {inner.Face}"));
         }
         catch (PushPullException ex)
         {
             Render();
-            ShowToast("⛔ Dat lukt niet", ex.Message);
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log(string.Create(CultureInfo.InvariantCulture, $"offset face {f.Face} {dist * Display:0.###} mm: {ex.Message}"));
         }
@@ -3681,28 +3723,28 @@ public partial class MainWindow : Window
         switch (e.Key)
         {
             case Key.Escape:
-                if (_dragFace != null) { EndDrag(); _typed = ""; Render(); StatusText.Text = "Afgebroken."; }
-                else if (_movePick != null) { EndMove(); _typed = ""; Render(); StatusText.Text = "Afgebroken."; }
-                else if (_tapeStart != null) { EndTape(); _typed = ""; MeasureBox.Text = ""; StatusText.Text = "Afgebroken."; }
-                else if (_offsetFace != null) { EndOffset(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
-                else if (_swFace != null || _rrFace != null) { EndSweep(); EndRotRect(); EndFollow(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
-                else if (_arcFace != null) { EndArc(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
-                else if (_polyFace != null) { EndPolygon(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
-                else if (_scStage > 0) { EndScale(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = "Afgebroken."; }
-                else if (_rotStage > 0) { EndRotate(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = "Afgebroken."; }
-                else if (_roundEdge != null || _roundSel != null) { EndRound(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = "Afgebroken."; }
+                if (_dragFace != null) { EndDrag(); _typed = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_movePick != null) { EndMove(); _typed = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_tapeStart != null) { EndTape(); _typed = ""; MeasureBox.Text = ""; StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_offsetFace != null) { EndOffset(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_swFace != null || _rrFace != null) { EndSweep(); EndRotRect(); EndFollow(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_arcFace != null) { EndArc(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_polyFace != null) { EndPolygon(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_scStage > 0) { EndScale(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_rotStage > 0) { EndRotate(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_roundEdge != null || _roundSel != null) { EndRound(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_drawFace != null)
                 {
                     // (a line: only the piece at the mouse goes; the ones clicked stay, as loose lines, as in SketchUp)
                     int kept = LineMode ? _chainLines.Count : 0;
                     EndDraw(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight();
-                    StatusText.Text = LineMode ? (kept > 0 ? $"Klaar met de lijn: {kept} {(kept == 1 ? "losse lijn" : "losse lijnen")}. Ctrl+Z haalt er één weg." : "Klaar met de lijn.") : "Afgebroken.";
+                    StatusText.Text = LineMode ? (kept > 0 ? T($"Klaar met de lijn: {kept} {(kept == 1 ? "losse lijn" : "losse lijnen")}. Ctrl+Z haalt er één weg.", $"Done with the line: {kept} {(kept == 1 ? "loose line" : "loose lines")}. Ctrl+Z removes one.") : T("Klaar met de lijn.", "Done with the line.")) : T("Afgebroken.", "Cancelled.");
                 }
-                else if (_lasso != null) { EndLasso(); StatusText.Text = "Afgebroken."; }
-                else if (_fmFace != null) { EndFollow(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = "Afgebroken."; }
-                else if (_unionFirst != null) { _unionFirst = null; _selected = null; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
+                else if (_lasso != null) { EndLasso(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_fmFace != null) { EndFollow(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_unionFirst != null) { _unionFirst = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_typed.Length > 0) { _typed = ""; MeasureBox.Text = ""; }
-                else if (_multi != null) { _multi = null; _selected = null; UpdateHighlight(); StatusText.Text = "Keuze leeg."; }
+                else if (_multi != null) { _multi = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Keuze leeg.", "Selection cleared."); }
                 e.Handled = true;
                 break;
             case Key.Back when _typed.Length > 0:
@@ -3731,7 +3773,7 @@ public partial class MainWindow : Window
                 break;
             case Key.Delete when TapeMode && _typed.Length == 0:
                 ClearGuides(); EndTape();
-                StatusText.Text = "🧹 Alle hulplijnen zijn weg.";
+                StatusText.Text = T("🧹 Alle hulplijnen zijn weg.", "🧹 All guide lines are gone.");
                 Log("guides cleared");
                 e.Handled = true;
                 break;
@@ -3742,7 +3784,7 @@ public partial class MainWindow : Window
                 // more or fewer corners (3 to 24)
                 _polySides = Math.Clamp(_polySides + (e.Key == Key.Up ? 1 : -1), 3, 24);
                 if (_polyFace != null) PolygonTo(Mouse.GetPosition(View.Viewport));
-                else StatusText.Text = $"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): klik het middelpunt op een plat vlak.";
+                else StatusText.Text = T($"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): klik het middelpunt op een plat vlak.", $"⬡ Polygon ({_polySides} sides; ↑/↓: more/fewer): click the centre on a flat face.");
                 e.Handled = true;
                 break;
             case Key.Right or Key.Left or Key.Up or Key.Down when _scStage > 0:
@@ -3820,8 +3862,8 @@ public partial class MainWindow : Window
                 // the radius: the start the way the mouse points (or along the face's axis)
                 var dir = _swDir.Length > 1e-12 ? _swDir : RectAxis(NormalOf(sface));
                 _swStart = _swCentre + dir * (Math.Abs(mm) / Display); _swStage = 2; _swAngle = 0;
-                StatusText.Text = $"{SweepIcon} Beweeg voor de hoek en klik, of typ de hoek + Enter. Esc breekt af.";
-                MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = "";
+                StatusText.Text = T($"{SweepIcon} Beweeg voor de hoek en klik, of typ de hoek + Enter. Esc breekt af.", $"{SweepIcon} Move for the angle and click, or type the angle + Enter. Esc cancels.");
+                MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = "";
                 return;
             }
             double ang = Math.Abs(mm) * Math.PI / 180 * (_swAngle < 0 ? -1 : 1) * (mm < 0 ? -1 : 1);
@@ -3897,7 +3939,7 @@ public partial class MainWindow : Window
         {
             // along the way it is going now (or the axis held)
             var d = _moveAxis is int ax ? Axes[ax].Dir * (_moveOffset.Dot(Axes[ax].Dir) < 0 ? -1 : 1) : _moveOffset.Length > 1e-12 ? _moveOffset.Normalized() : default;
-            if (d.Length < 0.5) { StatusText.Text = "✥ Beweeg eerst de muis in de richting om te verplaatsen."; return; }
+            if (d.Length < 0.5) { StatusText.Text = T("✥ Beweeg eerst de muis in de richting om te verplaatsen.", "✥ First move the mouse in the direction to move."); return; }
             EndMove();
             ApplyMove(mb, mp.Body, mp.Pick, d * Math.Abs(dist), replaceLast: false);
             return;
@@ -3928,7 +3970,7 @@ public partial class MainWindow : Window
     private bool RadiusDistance(SketchDocument doc, FaceRef f, double radiusMm, out double dist)
     {
         dist = 0;
-        if (radiusMm <= 0) { StatusText.Text = "⛔ Een straal moet groter dan 0 zijn."; MeasureBox.Text = ""; return false; }
+        if (radiusMm <= 0) { StatusText.Text = T("⛔ Een straal moet groter dan 0 zijn.", "⛔ A radius must be more than 0."); MeasureBox.Text = ""; return false; }
         try { dist = PushPullMe.Core.PushPull.DistanceForRadius(doc.Bodies[f.Body], f.Face, radiusMm / Display); return true; }
         catch (PushPullException ex) { StatusText.Text = "⛔ " + ex.Message; return false; }
     }
@@ -4004,7 +4046,7 @@ public partial class MainWindow : Window
                     Vec3 Pt(string s) { var c = s.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture) / Display).ToArray(); return new Vec3(c[0], c[1], c[2]); }
                     var f = new FaceRef(0, face);
                     var u = RectAxis(FaceGeometry.Normal(_doc!.Bodies[0].Faces[face]));
-                    DrawShape(_doc, f, Pt(parts[2]), Pt(parts[3]), u, parts[0]);
+                    DrawShape(_doc, f, Pt(parts[2]), Pt(parts[3]), u, parts[0] switch { "rect" => DrawKind.Rectangle, "circle" => DrawKind.Circle, _ => DrawKind.Line });
                     report.AppendLine($"{step}: {StatusText.Text} | faces {_doc!.Bodies[0].Faces.Count}");
                 }
             if (Environment.GetEnvironmentVariable("PPM_PUSH") is { Length: > 0 } pushes && _doc != null)

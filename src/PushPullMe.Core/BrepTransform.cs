@@ -28,7 +28,7 @@ public static class BrepTransform
     /// </summary>
     public static BrepBody Scaled(BrepBody body, Vec3 fixedPoint, double factor, Vec3? along = null)
     {
-        if (factor <= 1e-6) throw new PushPullException("Schalen moet met een factor groter dan 0.");
+        if (factor <= 1e-6) throw new PushPullException(Lang.T("Schalen moet met een factor groter dan 0.", "Scaling needs a factor of more than 0."));
         if (along is { } ax)
         {
             var a = ax.Normalized();
@@ -37,7 +37,7 @@ public static class BrepTransform
             Vec3 Normal(Vec3 n) => (n + a * (n.Dot(a) * (1 / factor - 1))).Normalized();
             Vec3 InPlane(Vec3 x, Vec3 n) { var y = Pt(fixedPoint + x) - fixedPoint; return (y - n * y.Dot(n)).Normalized(); }
             if (body.Edges.Any(e => e.Curve is not BrepLine) || body.Faces.Any(f => f.Surface is not BrepPlane))
-                throw new PushPullException("Langs één as schalen kan (nog) alleen bij rechte randen en platte vlakken; een ronding zou ovaal worden. Schaal in alle richtingen.");
+                throw new PushPullException(Lang.T("Langs één as schalen kan (nog) alleen bij rechte randen en platte vlakken; een ronding zou ovaal worden. Schaal in alle richtingen.", "Scaling along one axis only works (for now) with straight edges and flat faces; a rounding would become oval. Scale in all directions."));
             return new BrepBody
             {
                 Vertices = body.Vertices.Select(Pt).ToList(),
@@ -57,7 +57,7 @@ public static class BrepTransform
             BrepCircle ci => ci with { Centre = P(ci.Centre), Radius = ci.Radius * factor },
             BrepEllipse el => el with { Centre = P(el.Centre), MajorRadius = el.MajorRadius * factor, MinorRadius = el.MinorRadius * factor },
             BrepBSpline bs => bs with { ControlPoints = bs.ControlPoints.Select(P).ToList(), Helix = null },
-            _ => throw new PushPullException("Dit lichaam heeft een rand die (nog) niet geschaald kan worden."),
+            _ => throw new PushPullException(Lang.T("Dit lichaam heeft een rand die (nog) niet geschaald kan worden.", "This body has an edge that cannot be scaled (yet).")),
         };
         BrepSurface Sf(BrepSurface s) => s switch
         {
@@ -67,7 +67,7 @@ public static class BrepTransform
             BrepSphere sp => sp with { Centre = P(sp.Centre), Radius = sp.Radius * factor },
             BrepTorus t => t with { Centre = P(t.Centre), MajorRadius = t.MajorRadius * factor, MinorRadius = t.MinorRadius * factor },
             BrepNurbsSurface n when n.Helix == null => n with { Points = n.Points.Select(P).ToList() },
-            _ => throw new PushPullException("Dit lichaam heeft een vlak dat (nog) niet geschaald kan worden."),
+            _ => throw new PushPullException(Lang.T("Dit lichaam heeft een vlak dat (nog) niet geschaald kan worden.", "This body has a face that cannot be scaled (yet).")),
         };
         return new BrepBody
         {
@@ -94,7 +94,7 @@ public static class BrepTransform
             BrepCircle ci => ci with { Centre = P(ci.Centre), Normal = D(ci.Normal) * -1, XAxis = D(ci.XAxis) },
             BrepEllipse el => el with { Centre = P(el.Centre), Normal = D(el.Normal) * -1, XAxis = D(el.XAxis) },
             BrepBSpline bs => bs with { ControlPoints = bs.ControlPoints.Select(P).ToList(), Helix = null },
-            _ => throw new PushPullException("Dit lichaam heeft een rand die (nog) niet gespiegeld kan worden."),
+            _ => throw new PushPullException(Lang.T("Dit lichaam heeft een rand die (nog) niet gespiegeld kan worden.", "This body has an edge that cannot be mirrored (yet).")),
         };
         (BrepSurface, bool Flip) S(BrepSurface s) => s switch
         {
@@ -104,7 +104,7 @@ public static class BrepTransform
             BrepSphere sp => (sp with { Centre = P(sp.Centre), Axis = D(sp.Axis), XAxis = D(sp.XAxis) }, false),
             BrepTorus t => (t with { Centre = P(t.Centre), Axis = D(t.Axis), XAxis = D(t.XAxis) }, false),
             BrepNurbsSurface ns when ns.Helix == null => (ns with { Points = ns.Points.Select(P).ToList() }, true),
-            _ => throw new PushPullException("Dit lichaam heeft een vlak dat (nog) niet gespiegeld kan worden."),
+            _ => throw new PushPullException(Lang.T("Dit lichaam heeft een vlak dat (nog) niet gespiegeld kan worden.", "This body has a face that cannot be mirrored (yet).")),
         };
         return new BrepBody
         {
@@ -136,7 +136,7 @@ public static class BrepTransform
         BrepCircle ci => ci with { Centre = t.Point(ci.Centre), Normal = t.Dir(ci.Normal), XAxis = t.Dir(ci.XAxis) },
         BrepEllipse el => el with { Centre = t.Point(el.Centre), Normal = t.Dir(el.Normal), XAxis = t.Dir(el.XAxis) },
         BrepBSpline bs => bs with { ControlPoints = bs.ControlPoints.Select(t.Point).ToList(), Helix = null },
-        _ => throw new PushPullException("Dit lichaam heeft een rand die (nog) niet gedraaid kan worden."),
+        _ => throw new PushPullException(Lang.T("Dit lichaam heeft een rand die (nog) niet gedraaid kan worden.", "This body has an edge that cannot be rotated (yet).")),
     };
 
     private static BrepSurface Surface(BrepSurface s, Turn t) => s switch
@@ -147,7 +147,7 @@ public static class BrepTransform
         BrepSphere sp => sp with { Centre = t.Point(sp.Centre), Axis = t.Dir(sp.Axis), XAxis = t.Dir(sp.XAxis) },
         BrepTorus to => to with { Centre = t.Point(to.Centre), Axis = t.Dir(to.Axis), XAxis = t.Dir(to.XAxis) },
         BrepNurbsSurface n when n.Helix == null => n with { Points = n.Points.Select(t.Point).ToList() },
-        _ => throw new PushPullException("Dit lichaam heeft een vlak dat (nog) niet gedraaid kan worden."),
+        _ => throw new PushPullException(Lang.T("Dit lichaam heeft een vlak dat (nog) niet gedraaid kan worden.", "This body has a face that cannot be rotated (yet).")),
     };
 
     public static BrepBody Translated(BrepBody body, Vec3 d) => new()
@@ -163,7 +163,7 @@ public static class BrepTransform
         BrepCircle ci => ci with { Centre = ci.Centre + d },
         BrepEllipse el => el with { Centre = el.Centre + d },
         BrepBSpline bs => bs with { ControlPoints = bs.ControlPoints.Select(p => p + d).ToList() },
-        _ => throw new PushPullException("Dit lichaam heeft een rand die (nog) niet verplaatst kan worden."),
+        _ => throw new PushPullException(Lang.T("Dit lichaam heeft een rand die (nog) niet verplaatst kan worden.", "This body has an edge that cannot be moved (yet).")),
     };
 
     private static BrepSurface Surface(BrepSurface s, Vec3 d) => s switch
@@ -174,6 +174,6 @@ public static class BrepTransform
         BrepSphere sp => sp with { Centre = sp.Centre + d },
         BrepTorus t => t with { Centre = t.Centre + d },
         BrepNurbsSurface n => n with { Points = n.Points.Select(p => p + d).ToList() },
-        _ => throw new PushPullException("Dit lichaam heeft een vlak dat (nog) niet verplaatst kan worden."),
+        _ => throw new PushPullException(Lang.T("Dit lichaam heeft een vlak dat (nog) niet verplaatst kan worden.", "This body has a face that cannot be moved (yet).")),
     };
 }

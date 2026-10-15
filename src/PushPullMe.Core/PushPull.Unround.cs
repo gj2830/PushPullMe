@@ -22,7 +22,7 @@ public static partial class PushPull
     public static (BrepBody Body, int[] FaceMap, List<(int Edge, int From, double Radius)> Edges, double Radius, int[] EdgeMap) UnroundMapped(BrepBody body, int face)
     {
         var F = body.Faces[face];
-        double r = F.Surface switch { BrepCylinder c => c.Radius, BrepSphere s => s.Radius, BrepTorus t => t.MinorRadius, _ => throw new PushPullException("Dit is geen ronding.") };
+        double r = F.Surface switch { BrepCylinder c => c.Radius, BrepSphere s => s.Radius, BrepTorus t => t.MinorRadius, _ => throw new PushPullException(Lang.T("Dit is geen ronding.", "This is not a rounding.")) };
         var facesOf = new Dictionary<int, List<int>>();
         for (int g = 0; g < body.Faces.Count; g++)
             foreach (var c in body.Faces[g].Loops.SelectMany(l => l))
@@ -43,7 +43,7 @@ public static partial class PushPull
                     foreach (int h in facesOf[c.Edge])
                         if (!set.Contains(h) && Candidate(h)) { set.Add(h); queue.Enqueue(h); }
         var setEdges = set.SelectMany(g => body.Faces[g].Loops.SelectMany(l => l)).Select(c => c.Edge).ToHashSet();
-        if (setEdges.Any(e => body.Edges[e].Start < 0)) throw new PushPullException("Deze ronding loopt helemaal rond; die kan (nog) niet anders.");
+        if (setEdges.Any(e => body.Edges[e].Start < 0)) throw new PushPullException(Lang.T("Deze ronding loopt helemaal rond; die kan (nog) niet anders.", "This rounding goes all the way round; it cannot be changed (yet)."));
 
         // per rounding cylinder: its two straight edges and the flat faces they lie on
         var cyl = new List<(int Face, int L1, int L2, int A, int B)>();
@@ -52,10 +52,10 @@ public static partial class PushPull
             var lines = body.Faces[g].Loops.SelectMany(l => l).Select(c => c.Edge).Where(e => body.Edges[e].Curve is BrepLine).Distinct().ToList();
             var onFlat = lines.Select(e => (e, f: facesOf[e].Where(h => h != g).ToList())).ToList();
             if (onFlat.Count != 2 || onFlat.Any(x => x.f.Count != 1 || body.Faces[x.f[0]].Surface is not BrepPlane))
-                throw new PushPullException("Deze ronding ligt niet tussen twee platte vlakken; die kan (nog) niet anders.");
+                throw new PushPullException(Lang.T("Deze ronding ligt niet tussen twee platte vlakken; die kan (nog) niet anders.", "This rounding does not lie between two flat faces; it cannot be changed (yet)."));
             cyl.Add((g, onFlat[0].e, onFlat[1].e, onFlat[0].f[0], onFlat[1].f[0]));
         }
-        if (cyl.Count == 0) throw new PushPullException("Dit is geen ronding tussen vlakken.");
+        if (cyl.Count == 0) throw new PushPullException(Lang.T("Dit is geen ronding tussen vlakken.", "This is not a rounding between faces."));
 
         // the corners: the points of the roundings that their curved edges join (a ball's three, a mitre's two, an end arc's two)
         var parent = new Dictionary<int, int>();
@@ -72,7 +72,7 @@ public static partial class PushPull
         foreach (int e in setEdges.Where(e => body.Edges[e].Curve is not BrepLine))
             foreach (int h in facesOf[e].Where(h => !set.Contains(h)))
             {
-                if (body.Faces[h].Surface is not BrepPlane) throw new PushPullException("Deze ronding grenst aan een ander rond vlak; die kan (nog) niet anders.");
+                if (body.Faces[h].Surface is not BrepPlane) throw new PushPullException(Lang.T("Deze ronding grenst aan een ander rond vlak; die kan (nog) niet anders.", "This rounding borders on another round face; it cannot be changed (yet)."));
                 planesOf[Find(body.Edges[e].Start)].Add(h);
             }
         var verts = body.Vertices.ToList();
@@ -87,10 +87,10 @@ public static partial class PushPull
                 double[] nv = [n.X, n.Y, n.Z];
                 for (int i = 0; i < 3; i++) { rhs[i] += nv[i] * d; for (int j = 0; j < 3; j++) m[i, j] += nv[i] * nv[j]; }
             }
-            var x = Solve3(m, rhs) ?? throw new PushPullException("De vlakken bij een hoek van deze ronding komen niet in één punt samen; die kan (nog) niet anders.");
+            var x = Solve3(m, rhs) ?? throw new PushPullException(Lang.T("De vlakken bij een hoek van deze ronding komen niet in één punt samen; die kan (nog) niet anders.", "The faces at a corner of this rounding do not meet in one point; it cannot be changed (yet)."));
             var p0 = new Vec3(x[0], x[1], x[2]);
             if (ps.Any(q => Math.Abs(q.N.Dot(p0) - q.D) > 10 * DistanceTol))
-                throw new PushPullException("De vlakken bij een hoek van deze ronding komen niet in één punt samen; die kan (nog) niet anders.");
+                throw new PushPullException(Lang.T("De vlakken bij een hoek van deze ronding komen niet in één punt samen; die kan (nog) niet anders.", "The faces at a corner of this rounding do not meet in one point; it cannot be changed (yet)."));
             corner[k] = verts.Count; verts.Add(p0);
         }
         int Map(int v) => parent.ContainsKey(v) ? corner[Find(v)] : v;
@@ -103,9 +103,9 @@ public static partial class PushPull
         {
             var e1 = body.Edges[c.L1]; var e2 = body.Edges[c.L2];
             int s = Map(e1.Start), t = Map(e1.End);
-            if (s == t) throw new PushPullException("Deze ronding kan (nog) niet anders.");
+            if (s == t) throw new PushPullException(Lang.T("Deze ronding kan (nog) niet anders.", "This rounding cannot be changed (yet)."));
             bool flip = Map(e2.Start) == t && Map(e2.End) == s;
-            if (!flip && !(Map(e2.Start) == s && Map(e2.End) == t)) throw new PushPullException("Deze ronding kan (nog) niet anders.");
+            if (!flip && !(Map(e2.Start) == s && Map(e2.End) == t)) throw new PushPullException(Lang.T("Deze ronding kan (nog) niet anders.", "This rounding cannot be changed (yet)."));
             edges[c.L1] = new BrepEdge(s, t, new BrepLine());
             edges[c.L2] = null;
             replace[c.L2] = (c.L1, flip);
@@ -115,9 +115,9 @@ public static partial class PushPull
         for (int e = 0; e < edges.Count; e++)
             if (edges[e] is { Start: >= 0 } x && !setEdges.Contains(e) && (parent.ContainsKey(x.Start) || parent.ContainsKey(x.End)))
             {
-                if (x.Curve is not BrepLine) throw new PushPullException("Bij een hoek van deze ronding komt een gebogen rand uit; die kan (nog) niet anders.");
+                if (x.Curve is not BrepLine) throw new PushPullException(Lang.T("Bij een hoek van deze ronding komt een gebogen rand uit; die kan (nog) niet anders.", "A curved edge ends at a corner of this rounding; it cannot be changed (yet)."));
                 edges[e] = x with { Start = Map(x.Start), End = Map(x.End) };
-                if (edges[e]!.Start == edges[e]!.End) throw new PushPullException("Deze ronding kan (nog) niet anders.");
+                if (edges[e]!.Start == edges[e]!.End) throw new PushPullException(Lang.T("Deze ronding kan (nog) niet anders.", "This rounding cannot be changed (yet)."));
             }
         // the faces: the roundings out; in the flat ones the curved edges out, the second straight edge of a rounding becomes its sharp edge
         var faceMap = new int[body.Faces.Count];
@@ -155,7 +155,7 @@ public static partial class PushPull
             Faces = outFaces.Select(f => f with { Loops = f.Loops.Select(l => (IReadOnlyList<BrepCoedge>)l.Select(c => c with { Edge = eMap[c.Edge] }).ToList()).ToList() }).ToList(),
         };
         Check(result, changed);
-        if (SignedVolume(result) is double vol && vol <= 0) throw new PushPullException("Zo klopt de vorm niet meer (binnenstebuiten).");
+        if (SignedVolume(result) is double vol && vol <= 0) throw new PushPullException(Lang.T("Zo klopt de vorm niet meer (binnenstebuiten).", "That way the shape is no longer right (inside out)."));
         var edgeMap = Enumerable.Range(0, body.Edges.Count).Select(e => eMap.TryGetValue(e, out int ne) ? ne : -1).ToArray();
         return (result, faceMap, sharp.Select(x => (eMap[x.Edge], x.From, x.Radius)).ToList(), r, edgeMap);
     }
@@ -183,7 +183,7 @@ public static partial class PushPull
             var (sharp, fmap, from, _, emap) = UnroundMapped(cur, face);
             again = again.Select(x => (emap[x.Edge], x.Radius)).Concat(from.Select(x => (x.Edge, x.Radius))).ToList();
             wanted = wanted.Select(x => (emap[x.Edge], x.Radius)).ToList();
-            if (wanted.Any(x => x.Edge < 0) || again.Any(x => x.Edge < 0)) throw new PushPullException("Deze rand kan (nog) niet samen met de rondingen ernaast afgerond worden.");
+            if (wanted.Any(x => x.Edge < 0) || again.Any(x => x.Edge < 0)) throw new PushPullException(Lang.T("Deze rand kan (nog) niet samen met de rondingen ernaast afgerond worden.", "This edge cannot be rounded together with the roundings next to it (yet)."));
             faceMap = faceMap.Select(f => f < 0 ? -1 : fmap[f]).ToArray();
             cur = sharp;
         }
@@ -224,7 +224,7 @@ public static partial class PushPull
     public static PushPullResult ChangeRounding(BrepBody body, int face, double distance)
     {
         double radius = RadiusAfter(body, face, distance);
-        if (radius < 1e-5) throw new PushPullException("Zo wordt de ronding zo klein dat hij verdwijnt.");
+        if (radius < 1e-5) throw new PushPullException(Lang.T("Zo wordt de ronding zo klein dat hij verdwijnt.", "That way the rounding gets so small that it disappears."));
         var (sharp, map, edgesFrom, _) = Unround(body, face);
         // only this rounding gets the new radius (the others keep theirs); where that cannot (a ball corner), all of them
         BrepBody b; List<int> newFaces;
@@ -232,7 +232,7 @@ public static partial class PushPull
         else
             // (not all of them instead, unasked: a corner piece clicked does that)
             try { (b, newFaces) = RoundEdges(sharp, edgesFrom.Select(x => (x.Edge, x.From == face ? radius : x.Radius)).ToList()); }
-            catch (PushPullException ex) { throw new PushPullException(ex.Message + " (Alle rondingen tegelijk: klik een hoekstuk, de bol of torus in een hoek.)"); }
+            catch (PushPullException ex) { throw new PushPullException(ex.Message + Lang.T(" (Alle rondingen tegelijk: klik een hoekstuk, de bol of torus in een hoek.)", " (All roundings at once: click a corner piece, the ball or torus in a corner.)")); }
         // the old roundings to the new: a cylinder to the one on its edge, a ball to the nearest new ball
         var full = map.ToArray();
         for (int i = 0; i < edgesFrom.Count; i++) full[edgesFrom[i].From] = newFaces[i];
@@ -272,7 +272,7 @@ public static partial class PushPull
         var flats = body.Faces[g].Loops.SelectMany(l => l).Where(c => body.Edges[c.Edge].Curve is BrepLine)
             .SelectMany(c => Enumerable.Range(0, body.Faces.Count).Where(h => h != g && body.Faces[h].Surface is BrepPlane && body.Faces[h].Loops.Any(l => l.Any(x => x.Edge == c.Edge))))
             .Distinct().ToList();
-        if (flats.Count != 2) throw new PushPullException("Deze ronding ligt niet tussen twee platte vlakken.");
+        if (flats.Count != 2) throw new PushPullException(Lang.T("Deze ronding ligt niet tussen twee platte vlakken.", "This rounding does not lie between two flat faces."));
         double cos = FaceGeometry.Normal(body.Faces[flats[0]]).Dot(FaceGeometry.Normal(body.Faces[flats[1]]));
         return (Math.Sqrt(2 / (1 + cos)) - 1, !body.Faces[face].Reversed);
     }

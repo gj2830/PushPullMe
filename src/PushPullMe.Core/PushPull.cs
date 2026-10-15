@@ -48,9 +48,9 @@ public static partial class PushPull
         var F = body.Faces[face];
         if (Math.Abs(distance) < 1e-9) return new(body, Enumerable.Range(0, body.Faces.Count).ToList(), [], [], new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>(), [], []);
         if (F.Surface is BrepCylinder) return Cylinder(body, face, distance);
-        if (F.Surface is not BrepPlane plane) throw new PushPullException("Push/Pull werkt (nog) alleen op platte vlakken en cilinders.");
+        if (F.Surface is not BrepPlane plane) throw new PushPullException(Lang.T("Push/Pull werkt (nog) alleen op platte vlakken en cilinders.", "Push/Pull only works on flat faces and cylinders (for now)."));
         var used = F.Loops.SelectMany(l => l).GroupBy(c => c.Edge).FirstOrDefault(g => g.Count() > 1);
-        if (used != null) throw new PushPullException("Dit vlak raakt zichzelf langs een rand; dat kan nog niet.");
+        if (used != null) throw new PushPullException(Lang.T("Dit vlak raakt zichzelf langs een rand; dat kan nog niet.", "This face touches itself along an edge; that is not possible yet."));
 
         var n = FaceGeometry.Normal(F);
         // a rounding of an edge that runs on past a quarter: cut where it faces across the movement, then again
@@ -145,7 +145,7 @@ public static partial class PushPull
                     var a = verts[c.Forward ? e.Start : e.End]; var b = verts[c.Forward ? e.End : e.Start];
                     var dir = (b - a).Normalized();
                     if (RoundingInTheWay(body, c.Edge, along.Append(face).ToHashSet(), n, sign))
-                        throw new PushPullException("Hier sluit een ronding aan die niet mee kan bewegen en niet afgesneden kan worden; dat kan nog niet.");
+                        throw new PushPullException(Lang.T("Hier sluit een ronding aan die niet mee kan bewegen en niet afgesneden kan worden; dat kan nog niet.", "A rounding joins here that cannot move along and cannot be cut off; that is not possible yet."));
                     surface = new BrepPlane(a, (dir.Cross(n) * sign).Normalized(), dir); reversed = false;
                     movedEdge[c.Edge] = edges.Count; edges.Add(new BrepEdge(moved[e.Start], moved[e.End], new BrepLine()));
                     break;
@@ -183,7 +183,7 @@ public static partial class PushPull
                     // any other edge (an ellipse where two roundings meet, a spline) whose neighbour runs along the
                     // direction of movement: the side face lies in that neighbour, which grows or shrinks
                     if (e.Start < 0 || NeighbourAlong(body, c.Edge, along.Append(face).ToHashSet(), n) is not { } hs)
-                        throw new PushPullException("Dit vlak heeft een rand die geen rechte lijn of cirkel om de duwrichting is; dat kan nog niet.");
+                        throw new PushPullException(Lang.T("Dit vlak heeft een rand die geen rechte lijn of cirkel om de duwrichting is; dat kan nog niet.", "This face has an edge that is not a straight line or a circle round the push direction; that is not possible yet."));
                     var pts = FaceGeometry.EdgePoints(body, e);
                     if (!c.Forward) pts.Reverse();
                     int mid = pts.Count / 2;
@@ -397,7 +397,7 @@ public static partial class PushPull
         JoinStraight(verts, edges, faces, moved.Keys.Concat(moved.Values).Concat(snap.Values).ToList());
         foreach (var e in edges)
             if (e is { Curve: BrepLine } && (verts[e.Start] - verts[e.End]).Length < 1e-9)
-                throw new PushPullException("Het vlak komt precies op een ander vlak terecht; dat kan nog niet.");
+                throw new PushPullException(Lang.T("Het vlak komt precies op een ander vlak terecht; dat kan nog niet.", "The face lands exactly on another face; that is not possible yet."));
 
         // the new body: dead faces and edges out, vertices renumbered
         var (result, fMap) = Compact(verts, edges, faces);
@@ -425,7 +425,7 @@ public static partial class PushPull
         Check(result, changed);
         // inside out as a whole (pushed through the other side: the faces that are left then face inward)
         if (SignedVolume(result) is double vol && vol <= 0)
-            throw new PushPullException("Zo gaat het vlak door de andere kant heen: doorduwen tot een gat kan nog niet.");
+            throw new PushPullException(Lang.T("Zo gaat het vlak door de andere kant heen: doorduwen tot een gat kan nog niet.", "That way the face goes through the other side: pushing through to a hole is not possible yet."));
         return new(result, faceMap, newFaces, grownNew, curved, trimmed, movedAlong, punched);
     }
 
@@ -495,7 +495,7 @@ public static partial class PushPull
             fMap[f] = outFaces.Count;
             outFaces.Add(new BrepFace(w.Surface, w.Reversed, loops));
         }
-        if (outFaces.Count < 2) throw new PushPullException("Er blijft niets over van de vorm.");
+        if (outFaces.Count < 2) throw new PushPullException(Lang.T("Er blijft niets over van de vorm.", "Nothing is left of the shape."));
         return (new BrepBody { Vertices = newVerts, Edges = newEdges, Faces = OrderLoops(new BrepBody { Vertices = newVerts, Edges = newEdges, Faces = outFaces }) }, fMap);
     }
 
@@ -508,20 +508,20 @@ public static partial class PushPull
     {
         if (edge < 0 || edge >= body.Edges.Count) throw new ArgumentOutOfRangeException(nameof(edge));
         var users = Enumerable.Range(0, body.Faces.Count).Where(f => body.Faces[f].Loops.Any(l => l.Any(c => c.Edge == edge))).ToList();
-        if (users.Count != 2) throw new PushPullException("Deze rand kun je niet wissen.");
+        if (users.Count != 2) throw new PushPullException(Lang.T("Deze rand kun je niet wissen.", "You cannot erase this edge."));
         int a = users[0], b = users[1];
         var A = body.Faces[a]; var B = body.Faces[b];
-        if (A.Surface is not BrepPlane pa || B.Surface is not BrepPlane pb) throw new PushPullException("Alleen een rand tussen twee platte vlakken kun je wissen.");
+        if (A.Surface is not BrepPlane pa || B.Surface is not BrepPlane pb) throw new PushPullException(Lang.T("Alleen een rand tussen twee platte vlakken kun je wissen.", "Only an edge between two flat faces can be erased."));
         var na = FaceGeometry.Normal(A); var nb = FaceGeometry.Normal(B);
         if (na.Dot(nb) < 1 - AngleTol * AngleTol / 2 || Math.Abs((pb.Origin - pa.Origin).Dot(na)) > DistanceTol)
-            throw new PushPullException("Deze rand scheidt vlakken die niet in één vlak liggen; die kun je niet wissen.");
+            throw new PushPullException(Lang.T("Deze rand scheidt vlakken die niet in één vlak liggen; die kun je niet wissen.", "This edge separates faces that do not lie in one plane; you cannot erase it."));
         var verts = body.Vertices.ToList();
         var edges = body.Edges.Select(e => (BrepEdge?)e).ToList();
         var faces = body.Faces.Select(f => new Work(f.Surface, f.Reversed, f.Loops.Select(l => l.ToList()).ToList())).ToList();
         var e0 = body.Edges[edge];
         if (MergePlanar(verts, edges, faces, a, b) is { } extra)
         {
-            if (extra.Count > 0) throw new PushPullException("Na het wissen valt het vlak in stukken uiteen; dat kan nog niet.");
+            if (extra.Count > 0) throw new PushPullException(Lang.T("Na het wissen valt het vlak in stukken uiteen; dat kan nog niet.", "After erasing, the face falls apart into pieces; that is not possible yet."));
         }
         else
         {
@@ -533,11 +533,11 @@ public static partial class PushPull
             faces[a].Loops = Chain(all.Where(c => !shared.Contains(c.Edge)).ToList(), edges);
         }
         faces[b].Dead = true;
-        if (faces[a].Loops.Count == 0) throw new PushPullException("Er blijft niets over van het vlak.");
+        if (faces[a].Loops.Count == 0) throw new PushPullException(Lang.T("Er blijft niets over van het vlak.", "Nothing is left of the face."));
         var ends = e0.Start >= 0 ? new List<int> { e0.Start, e0.End } : [];
         JoinStraight(verts, edges, faces, ends);
         var (result, fMap) = Compact(verts, edges, faces);
-        if (XtBrepBuilder.TopologyError(result) is { } why) throw new PushPullException("Na het wissen sluit de vorm niet meer: " + why);
+        if (XtBrepBuilder.TopologyError(result) is { } why) throw new PushPullException(Lang.T("Na het wissen sluit de vorm niet meer: ", "After erasing, the shape no longer closes: ") + why);
         var map = Enumerable.Range(0, body.Faces.Count).Select(f => f == b ? fMap.GetValueOrDefault(a, -1) : fMap.GetValueOrDefault(f, -1)).ToList();
         return (result, map);
     }
@@ -925,7 +925,7 @@ public static partial class PushPull
                     loop.Add(c);
                     int v = To(c);
                     if (v == first) break;
-                    if (!byStart.TryGetValue(v, out var q) || q.Count == 0) throw new PushPullException("De randen sluiten niet meer aan; dat kan nog niet.");
+                    if (!byStart.TryGetValue(v, out var q) || q.Count == 0) throw new PushPullException(Lang.T("De randen sluiten niet meer aan; dat kan nog niet.", "The edges no longer join up; that is not possible yet."));
                     c = q.Dequeue();
                 }
                 loops.Add(loop);
@@ -1256,7 +1256,7 @@ public static partial class PushPull
     /// </summary>
     private static void Check(BrepBody body, IEnumerable<int> changed)
     {
-        if (XtBrepBuilder.TopologyError(body) is { } why) throw new PushPullException("De vorm sluit niet meer: " + why);
+        if (XtBrepBuilder.TopologyError(body) is { } why) throw new PushPullException(Lang.T("De vorm sluit niet meer: ", "The shape no longer closes: ") + why);
         foreach (int f in changed.Distinct())
         {
             var face = body.Faces[f];
@@ -1271,7 +1271,7 @@ public static partial class PushPull
                 if (Environment.GetEnvironmentVariable("PPM_DEBUG") == "2")
                     Console.Error.WriteLine($"[check] face {f} n {n}: areas {string.Join(", ", areas.Select(a => (a * 1e6).ToString("0.###")))}\n  "
                         + string.Join("\n  ", loops.Select(l => string.Join(" -> ", l.Select(p => $"({p.X * 1e3:0.##},{p.Y * 1e3:0.##},{p.Z * 1e3:0.##})")))));
-                throw new PushPullException("Een vlak komt binnenstebuiten te staan: het gaat door een ander vlak heen. Dat kan nog niet.");
+                throw new PushPullException(Lang.T("Een vlak komt binnenstebuiten te staan: het gaat door een ander vlak heen. Dat kan nog niet.", "A face turns inside out: it goes through another face. That is not possible yet."));
             }
             var segs = new List<((double X, double Y) A, (double X, double Y) B)>();
             foreach (var l in loops)
@@ -1284,7 +1284,7 @@ public static partial class PushPull
                         if (Environment.GetEnvironmentVariable("PPM_DEBUG") == "2")
                             Console.Error.WriteLine($"[check] face {f} n {n} crosses itself:\n  "
                                 + string.Join("\n  ", loops.Select(l => string.Join(" -> ", l.Select(p => $"({p.X * 1e3:0.##},{p.Y * 1e3:0.##},{p.Z * 1e3:0.##})")))));
-                        throw new PushPullException("Een vlak gaat door zichzelf heen: het raakt een ander deel van de vorm. Dat kan nog niet.");
+                        throw new PushPullException(Lang.T("Een vlak gaat door zichzelf heen: het raakt een ander deel van de vorm. Dat kan nog niet.", "A face goes through itself: it touches another part of the shape. That is not possible yet."));
                     }
         }
     }
