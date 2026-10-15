@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- reading, recognising and writing (.rsdocx) come from the converter's core -->
+    <ProjectReference Include="$(RsConverterDir)src\RsDocx.Core\RsDocx.Core.csproj" />
+  </ItemGroup>
+
+</Project>

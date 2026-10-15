@@ -1,0 +1,4150 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Media3D;
+using System.Windows.Threading;
+using HelixToolkit.Wpf;
+using Microsoft.Win32;
+using PushPullMe.Core;
+using RsDocx.Core.Brep;
+using RsDocx.Core.Stl;
+
+namespace PushPullMe;
+
+public partial class MainWindow : Window
+{
+    /// <summary>The model is in metres, shown in millimetres.</summary>
+    private const double Display = 1000;
+
+    private SketchDocument? _doc;
+    private string? _path;
+    private readonly List<SketchDocument> _undo = new(), _redo = new();
+
+    /// <summary>Per body its shown mesh and, per triangle of it, the face it belongs to (for picking).</summary>
+    private readonly List<(MeshGeometry3D Mesh, List<int> FaceOfTriangle, int Body)> _meshes = new();
+    private LinesVisual3D? _edges;
+    private double _modelSize = 100;
+
+    private FaceRef? _hover, _selected;
+
+    // push/pull in progress: the face, where it was grabbed (mm), its normal, the document it started from
+    private FaceRef? _dragFace;
+    private Point3D _dragStart;
+    private Vector3D _dragNormal;
+    private SketchDocument? _dragBase;
+    private double _dragDist;
+
+    /// <summary>The face being pushed/pulled is on a cylinder (pin, hole or rounding): the box shows (and takes) its
+    /// radius, not the distance.</summary>
+    private bool _dragRadius;
+
+    private static bool HasRadius(SketchDocument doc, FaceRef f) => doc.Bodies[f.Body].Faces[f.Face].Surface is BrepCylinder
+        || (doc.Bodies[f.Body].Faces[f.Face].Surface is BrepSphere or BrepTorus && PushPullMe.Core.PushPull.IsRoundingSet(doc.Bodies[f.Body], f.Face));
+    private bool _dragValid;
+
+    // what is shown (the document, or the preview while dragging), and for a preview its face numbers in the document
+    // it started from
+    private SketchDocument? _shown;
+    private IReadOnlyList<int>? _previewMap;
+    private HashSet<int> _previewNew = new();
+
+    /// <summary>While dragging: the face (in the document it started from) the distance is flush with.</summary>
+    private FaceRef? _snapBase;
+
+    // drawing in progress (rectangle or line): the face, the first point, the point under the mouse (metres), the
+    // rectangle's first side direction, and what the point under the mouse snapped to
+    private FaceRef? _drawFace;
+    private Vec3 _drawStart, _drawEnd, _drawU;
+    private bool _drawEndOk;
+
+    private LinesVisual3D? _sketch;
+
+    /// <summary>The last push/pull: typing a distance right after it changes it (as in SketchUp).</summary>
+    private (SketchDocument Before, FaceRef Face, double Dist)? _last;
+
+    /// <summary>What is being typed into the measurements box.</summary>
+    private string _typed = "";
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        // the highlight and the sketch sit just in front of the faces as seen from the camera: again when it moves
+        View.CameraChanged += (_, _) =>
+        {
+            if (_doc == null) return;
+            UpdateHighlight();
+            if (_sketchShown is { } sk) ShowSketch(sk.Pts, default, sk.Closed, sk.Color);
+            RenderLoose(_doc);
+        };
+        Loaded += async (_, _) => await TestAid();
+        // an unexpected error: written down (for finding it later), the action in progress stopped, the model kept
+        Application.Current.DispatcherUnhandledException += (_, e) =>
+        {
+            try
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe");
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "fouten.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {e.Exception}\n\n");
+            }
+            catch (IOException) { }
+            Log("error: " + e.Exception);
+            e.Handled = true;
+            EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _typed = "";
+            Render();
+            ShowToast("😬 Er ging iets mis", "Dat is afgebroken; je model is er nog. (De fout staat in %LOCALAPPDATA%\\PushPullMe\\fouten.log.)");
+            StatusText.Text = "😬 Er ging iets mis; afgebroken.";
+        };
+    }
+
+    // ------------------------------------------------------------------ files
+
+    private async void Open_Click(object sender, RoutedEventArgs e) => await OpenDialog();
+
+    private async Task OpenDialog()
+    {
+        var dlg = new OpenFileDialog { Filter = "3D-modellen (*.stl;*.3mf;*.rsdocx)|*.stl;*.3mf;*.rsdocx|DesignSpark (*.rsdocx)|*.rsdocx|Alle bestanden|*.*" };
+        if (dlg.ShowDialog(this) == true) await Open(dlg.FileName);
+    }
+
+    private async void Window_Drop(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetData(DataFormats.FileDrop) is string[] { Length: > 0 } files) await Open(files[0]);
+    }
+
+    /// <summary>A file to work on: an .rsdocx opens right away; a mesh (STL/3MF) opens in the converter's window (shapes are
+    /// best found there, with all its options), and what it hands over is taken over here, in memory.</summary>
+    private async Task Open(string path)
+    {
+        if (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase)) { await Load(path); return; }
+        RsConverterUI.MainWindow converter;
+        try { converter = new RsConverterUI.MainWindow(path) { Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner }; }
+        catch (Exception ex) when (ex is System.Windows.Markup.XamlParseException or IOException or InvalidOperationException)
+        {
+            // (the converter cannot open: recognised here, as before)
+            Log("converter: " + ex.Message);
+            ShowToast("😕 De converter opent niet", "Het bestand wordt hier herkend.");
+            await Load(path);
+            return;
+        }
+        Log($"converter opened for {path}");
+        StatusText.Text = "🔄 Herken de vormen in de converter en kies ✅ Overnemen in PushPullMe.";
+        if (converter.ShowDialog() != true || converter.Result is not { } r)
+        {
+            StatusText.Text = _doc == null ? "Open een model om te beginnen." : "De converter is gesloten zonder over te nemen.";
+            Log("converter closed without handing over");
+            return;
+        }
+        var doc = await Task.Run(() => SketchDocument.FromRecognized(r.Bodies, r.Labels));
+        Adopt(doc, path, r.Note.Length > 0 ? ("🔄 Uit de converter", r.Note) : null);
+        Log($"converter handed over: {doc.Bodies.Sum(b => b.Faces.Count)} faces{(r.Note.Length > 0 ? " " + r.Note : "")}");
+    }
+
+    /// <summary>A model to work on from now on (opened, or taken over from the converter).</summary>
+    private void Adopt(SketchDocument doc, string path, (string Title, string Text)? note)
+    {
+        ClearGuides();
+        _doc = doc; _path = path;
+        _undo.Clear(); _redo.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null;
+        UpdateUndoButtons();
+        Render(zoom: true);
+        FileText.Text = Path.GetFileName(path);
+        EmptyHint.Visibility = Visibility.Collapsed;
+        SaveButton.IsEnabled = true;
+        int faces = doc.Bodies.Sum(b => b.Faces.Count), planes = doc.Bodies.Sum(b => b.Faces.Count(f => f.Surface is BrepPlane));
+        StatusText.Text = $"📦 {faces:N0} vlakken, waarvan {planes:N0} plat. Kies ⇕ (of druk P) en klik een plat vlak om het te verschuiven.";
+        if (note is { } n) ShowToast(n.Title, n.Text);
+        Log($"open {path}: {faces} faces, {planes} planar");
+    }
+
+    private async Task Load(string path)
+    {
+        Busy.Visibility = Visibility.Visible;
+        BusyText.Text = "Vormen herkennen…";
+        try
+        {
+            SketchDocument doc;
+            string? note = null;
+            if (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase))
+            {
+                // exact shapes already: read as they are
+                BusyText.Text = "Bestand lezen…";
+                int hidden = 0;
+                doc = await Task.Run(() => SketchDocument.FromRsDocx(path, out hidden));
+                if (hidden > 0)
+                    note = $"{hidden} {(hidden == 1 ? "lichaam staat" : "lichamen staan")} in DesignSpark op onzichtbaar; hier zie je {(hidden == 1 ? "het" : "ze")} gewoon.";
+            }
+            else
+            {
+                var stl = path.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase) ? ThreeMfReader.Read(await File.ReadAllBytesAsync(path)) : StlReader.Read(path);
+                var opt = new MeshOptions { MergeCoplanar = true, RecognizeCylinders = true, Scale = 0.001 };
+                try { doc = await Task.Run(() => SketchDocument.FromMesh(stl, opt)); }
+                catch (MeshException)
+                {
+                    // not closed, or touching itself: cleaned first (as 🧹 in the converter)
+                    BusyText.Text = "Mesh opschonen…";
+                    var clean = await Task.Run(() => MeshRepair.Repair(stl, new MeshRepairOptions(), out _));
+                    BusyText.Text = "Vormen herkennen…";
+                    doc = await Task.Run(() => SketchDocument.FromMesh(clean, opt));
+                    note = "De mesh was niet helemaal dicht en is eerst opgeschoond.";
+                }
+            }
+            Adopt(doc, path, note == null ? null : (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase) ? "👻 Onzichtbare lichamen" : "🧹 Eerst opgeschoond", note));
+        }
+        catch (Exception ex) when (ex is MeshException or IOException or StlFormatException or InvalidDataException or RsDocxReadException)
+        {
+            ShowToast("😕 Dit bestand lukt niet", ex.Message);
+        }
+        finally { Busy.Visibility = Visibility.Collapsed; }
+    }
+
+    private void Save_Click(object sender, RoutedEventArgs e)
+    {
+        if (_doc == null) return;
+        // (the name it has now, in its own folder: the user decides on another; Windows asks before overwriting)
+        bool stl = _path != null && _path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase);
+        var dlg = new SaveFileDialog
+        {
+            Filter = "DesignSpark Mechanical (*.rsdocx)|*.rsdocx|STL voor de printer (*.stl)|*.stl",
+            FilterIndex = stl ? 2 : 1,
+            FileName = Path.GetFileNameWithoutExtension(_path ?? "model"),
+            InitialDirectory = _path != null ? Path.GetDirectoryName(Path.GetFullPath(_path)) : null,
+            OverwritePrompt = true,
+        };
+        if (dlg.ShowDialog(this) == true) Save(dlg.FileName);
+    }
+
+    private void Save(string path)
+    {
+        if (_doc == null) return;
+        try
+        {
+            if (path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase)) File.WriteAllBytes(path, _doc.ToStl());
+            else _doc.ToRsDocx().Save(path);
+            _path = path; FileText.Text = Path.GetFileName(path);
+            if (_doc.Colors.Any(c => c.Count > 0) && path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase))
+            {
+                ShowToast("💾 Opgeslagen, zonder kleuren", Path.GetFileName(path) + ": een STL kan geen kleuren bevatten. Sla op als .rsdocx om ze te bewaren (DesignSpark ziet ze dan ook).");
+                Log($"saved {path} (colours left out)");
+                return;
+            }
+            ShowToast("💾 Opgeslagen", Path.GetFileName(path));
+            Log($"saved {path}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+        {
+            ShowToast("😕 Opslaan lukt niet", ex.Message);
+        }
+    }
+
+    // ------------------------------------------------------------------ undo
+
+    private void Undo_Click(object sender, RoutedEventArgs e) => Undo();
+    private void Redo_Click(object sender, RoutedEventArgs e) => Redo();
+
+    private void Commit(SketchDocument before, SketchDocument after)
+    {
+        _undo.Add(before); _redo.Clear();
+        _doc = after;
+        _multi = null;
+        _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null;
+        UpdateUndoButtons();
+    }
+
+    private void Undo()
+    {
+        if (_undo.Count == 0 || _doc == null) return;
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null;
+        _redo.Add(_doc); _doc = _undo[^1]; _undo.RemoveAt(_undo.Count - 1);
+        _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
+        Render();
+        UpdateUndoButtons();
+        StatusText.Text = "↩ Ongedaan gemaakt.";
+        Log("undo");
+    }
+
+    private void Redo()
+    {
+        if (_redo.Count == 0 || _doc == null) return;
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null;
+        _undo.Add(_doc); _doc = _redo[^1]; _redo.RemoveAt(_redo.Count - 1);
+        _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
+        Render();
+        UpdateUndoButtons();
+        StatusText.Text = "↪ Opnieuw gedaan.";
+        Log("redo");
+    }
+
+    private void UpdateUndoButtons()
+    {
+        UndoButton.IsEnabled = _undo.Count > 0;
+        RedoButton.IsEnabled = _redo.Count > 0;
+    }
+
+    // ------------------------------------------------------------------ showing the model
+
+    private static readonly Color FrontColor = Color.FromRgb(0xF3, 0xF0, 0xE8);
+    private static readonly Color BackColor = Color.FromRgb(0x8E, 0x9B, 0xB8);
+    private static readonly Color EdgeColor = Color.FromRgb(0x26, 0x2B, 0x36);
+    private static readonly Color HoverColor = Color.FromRgb(0xFA, 0xCC, 0x15);
+    private static readonly Color SelectColor = Color.FromRgb(0x25, 0x63, 0xEB);
+
+    private static Point3D P(Vec3 v) => new(v.X * Display, v.Y * Display, v.Z * Display);
+    private static Vector3D D(Vec3 v) => new(v.X, v.Y, v.Z);
+
+    private void Render(bool zoom = false) => Render(_doc, zoom);
+
+    /// <summary>The document as triangles (one mesh per body; flat faces flat, round faces shaded smooth) and its edges
+    /// (not between two round faces: those are soft, as in SketchUp).</summary>
+    private void Render(SketchDocument? doc, bool zoom = false)
+    {
+        _meshes.Clear();
+        _shown = doc;
+        if (_edges != null) { View.Children.Remove(_edges); _edges = null; }
+        RenderLoose(doc);
+        if (doc == null) { ModelHost.Content = null; HighlightHost.Content = null; return; }
+        var group = new Model3DGroup();
+        var front = new DiffuseMaterial(new SolidColorBrush(FrontColor));
+        var back = new DiffuseMaterial(new SolidColorBrush(BackColor));
+        double x0 = double.MaxValue, x1 = double.MinValue;
+        for (int b = 0; b < doc.Bodies.Count; b++)
+        {
+            var body = doc.Bodies[b];
+            // one mesh per colour painted on the body (null: the standard colour)
+            var byColor = new Dictionary<uint, (MeshGeometry3D Mesh, List<int> Map)>();
+            const uint Standard = 0;
+            for (int f = 0; f < body.Faces.Count; f++)
+            {
+                var face = body.Faces[f];
+                uint key = doc.ColorOf(new FaceRef(b, f)) ?? Standard;
+                if (!byColor.TryGetValue(key, out var mm)) byColor[key] = mm = (new MeshGeometry3D(), new List<int>());
+                foreach (var (a, bb, c) in doc.TrianglesOf(new FaceRef(b, f)))
+                {
+                    foreach (var p in new[] { a, bb, c })
+                    {
+                        mm.Mesh.Positions.Add(P(p));
+                        mm.Mesh.Normals.Add(D(NormalAt(face, p, a, bb, c)));
+                        x0 = Math.Min(x0, Math.Min(p.X, Math.Min(p.Y, p.Z))); x1 = Math.Max(x1, Math.Max(p.X, Math.Max(p.Y, p.Z)));
+                    }
+                    mm.Map.Add(f);
+                }
+            }
+            foreach (var (key, (mesh, map)) in byColor)
+            {
+                mesh.Freeze();
+                var material = key == Standard ? front : new DiffuseMaterial(new SolidColorBrush(Argb(key)));
+                group.Children.Add(new GeometryModel3D(mesh, material) { BackMaterial = back });
+                _meshes.Add((mesh, map, b));
+            }
+        }
+        ModelHost.Content = group;
+        if (x1 > x0) _modelSize = (x1 - x0) * Display;
+
+        // edges
+        var pts = new Point3DCollection();
+        for (int b = 0; b < doc.Bodies.Count; b++)
+        {
+            var body = doc.Bodies[b];
+            var curvedUses = new int[body.Edges.Count];
+            foreach (var face in body.Faces.Where(f => f.Surface is not BrepPlane))
+                foreach (var c in face.Loops.SelectMany(l => l)) curvedUses[c.Edge]++;
+            for (int e = 0; e < body.Edges.Count; e++)
+            {
+                if (curvedUses[e] >= 2) continue;
+                var line = FaceGeometry.EdgePoints(body, body.Edges[e]);
+                for (int i = 0; i + 1 < line.Count; i++) { pts.Add(P(line[i])); pts.Add(P(line[i + 1])); }
+            }
+        }
+        _edges = new LinesVisual3D { Points = pts, Color = EdgeColor, Thickness = 1.3 };
+        View.Children.Add(_edges);
+        UpdateHighlight();
+        if (zoom)
+        {
+            // from the front left, a little above (as SketchUp opens a model), then everything in view
+            if (View.Camera is ProjectionCamera cam) { cam.LookDirection = new Vector3D(1, 1.4, -0.9); cam.UpDirection = new Vector3D(0, 0, 1); }
+            View.ZoomExtents(0);
+        }
+    }
+
+    /// <summary>The outward normal to shade a point of a face with: of the surface where it is round, of the plane or
+    /// the triangle otherwise.</summary>
+    private static Vec3 NormalAt(BrepFace face, Vec3 p, Vec3 a, Vec3 b, Vec3 c)
+    {
+        double s = face.Reversed ? -1 : 1;
+        switch (face.Surface)
+        {
+            case BrepPlane pl: return pl.Normal.Normalized() * s;
+            case BrepCylinder cy:
+            {
+                var ax = cy.Axis.Normalized(); var d = p - cy.Origin; d -= ax * d.Dot(ax);
+                return d.Normalized() * s;
+            }
+            case BrepSphere sp: return (p - sp.Centre).Normalized() * s;
+            default: return (b - a).Cross(c - a).Normalized();
+        }
+    }
+
+    private void UpdateHighlight()
+    {
+        if (_doc == null) { HighlightHost.Content = null; return; }
+        var doc = _dragFace != null && _dragValid ? _preview ?? _doc : _doc;
+        var group = new Model3DGroup();
+        void Add(FaceRef f, Color color, double opacity)
+        {
+            if (f.Body >= doc.Bodies.Count || f.Face < 0 || f.Face >= doc.Bodies[f.Body].Faces.Count) return;
+            var mesh = new MeshGeometry3D();
+            foreach (var (a, b, c) in doc.TrianglesOf(f))
+            {
+                mesh.Positions.Add(TowardEye(P(a), 1e-3)); mesh.Positions.Add(TowardEye(P(b), 1e-3)); mesh.Positions.Add(TowardEye(P(c), 1e-3));
+            }
+            var mat = new DiffuseMaterial(new SolidColorBrush(color) { Opacity = opacity });
+            group.Children.Add(new GeometryModel3D(mesh, mat));
+        }
+        if (_selected is { } s) Add(s, SelectColor, 0.35);
+        if (_multi is { } mu) foreach (int mf in mu.Faces) if (_selected is not { } sel || sel != new FaceRef(mu.Body, mf)) Add(new FaceRef(mu.Body, mf), SelectColor, 0.35);
+        if (_dragFace is { } dfc && _dragValid && _previewFace is { } pf) Add(pf, SelectColor, 0.3);
+        else if (_drawFace is { } df) Add(df, SelectColor, 0.15);
+        else if (_offsetFace is { } of) Add(of, SelectColor, 0.15);
+        else if (_hover is { } h && h != _selected) Add(h, HoverColor, 0.4);
+        if (_dragFace != null && _snapBase is { } sb)
+            Add(_previewMap != null && _dragValid && sb.Face < _previewMap.Count ? new FaceRef(sb.Body, _previewMap[sb.Face]) : sb, HoverColor, 0.45);
+        HighlightHost.Content = group;
+    }
+
+    // ------------------------------------------------------------------ orbit (as in SketchUp)
+
+    /// <summary>Degrees of turn per pixel the mouse moves.</summary>
+    private const double OrbitSpeed = 0.4;
+
+    private Point? _orbitFrom;
+    private Point3D _orbitPivot;
+
+    /// <summary>The middle button (without Shift: that pans) starts turning the view. (The right button is kept free
+    /// for a menu.)</summary>
+    private void View_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+        if (e.ChangedButton != MouseButton.Middle || shift) return;
+        if (View.Camera is not ProjectionCamera cam) return;
+        var pos = e.GetPosition(View.Viewport);
+        // around the point of the model under the mouse, or else the middle of the view
+        _orbitPivot = FaceAt(pos)?.Point ?? cam.Position + cam.LookDirection;
+        _orbitFrom = pos;
+        View.CaptureMouse();
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Left/right turns the view around the vertical axis, up/down tilts it, both around the pivot; the model follows
+    /// the mouse. Tilting stops short of straight above or below, so the model never ends up upside down (then
+    /// left/right would turn the other way).
+    /// </summary>
+    private void View_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_orbitFrom is not { } from || View.Camera is not ProjectionCamera cam) return;
+        var pos = e.GetPosition(View.Viewport);
+        _orbitFrom = pos;
+        e.Handled = true;
+        Orbit(pos.X - from.X, pos.Y - from.Y);
+    }
+
+    /// <summary>Turns the view as the mouse moved (pixels) around the pivot.</summary>
+    private void Orbit(double dx, double dy)
+    {
+        if (View.Camera is not ProjectionCamera cam) return;
+        var up = new Vector3D(0, 0, 1);
+        var position = cam.Position; var look = cam.LookDirection;
+        // around the vertical axis (camera the other way round than the model seems to turn)
+        var yaw = new RotateTransform3D(new AxisAngleRotation3D(up, -dx * OrbitSpeed), _orbitPivot);
+        position = yaw.Transform(position); look = yaw.Transform(look);
+        // tilt around the camera's right-hand direction, not past straight above or below
+        var right = Vector3D.CrossProduct(look, up);
+        if (right.Length > 1e-9)
+        {
+            var tilt = new RotateTransform3D(new AxisAngleRotation3D(right, -dy * OrbitSpeed), _orbitPivot);
+            var look2 = tilt.Transform(look);
+            double cos = Vector3D.DotProduct(look2, up) / look2.Length;
+            if (Math.Abs(cos) < Math.Cos(2 * Math.PI / 180)) { position = tilt.Transform(position); look = look2; }
+        }
+        cam.Position = position; cam.LookDirection = look; cam.UpDirection = up;
+    }
+
+    private void View_PreviewMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_orbitFrom == null) return;
+        if (e.ChangedButton != MouseButton.Middle) return;
+        _orbitFrom = null;
+        View.ReleaseMouseCapture();
+        e.Handled = true;
+    }
+
+    // ------------------------------------------------------------------ picking
+
+    private (FaceRef Face, Point3D Point)? FaceAt(Point pos)
+    {
+        foreach (var hit in View.Viewport.FindHits(pos))
+        {
+            if (hit.RayHit is not RayMeshGeometry3DHitTestResult r) continue;
+            foreach (var (mesh, map, body) in _meshes)
+                if (ReferenceEquals(mesh, r.MeshHit)) return (new FaceRef(body, map[r.VertexIndex1 / 3]), hit.Position);
+        }
+        return null;
+    }
+
+    private bool IsPlanar(FaceRef f) => _doc != null && _doc.Bodies[f.Body].Faces[f.Face].Surface is BrepPlane;
+
+    private bool IsCylinder(FaceRef f) => _doc != null && HasRadius(_doc, f);
+
+    /// <summary>What ⇕ can take: a flat face, or a cylinder (its radius; as DesignSpark).</summary>
+    private bool Pushable(FaceRef f) => IsPlanar(f) || IsCylinder(f);
+
+    // ------------------------------------------------------------------ tools and mouse
+
+    private bool PushMode => PushTool.IsChecked == true;
+    private bool RectMode => RectTool.IsChecked == true;
+    private bool LineMode => LineTool.IsChecked == true;
+    private bool CircleMode => CircleTool.IsChecked == true;
+    private bool EraserMode => EraserTool.IsChecked == true;
+    private bool MoveMode => MoveTool.IsChecked == true;
+    private bool TapeMode => TapeTool.IsChecked == true;
+    private bool PaintMode => PaintTool.IsChecked == true;
+    private bool OffsetMode => OffsetTool.IsChecked == true;
+    private bool RoundMode => RoundTool.IsChecked == true;
+    private bool RotateMode => RotateTool.IsChecked == true;
+    private bool ScaleMode => ScaleTool.IsChecked == true;
+    private bool LassoMode => LassoTool.IsChecked == true;
+    private bool MirrorMode => MirrorTool.IsChecked == true;
+    private bool FollowMode => FollowTool.IsChecked == true;
+    private bool UnionMode => UnionTool.IsChecked == true;
+    private bool PolygonMode => PolygonTool.IsChecked == true;
+    private bool ArcMode => ArcTool.IsChecked == true;
+    private bool Arc3Mode => Arc3Tool.IsChecked == true;
+    private bool CentreArcMode => CentreArcTool.IsChecked == true;
+    private bool PieMode => PieTool.IsChecked == true;
+    private bool RotRectMode => RotRectTool.IsChecked == true;
+
+    /// <summary>Drawing on a face: rectangle, line or circle.</summary>
+    private bool DrawMode => RectMode || LineMode || CircleMode;
+
+    /// <summary>Tools that work on planar faces only.</summary>
+    private bool PlanarMode => PushMode || DrawMode || OffsetMode || MirrorMode || PolygonMode || ArcMode || Arc3Mode || FollowMode || CentreArcMode || PieMode || RotRectMode;
+
+    private void Tool_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        PaintPanel.Visibility = PaintMode ? Visibility.Visible : Visibility.Collapsed;
+        if (PaintMode) BuildPalette(); else _sampleOnce = false;
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null; HideTag(); MeasureUnit.Text = "mm";
+        Render();
+        if (!LassoMode) EndLasso();
+        StatusText.Text = MirrorMode ? "⇋ Spiegelen: klik een plat vlak; het lichaam spiegelt erin. Ctrl+klik: een gespiegelde kopie erbij."
+            : LassoMode ? "➰ Lasso: klik, trek een lus om vlakken heen en klik nog eens. Shift: erbij · Ctrl: eraf · Esc: keuze leeg."
+            : ScaleMode ? "⇲ Schalen: klik het punt dat blijft staan (op het lichaam). Ctrl: een geschaalde kopie."
+            : RotateMode ? "↻ Draaien: klik een vlak voor het draaipunt (de as staat er haaks op; pijltjes: rode, groene of blauwe as). Ctrl: een gedraaide kopie."
+            : RoundMode ? "◠ Afronden: wijs een scherpe rechte rand aan en klik; beweeg voor de straal en klik, of typ de straal + Enter."
+            : OffsetMode ? "▣ Offset: klik een plat vlak en beweeg de muis naar binnen; klik om vast te zetten. Of typ de afstand + Enter."
+            : PushMode ? "⇕ Push/Pull: klik een plat vlak, beweeg de muis en klik nog eens. Of typ de afstand en Enter."
+            : RectMode ? "▭ Rechthoek: klik een hoek op een plat vlak en dan de andere hoek. Of typ breedte;hoogte + Enter."
+            : LineMode ? "╱ Lijn: klik punt na punt op een plat vlak. Terug op het beginpunt: een eigen vlak; van rand tot rand: het vlak wordt gedeeld. Pijltjes: rood, groen, blauw."
+            : CircleMode ? "◯ Cirkel: klik het middelpunt op een plat vlak en dan de rand. Of typ de straal + Enter."
+            : CentreArcMode ? "◜ Boog vanaf het middelpunt: klik het middelpunt op een plat vlak, dan het beginpunt, en beweeg voor de hoek."
+            : PieMode ? "◔ Taartpunt: klik het middelpunt op een plat vlak, dan het beginpunt, en beweeg voor de hoek."
+            : RotRectMode ? "◇ Rechthoek onder een hoek: klik een hoek op een plat vlak, dan de tweede hoek (de eerste zijde), en beweeg voor de breedte."
+            : FollowMode ? "↝ Ronddraaien: klik het platte vlak dat eruit moet draaien."
+            : UnionMode ? "∪ Verenigen: klik het eerste deel."
+            : Arc3Mode ? "⌓ Boog door drie punten: klik het beginpunt op een plat vlak, dan een punt op de boog, dan het eindpunt."
+            : ArcMode ? "⌒ Boog: klik het beginpunt op een plat vlak, dan het eindpunt, en beweeg voor de bolling. Van rand tot rand deelt hij het vlak."
+            : PolygonMode ? $"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): klik het middelpunt op een plat vlak, beweeg en klik. Of typ de straal + Enter."
+            : PaintMode ? "🎨 Verfemmer: kies een kleur en klik een vlak. Ctrl: het hele lichaam · Shift: alle vlakken in dezelfde kleur · Alt: kleur overnemen."
+            : TapeMode ? "📏 Meetlint: klik een punt en beweeg om te meten; klik een rand en trek eraf voor een hulplijn. Delete: alle hulplijnen weg."
+            : MoveMode ? "✥ Verplaatsen: klik een hoekpunt, rand of vlak, beweeg en klik nog eens; wat eraan vastzit buigt mee. Shift: het hele lichaam · Ctrl: een kopie."
+            : EraserMode ? "⌫ Gum: klik een getekende lijn, rechthoek of cirkel; de vlakken worden weer één."
+            : "↖ Selecteren: klik een vlak.";
+    }
+
+    private void View_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (_doc != null) MouseMoveAt(e.GetPosition(View.Viewport));
+    }
+
+    private void MouseMoveAt(Point pos)
+    {
+        if (_doc == null) return;
+        UpdateMarks(pos);
+        if (_movePick != null) { MoveTo(pos); return; }
+        if (_dragFace != null) { DragTo(pos); return; }
+        if (_drawFace != null) { DrawTo(pos); return; }
+        if (_offsetFace != null) { OffsetTo(pos); return; }
+        if (_roundEdge != null) { RoundTo(pos); return; }
+        if (_rotStage > 0) { RotateTo(pos); return; }
+        if (_scStage > 0) { ScaleTo(pos); return; }
+        if (_lasso != null) { LassoTo(pos); return; }
+        if (_polyFace != null) { PolygonTo(pos); return; }
+        if (_arcFace != null) { ArcTo(pos); return; }
+        if (_swFace != null) { SweepTo(pos); return; }
+        if (_rrFace != null) { RotRectTo(pos); return; }
+        if (_fmFace != null) { FollowTo(pos); return; }
+        var hit = FaceAt(pos);
+        FaceRef? h = hit?.Face;
+        if (h is { } hf && PlanarMode && !(PushMode ? Pushable(hf) : IsPlanar(hf))) h = null;
+        if (h != _hover) { _hover = h; UpdateHighlight(); }
+        if (DrawMode) HoverDraw(h, h != null ? hit?.Point : null, pos);
+        if (EraserMode) HoverErase(hit, pos);
+        if (MoveMode) HoverMove(hit, pos);
+        // ⇕ over a rounding, pin or hole: its radius next to the mouse (as DesignSpark)
+        if (PushMode && h is { } rh && HasRadius(_doc, rh)) ShowTag("R " + Mm(RadiusOf(_doc, rh)) + " mm", pos);
+        else HideTag();
+        // ⇕ close to a sharp edge: a click rounds it (as DesignSpark's pull on an edge)
+        if (PushMode)
+        {
+            if (SharpEdgeNear(hit, pos) is { } se) { ShowRoundEdges(se.Body, se.Edge); StatusText.Text = "⇕ Klik en sleep om deze rand af te ronden (of typ de straal + Enter na de klik)."; }
+            else if (_roundSel == null && _sketch != null && _roundEdge == null) ShowSketch([]);
+        }
+        if (TapeMode) HoverTape(hit, pos);
+        if (RoundMode) HoverRound(hit, pos);
+    }
+
+    private void View_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (_hover != null && _dragFace == null) { _hover = null; UpdateHighlight(); }
+    }
+
+    private void View_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_doc != null && ClickAt(e.GetPosition(View.Viewport))) e.Handled = true;
+    }
+
+    /// <summary>A left click at a point of the view; whether it was used (not passed on to the view).</summary>
+    private bool ClickAt(Point pos)
+    {
+        bool handled = false;
+        if (_movePick != null) { handled = true; MoveTo(pos); FinishMove(); return handled; }
+        if (_dragFace != null) { handled = true; Finish(_dragDist); return handled; }
+        if (_drawFace != null) { handled = true; DrawTo(pos); FinishDraw(); return handled; }
+        if (_offsetFace != null) { handled = true; OffsetTo(pos); FinishOffset(); return handled; }
+        if (_roundEdge != null) { handled = true; RoundTo(pos); FinishRound(); return handled; }
+        if (_rotStage > 0) { handled = true; RotateClick(pos); return handled; }
+        if (_scStage > 0) { handled = true; ScaleClick(pos); return handled; }
+        if (LassoMode) { handled = true; if (_lasso == null) StartLasso(pos); else FinishLasso(); return handled; }
+        if (MirrorMode) { handled = true; MirrorAt(FaceAt(pos)); return handled; }
+        if (_polyFace != null) { handled = true; PolygonTo(pos); FinishPolygon(); return handled; }
+        if (PolygonMode) { handled = true; StartPolygon(FaceAt(pos)); return handled; }
+        if (_arcFace != null) { handled = true; ArcClick(pos); return handled; }
+        if (ArcMode || Arc3Mode) { handled = true; StartArc(FaceAt(pos), pos); return handled; }
+        if (_swFace != null) { handled = true; SweepClick(pos); return handled; }
+        if (CentreArcMode || PieMode) { handled = true; StartSweep(FaceAt(pos), pos); return handled; }
+        if (_rrFace != null) { handled = true; RotRectClick(pos); return handled; }
+        if (RotRectMode) { handled = true; StartRotRect(FaceAt(pos), pos); return handled; }
+        if (_fmFace != null) { handled = true; FollowClick(pos); return handled; }
+        if (FollowMode) { handled = true; StartFollow(FaceAt(pos)); return handled; }
+        if (UnionMode) { handled = true; UnionClick(FaceAt(pos)); return handled; }
+        if (ScaleMode) { handled = true; StartScale(FaceAt(pos)); return handled; }
+        if (RotateMode) { handled = true; StartRotate(FaceAt(pos), pos); return handled; }
+        if (PushMode && SharpEdgeNear(FaceAt(pos), pos) is { } pe)
+        {
+            // ⇕ on a sharp edge: round it, the radius with the mouse
+            handled = true;
+            _roundSel = (pe.Body, [pe.Edge]);
+            _roundEdge = pe; _roundRadius = 0; _roundOk = false; _typed = "";
+            _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
+            UpdateHighlight();
+            ShowRoundEdges();
+            MeasureLabel.Text = "Straal"; MeasureBox.Text = "";
+            StatusText.Text = "⇕ Beweeg de muis van de rand af voor de straal; klik om vast te zetten, of typ de straal + Enter. Esc breekt af.";
+            return handled;
+        }
+        if (RoundMode) { handled = true; StartRound(FaceAt(pos), pos); return handled; }
+        var hit = FaceAt(pos);
+        if (OffsetMode)
+        {
+            if (hit is not { } oh) return handled;
+            handled = true;
+            if (!IsPlanar(oh.Face)) { StatusText.Text = "▣ Offset kan alleen op platte vlakken."; return handled; }
+            StartOffset(oh.Face);
+            return handled;
+        }
+        if (EraserMode) { handled = true; EraseAt(FaceAt(pos), pos); return handled; }
+        if (PaintMode) { handled = true; PaintAt(FaceAt(pos)); return handled; }
+        if (TapeMode) { handled = true; if (_tapeStart == null) StartTape(FaceAt(pos), pos); else FinishTape(FaceAt(pos), pos); return handled; }
+        if (MoveMode) { handled = true; StartMove(FaceAt(pos), pos); return handled; }
+        if (DrawMode)
+        {
+            if (hit is not { } dh) return handled;
+            handled = true;
+            if (!IsPlanar(dh.Face)) { StatusText.Text = "Tekenen kan (nog) alleen op platte vlakken."; return handled; }
+            StartDraw(dh.Face, V(dh.Point), (Point?)pos);
+            return handled;
+        }
+        if (!PushMode)
+        {
+            // (Shift: a face in or out of the choice; a plain click: just that face)
+            if ((Mods & ModifierKeys.Shift) != 0 && hit is { } sh)
+            {
+                ToggleChosen(sh.Face);
+                return handled;
+            }
+            _selected = hit?.Face;
+            _multi = hit is { } one ? (one.Face.Body, new HashSet<int> { one.Face.Face }) : null;
+            UpdateHighlight();
+            if (_selected is { } s) StatusText.Text = Describe(s);
+            return handled;
+        }
+        if (hit is not { } h) return handled;
+        if (!Pushable(h.Face)) { StatusText.Text = "⇕ Alleen platte vlakken en cilinders kunnen (nog) geduwd of getrokken worden."; return handled; }
+        handled = true;
+        StartDrag(h.Face, h.Point);
+        return handled;
+    }
+
+    private string Describe(FaceRef f)
+    {
+        var face = _doc!.Bodies[f.Body].Faces[f.Face];
+        double area = _doc.TrianglesOf(f).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length / 2) * Display * Display;
+        string kind = face.Surface switch
+        {
+            BrepPlane => "plat vlak",
+            BrepCylinder c => $"cilinder Ø {c.Radius * 2 * Display:0.##} mm",
+            BrepSphere s => $"bol Ø {s.Radius * 2 * Display:0.##} mm",
+            BrepCone => "kegel",
+            BrepTorus => "torus",
+            _ => "vlak",
+        };
+        return $"↖ {kind}, {area:0.##} mm² (vlak {f.Face})";
+    }
+
+    // ------------------------------------------------------------------ drawing: rectangle and line
+
+    private static Vec3 V(Point3D p) => new(p.X / Display, p.Y / Display, p.Z / Display);
+
+    private static string Mm(double metres) => (metres * Display).ToString("0.##", CultureInfo.CurrentCulture);
+
+    /// <summary>The direction of a rectangle's first side on a face with normal n: the world axis that lies most in its
+    /// plane (as SketchUp lines rectangles up with the axes).</summary>
+    private static Vec3 RectAxis(Vec3 n)
+    {
+        var a = new[] { new Vec3(1, 0, 0), new Vec3(0, 1, 0), new Vec3(0, 0, 1) }.MinBy(x => Math.Abs(x.Dot(n)));
+        return (a - n * a.Dot(n)).Normalized();
+    }
+
+    private Vec3 NormalOf(FaceRef f) => FaceGeometry.Normal(_doc!.Bodies[f.Body].Faces[f.Face]);
+
+    /// <summary>Where the ray under the mouse meets the plane of a face (metres).</summary>
+    private Vec3? OnPlane(FaceRef f, Point pos)
+    {
+        var face = _doc!.Bodies[f.Body].Faces[f.Face];
+        var n = FaceGeometry.Normal(face); var o = ((BrepPlane)face.Surface).Origin;
+        var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
+        if (ray == null) return null;
+        var org = V(ray.Origin); var dir = new Vec3(ray.Direction.X, ray.Direction.Y, ray.Direction.Z).Normalized();
+        double den = dir.Dot(n);
+        if (Math.Abs(den) < 1e-9) return null;
+        return org + dir * ((o - org).Dot(n) / den);
+    }
+
+    /// <summary>The point on the face's outer edge to snap to near the mouse (a corner or a middle within 12 pixels,
+    /// otherwise the nearest point on an edge within 20 pixels), with what it is.</summary>
+    private (Vec3 Point, string Kind)? EdgeSnap(FaceRef f, Vec3 at, Point pos)
+    {
+        var body = _doc!.Bodies[f.Body];
+        var n = NormalOf(f);
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        double pxPerMm = (Screen(at + RectAxis(n) * 0.001) - Screen(at)).Length;
+        double tol = pxPerMm > 1e-6 ? 12 / pxPerMm * 0.001 : 0.001;
+        if (body.Faces[f.Face].Surface is BrepPlane epl && _guides.Count > 0)
+        {
+            var crossings = _guides.Where(g => Guides.InPlane(g, epl.Origin, n))
+                .SelectMany(g => PlaneFaces(f).SelectMany(pf => body.Faces[pf].Loops[0]).Select(c => body.Edges[c.Edge]).Where(e => e.Curve is BrepLine && e.Start >= 0)
+                    .Select(e => Guides.MeetSegment(g, body.Vertices[e.Start], body.Vertices[e.End])))
+                .Where(q => q != null).Select(q => q!.Value).Select(q => (Q: q, Px: (Screen(q) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
+            if (crossings.Count > 0) return (crossings[0].Q, "snijpunt met de hulplijn");
+        }
+        if (body.Faces[f.Face].Surface is BrepPlane cpl && CentreSnap(n, cpl.Origin, pos) is { } cs) return (cs, "middelpunt");
+        var loose = body.Faces[f.Face].Surface is BrepPlane lpl ? LooseSnap(n, lpl.Origin, at, pos) : null;
+        if (loose is { Kind: "eindpunt van een losse lijn" or "midden van een losse lijn" } lk) return (lk.Point, lk.Kind);
+        var onEdge = PushPullMe.Core.Drawing.NearestOnEdges(body, PlaneFaces(f), at, tol) is { } s && (Screen(s.Point) - pos).Length < 20 ? s : ((Vec3 Point, string Kind)?)null;
+        if (loose is { } lo && (onEdge is not { } oe || (Screen(lo.Point) - pos).Length < (Screen(oe.Point) - pos).Length)) return (lo.Point, lo.Kind);
+        return onEdge;
+    }
+
+    /// <summary>The faces of f's body in f's plane (f first): a line may run across all of them, and snaps to their
+    /// edges.</summary>
+    private List<int> PlaneFaces(FaceRef f) => PushPullMe.Core.Drawing.CoplanarFaces(_doc!.Bodies[f.Body], f.Face);
+
+    /// <summary>Whether q lies on an edge of a face in f's plane.</summary>
+    private bool OnPlaneEdge(FaceRef f, Vec3 q) =>
+        PushPullMe.Core.Drawing.NearestOnEdges(_doc!.Bodies[f.Body], PlaneFaces(f), q, 0) is { } e && (e.Point - q).Length < 1e-6;
+
+    /// <summary>Before the first click: the face and the point under the mouse (for a typed start).</summary>
+    private (FaceRef Face, Vec3 Point)? _drawHover;
+
+    /// <summary>A line: the direction of the edge it starts on (to snap square to it).</summary>
+    private Vec3? _drawEdgeDir;
+
+    /// <summary>Before the first click, with ▭ or ╱: what a typed size would mean, shown in the box and the status bar.</summary>
+    private void HoverDraw(FaceRef? h, Point3D? at, Point pos)
+    {
+        _drawHover = h is { } hf && at is { } a ? (hf, V(a)) : null;
+        if (_drawHover is not { } dh) { ShowSketch([]); return; }
+        var body = _doc!.Bodies[dh.Face.Body];
+        var n = NormalOf(dh.Face);
+        if (_typed.Length > 0) return;
+        if (CircleMode)
+        {
+            ShowSketch([dh.Point], n);
+            MeasureLabel.Text = "Straal";
+            MeasureBox.Text = "";
+            StatusText.Text = "◯ Klik het middelpunt van de cirkel.";
+            return;
+        }
+        if (RectMode)
+        {
+            // the corner the first corner is measured from
+            var c = PushPullMe.Core.Drawing.NearestCorner(body, dh.Face.Face, dh.Point);
+            var u = RectAxis(n); var v = n.Cross(u);
+            ShowSketch([c], n);
+            MeasureLabel.Text = "Vanaf hoek";
+            MeasureBox.Text = $"{Mm(Math.Abs((dh.Point - c).Dot(u)))};{Mm(Math.Abs((dh.Point - c).Dot(v)))}";
+            StatusText.Text = "▭ Klik de eerste hoek, of typ x;y + Enter: zo ver van de gemarkeerde hoek van het vlak.";
+            return;
+        }
+        var start = LineCandidate(dh.Face, dh.Point, pos);
+        ShowSketch([start.P], n);
+        if (start.Kind != null && PushPullMe.Core.Drawing.EdgeAt(body, dh.Face.Face, start.P) is { } edge && start.OnEdge)
+        {
+            MeasureLabel.Text = "Vanaf hoek";
+            MeasureBox.Text = Mm((start.P - edge.Corner).Length);
+            StatusText.Text = $"╱ {start.Kind} · klik om de lijn hier te beginnen, of typ een afstand + Enter: zo ver van de dichtstbijzijnde hoek langs deze rand.";
+        }
+        else
+        {
+            MeasureBox.Text = "";
+            StatusText.Text = $"╱ {(start.Kind != null ? start.Kind + " · " : "")}klik waar de lijn begint (op een rand, of ergens op het vlak).";
+        }
+    }
+
+    private void StartDraw(FaceRef f, Vec3 at, Point? pos)
+    {
+        var body = _doc!.Bodies[f.Body];
+        _linePts.Clear(); _lineAxis = null;
+        if (LineMode && pos is { } ps) at = LineCandidate(f, at, ps).P;
+        if ((RectMode || CircleMode) && pos is { } gp && body.Faces[f.Face].Surface is BrepPlane gpl && GuideSnap(at, gp, NormalOf(f), gpl.Origin) is { } gs) at = gs.Point;
+        _drawFace = f; _drawStart = at; _drawEnd = at; _drawEndOk = false; _typed = "";
+        var n = NormalOf(f);
+        _drawU = RectAxis(n);
+        _drawEdgeDir = LineMode && PushPullMe.Core.Drawing.EdgeAt(body, f.Face, at) is { } e ? (e.Other - e.Corner).Normalized() : null;
+        _selected = null; _hover = null; _last = null; _drawHover = null;
+        UpdateHighlight();
+        MeasureLabel.Text = RectMode ? "Maten" : CircleMode ? "Straal" : "Lengte";
+        MeasureBox.Text = "";
+        StatusText.Text = RectMode ? "▭ Klik de andere hoek, of typ breedte;hoogte + Enter. Esc breekt af."
+            : CircleMode ? "◯ Klik de rand van de cirkel, of typ de straal + Enter. Esc breekt af."
+            : "╱ Klik op een andere rand van het vlak, of typ een lengte + Enter. Esc breekt af.";
+        ShowSketch([at], n);
+        if (LineMode) { _linePts.Add(at); StatusText.Text = "╱ Klik het volgende punt. Sluit op het beginpunt voor een vlak, of eindig op een rand om het vlak te delen. Typ een lengte + Enter. Esc: klaar."; }
+    }
+
+    /// <summary>The rectangle from the first corner to <paramref name="end"/>: its corners, and its width and height along
+    /// its sides (signed).</summary>
+    private (List<Vec3> Corners, double W, double H) Rect(Vec3 end)
+    {
+        var v = NormalOf(_drawFace!.Value).Cross(_drawU);
+        var d = end - _drawStart;
+        double w = d.Dot(_drawU), h = d.Dot(v);
+        return ([_drawStart, _drawStart + _drawU * w, _drawStart + _drawU * w + v * h, _drawStart + v * h], w, h);
+    }
+
+    private static readonly Color InferColor = Color.FromRgb(0xD9, 0x46, 0xEF);
+
+    /// <summary>The points of the line drawn so far (on <see cref="_drawFace"/>), and the axis held by an arrow key.</summary>
+    private readonly List<Vec3> _linePts = new();
+
+    /// <summary>The loose lines this line has left so far (they become edges when it closes or reaches the edge).</summary>
+    private readonly List<SketchLine> _chainLines = new();
+    private int? _lineAxis;
+    private Color? _lineColor;
+
+    /// <summary>
+    /// The next point of a line, as SketchUp infers it from the mouse (p on the face's plane): the first point (closing
+    /// the shape), a corner or middle of an edge, where guide lines cross; from the last point along an axis (red, green,
+    /// blue; or the axis held by an arrow key), parallel or square to an edge of the face (magenta), on to the edge
+    /// across when that is near; a point on an edge or a guide line; else the point itself. With what it is, its colour
+    /// and whether it lies on the face's outer edge.
+    /// </summary>
+    private (Vec3 P, string? Kind, Color? Color, bool OnEdge) LineCandidate(FaceRef f, Vec3 p, Point pos)
+    {
+        var body = _doc!.Bodies[f.Body];
+        var face = body.Faces[f.Face];
+        var n = NormalOf(f); var o = ((BrepPlane)face.Surface).Origin;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        bool OnEdge(Vec3 q) => OnPlaneEdge(f, q);
+        var plane = PlaneFaces(f);
+        // the edges to line up with: of the face the line is on, and of the face under the mouse (in the same plane)
+        var lineUp = new List<int> { f.Face };
+        if (FaceAt(pos) is { } under && under.Face.Body == f.Body && under.Face.Face != f.Face && plane.Contains(under.Face.Face)) lineUp.Add(under.Face.Face);
+        if (_linePts.Count >= 3 && (Screen(_linePts[0]) - pos).Length < 12) return (_linePts[0], "beginpunt: de vorm sluiten", null, false);
+        var es = EdgeSnap(f, p, pos);
+        if (es is { Kind: "middelpunt" or "eindpunt van een losse lijn" or "midden van een losse lijn" } pc) return (pc.Point, pc.Kind, null, OnEdge(pc.Point));
+        if (es is { Kind: "eindpunt" or "midden" or "snijpunt met de hulplijn" } pe) return (pe.Point, pe.Kind, null, true);
+        if (GuideSnap(p, pos, n, o) is { Kind: "snijpunt met de hulplijn" } gx) return (gx.Point, gx.Kind, null, OnEdge(gx.Point));
+        if (_linePts.Count > 0)
+        {
+            var last = _linePts[^1];
+            var d = p - last;
+            var dirs = new List<(Vec3 Dir, string Name, Color Color)>();
+            if (_lineAxis is int held) { if (Math.Abs(Axes[held].Dir.Dot(n)) < 1e-6) dirs.Add((Axes[held].Dir, "langs de " + Axes[held].Name, Axes[held].Color)); }
+            else
+            {
+                foreach (var ax in Axes.Where(a => Math.Abs(a.Dir.Dot(n)) < 1e-6)) dirs.Add((ax.Dir, "langs de " + ax.Name, ax.Color));
+                foreach (var e in lineUp.SelectMany(lf => body.Faces[lf].Loops).SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Curve is BrepLine && e.Start >= 0))
+                {
+                    var ed = (body.Vertices[e.End] - body.Vertices[e.Start]).Normalized();
+                    dirs.Add((ed, "evenwijdig aan een rand", InferColor));
+                    dirs.Add((n.Cross(ed), "loodrecht op een rand", InferColor));
+                }
+            }
+            if (d.Length > 1e-9)
+                foreach (var (dir, name, color) in dirs)
+                {
+                    double along = d.Dot(dir);
+                    if (_lineAxis == null && Math.Abs(along) < d.Length * Math.Cos(3 * Math.PI / 180)) continue;
+                    var sdir = dir * (along < 0 ? -1 : 1);
+                    var q = last + dir * (Math.Round(along * Display * 10) / 10 / Display);
+                    // on to the edge across, when the mouse is near it, or when the rounded length is within a rounding step of it
+                    if (PushPullMe.Core.Drawing.RayToEdges(body, plane, last, sdir) is { } across
+                        && ((Screen(across) - pos).Length < 15 || Math.Abs((q - last).Length - (across - last).Length) < 0.06 / Display))
+                        return (across, name + ", tot de rand", color, true);
+                    return (q, name, color, OnEdge(q));
+                }
+        }
+        if (es is { } on) return (on.Point, on.Kind, null, on.Kind != "op een losse lijn" || OnEdge(on.Point));
+        if (GuideSnap(p, pos, n, o) is { } g) return (g.Point, g.Kind, null, OnEdge(g.Point));
+        return (p, null, null, OnEdge(p));
+    }
+
+    private void DrawTo(Point pos)
+    {
+        if (_drawFace is not { } f || _typed.Length > 0) return;
+        if (LineMode && _linePts.Count == 1 && FaceAt(pos) is { } under && under.Face != f && IsPlanar(under.Face)
+            && !(under.Face.Body == f.Body && PlaneFaces(f).Contains(under.Face.Face)) && OnPlaneEdge(under.Face, _linePts[0]))
+        {
+            // the start lies on an edge of the face under the mouse too, in another plane: draw on that one
+            _drawFace = f = under.Face;
+            _drawEdgeDir = PushPullMe.Core.Drawing.EdgeAt(_doc!.Bodies[f.Body], f.Face, _linePts[0]) is { } e ? (e.Other - e.Corner).Normalized() : null;
+            UpdateHighlight();
+        }
+        if (OnPlane(f, pos) is not { } p) return;
+        var n = NormalOf(f);
+        if ((RectMode || CircleMode) && _doc!.Bodies[f.Body].Faces[f.Face].Surface is BrepPlane dpl && GuideSnap(p, pos, n, dpl.Origin) is { } dgs) p = dgs.Point;
+        if (CircleMode)
+        {
+            _drawEnd = p;
+            double r = (p - _drawStart).Length;
+            _drawEndOk = r > 1e-7;
+            var pts = Enumerable.Range(0, 60).Select(i => _drawStart + (_drawU * Math.Cos(i * Math.PI / 30) + n.Cross(_drawU) * Math.Sin(i * Math.PI / 30)) * r).ToList();
+            ShowSketch(_drawEndOk ? pts : [_drawStart], n, closed: true);
+            MeasureBox.Text = Mm(r);
+            return;
+        }
+        if (RectMode)
+        {
+            _drawEnd = p;
+            var (corners, w, h) = Rect(p);
+            _drawEndOk = Math.Abs(w) > 1e-7 && Math.Abs(h) > 1e-7;
+            ShowSketch(corners, n, closed: true);
+            MeasureBox.Text = $"{Mm(Math.Abs(w))};{Mm(Math.Abs(h))}";
+            return;
+        }
+        // the next point of the line, as inferred
+        var c = LineCandidate(f, p, pos);
+        _drawEnd = c.P; _drawEndOk = true; _lineColor = c.Color;
+        var shown = _linePts.Append(c.P).ToList();
+        ShowSketch(shown, n, color: c.Color);
+        double len = (c.P - _linePts[^1]).Length;
+        MeasureBox.Text = Mm(len);
+        StatusText.Text = $"╱ {Mm(len)} mm{(c.Kind != null ? " · " + c.Kind : "")} · klik voor het volgende punt, of typ een lengte + Enter. Esc: klaar.";
+    }
+
+    /// <summary>
+    /// A point added to the line: back on the first point it closes into a face of its own; from the outer edge to it
+    /// again it divides the face; otherwise the line goes on from there.
+    /// </summary>
+    private void AddLinePoint(Vec3 c)
+    {
+        if (_drawFace is not { } f || _doc is not { } before || _linePts.Count == 0) return;
+        if ((c - _linePts[^1]).Length < 1e-9) return;
+        var body = before.Bodies[f.Body];
+        bool OnEdge(Vec3 q) => OnPlaneEdge(f, q);
+        var plane = PlaneFaces(f);
+        var pts = _linePts.Append(c).ToList();
+        bool closed = pts.Count >= 4 && (c - pts[0]).Length < 1e-9;
+        // (a point on the edge of a hole only touches it: the line goes on through it)
+        bool across = OnEdge(pts[0]) && OnEdge(c) && !PushPullMe.Core.Drawing.OnHoleEdge(body, plane, c) && (pts.Count > 2 || !plane.Any(pf => SameEdge(body, pf, pts[0], c)));
+        if (!closed && !across)
+        {
+            // as SketchUp: the piece stays, as a loose line (until the shape closes or reaches the edge: then a face)
+            var seg = new SketchLine(_linePts[^1], c);
+            // (ending on the end of an earlier line closes a ring: then the line stops, as when it closes on itself)
+            bool onEnd = before.Lines.Any(l => (l.Start - c).Length < 1e-7 || (l.End - c).Length < 1e-7);
+            if (CloseWithLoose(before, before.AddLines([seg]), f, c, onEnd)) return;
+            Commit(before, before.AddLines([seg]));
+            _chainLines.Add(seg);
+            _linePts.Add(c);
+            Render();
+            ShowSketch([c], NormalOf(f));
+            StatusText.Text = $"╱ {_chainLines.Count} {(_chainLines.Count == 1 ? "lijn" : "lijnen")} · klik het volgende punt. Sluit op het beginpunt voor een vlak, of eindig op een rand om het vlak te delen. Esc: klaar.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"loose line ({seg.Start.X * Display:0.####},{seg.Start.Y * Display:0.####},{seg.Start.Z * Display:0.####}) → ({c.X * Display:0.####},{c.Y * Display:0.####},{c.Z * Display:0.####})"));
+            return;
+        }
+        try
+        {
+            // (the loose pieces of this line become the new edges)
+            var (doc, nf) = before.RemoveLines(_chainLines).DrawPath(f, pts);
+            EndDraw();
+            Commit(before, doc);
+            _last = null; _selected = nf; _lastDrawn = nf;
+            Render();
+            StatusText.Text = closed ? "✅ Vlak getekend. Kies ⇕ (P) om het eruit te trekken of in te duwen."
+                : "✅ Het vlak is gedeeld. Teken verder vanaf hier, of Esc (en ⇕ P om een deel te verschuiven).";
+            if (!closed)
+            {
+                // as SketchUp: the line goes on from where it ended (on the same plane; f keeps its number)
+                _drawFace = f; _drawStart = c; _drawEnd = c; _drawEndOk = false; _typed = "";
+                _linePts.Add(c);
+                MeasureLabel.Text = "Lengte";
+                ShowSketch(_linePts, NormalOf(f));
+            }
+            Log($"path on face {f.Face} ({string.Join(") (", pts.Select(q => string.Create(CultureInfo.InvariantCulture, $"{q.X * Display:0.####},{q.Y * Display:0.####},{q.Z * Display:0.####}")))}): ok, new face {nf.Face}");
+        }
+        catch (PushPullException ex)
+        {
+            // (the line stays as it was: the point can be put elsewhere)
+            // no face (it runs outside the face, say): the piece stays as a loose line all the same
+            var seg = new SketchLine(_linePts[^1], c);
+            if (CloseWithLoose(before, before.AddLines([seg]), f, c, closed)) return;
+            if (closed) EndDraw();
+            Commit(before, before.AddLines([seg]));
+            if (!closed) { _chainLines.Add(seg); _linePts.Add(c); }
+            Render();
+            if (!closed) ShowSketch([c], NormalOf(f));
+            StatusText.Text = $"╱ Geen vlak geworden ({ex.Message.TrimEnd('.')}); de lijnen blijven staan." + (closed ? "" : " Klik het volgende punt, of Esc: klaar.");
+            Log($"path on face {f.Face} ({string.Join(") (", pts.Select(q => string.Create(CultureInfo.InvariantCulture, $"{q.X * Display:0.####},{q.Y * Display:0.####},{q.Z * Display:0.####}")))}): {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// A line piece just added (<paramref name="withPiece"/>) that closes a shape with loose lines drawn before (or with
+    /// the face's edges through them): the shape becomes a face, as in SketchUp, and the line goes on from
+    /// <paramref name="c"/> (unless <paramref name="end"/>). False when nothing closes.
+    /// </summary>
+    private bool CloseWithLoose(SketchDocument before, SketchDocument withPiece, FaceRef f, Vec3 c, bool end = false)
+    {
+        var (doc, made) = withPiece.CloseLooseLines(f);
+        if (made.Count == 0) return false;
+        EndDraw();
+        Commit(before, doc);
+        _last = null; _selected = made[^1]; _lastDrawn = made[^1];
+        Render();
+        if (!end)
+        {
+            _drawFace = f; _drawStart = c; _drawEnd = c; _drawEndOk = false; _typed = "";
+            _linePts.Add(c);
+            MeasureLabel.Text = "Lengte";
+            ShowSketch([c], NormalOf(f));
+        }
+        StatusText.Text = $"✅ Met de lijnen die er al lagen {(made.Count == 1 ? "is een vlak" : $"zijn {made.Count} vlakken")} gesloten." + (end ? "" : " Teken verder vanaf hier, of Esc.");
+        Log($"loose lines closed on face {f.Face}: {made.Count} new face(s), {doc.Lines.Count} loose left");
+        return true;
+    }
+
+    /// <summary>Whether two points lie on the same straight edge of the face's outer loop.</summary>
+    private static bool SameEdge(BrepBody body, int face, Vec3 a, Vec3 b) =>
+        body.Faces[face].Loops[0].Select(c => body.Edges[c.Edge]).Where(e => e.Curve is BrepLine && e.Start >= 0).Any(e =>
+        {
+            Vec3 s0 = body.Vertices[e.Start], ab = body.Vertices[e.End] - s0;
+            bool On(Vec3 q) { double t = (q - s0).Dot(ab) / ab.Dot(ab); return t >= -1e-9 && t <= 1 + 1e-9 && (s0 + ab * t - q).Length < 1e-6; }
+            return On(a) && On(b);
+        });
+
+    private void FinishDraw()
+    {
+        if (_drawFace is not { } f || _doc is not { } before) return;
+        if (LineMode) { AddLinePoint(_drawEnd); return; }
+        if ((RectMode || CircleMode) && !_drawEndOk) return;
+        var (a, c, u, kind) = (_drawStart, _drawEnd, _drawU, Kind);
+        EndDraw();
+        DrawShape(before, f, a, c, u, kind);
+    }
+
+    /// <summary>
+    /// A typed size while drawing. ▭ before the first click: x;y from the face's corner nearest the mouse (the first
+    /// corner); after it: breedte;hoogte. ╱ before the first click: the distance from the nearest corner along the edge
+    /// under the mouse (the start); after it: the length (the line must end on an edge).
+    /// </summary>
+    private void TypedDraw(string typed)
+    {
+        var parts = typed.Split(';');
+        double b = 0;
+        bool two = TryMm(parts[0], out double a) & (parts.Length == 2 && TryMm(parts[1], out b));
+        if (CircleMode)
+        {
+            // the radius, after the centre is clicked
+            if (_drawFace is not { } cf) { StatusText.Text = "◯ Klik eerst het middelpunt, en typ dan de straal."; return; }
+            if (parts.Length != 1 || a <= 0) { StatusText.Text = "◯ Typ de straal in mm + Enter."; return; }
+            var (cs, cu) = (_drawStart, _drawU);
+            EndDraw();
+            DrawShape(_doc!, cf, cs, cs + cu * (a / Display), cu, "circle");
+            return;
+        }
+        if (_drawFace is not { } f)
+        {
+            if (_drawHover is not { } dh) return;
+            var body = _doc!.Bodies[dh.Face.Body];
+            var n = NormalOf(dh.Face);
+            if (RectMode)
+            {
+                if (!two || a < 0 || b < 0) { StatusText.Text = "▭ Typ x;y in mm, bijvoorbeeld 10;5, en Enter."; return; }
+                var c = PushPullMe.Core.Drawing.NearestCorner(body, dh.Face.Face, dh.Point);
+                var u = RectAxis(n); var v = n.Cross(u);
+                // into the face, whichever way that is from the corner
+                var start = new[] { (1, 1), (-1, 1), (1, -1), (-1, -1) }
+                    .Select(sg => c + u * (sg.Item1 * a / Display) + v * (sg.Item2 * b / Display))
+                    .Cast<Vec3?>().FirstOrDefault(pt => PushPullMe.Core.Drawing.Contains(body, dh.Face.Face, pt!.Value));
+                if (start is not { } st) { StatusText.Text = "▭ Zo ver van de hoek ligt geen punt van dit vlak."; return; }
+                StartDraw(dh.Face, st, null);
+                StatusText.Text = $"▭ Eerste hoek op {typed} mm van de hoek. Klik de andere hoek, of typ breedte;hoogte + Enter.";
+                return;
+            }
+            if (PushPullMe.Core.Drawing.EdgeAt(body, dh.Face.Face, dh.Point) is not { } edge || parts.Length != 1 || a <= 0)
+            { StatusText.Text = "╱ Wijs een rand aan en typ een afstand in mm + Enter."; return; }
+            var along = edge.Other - edge.Corner;
+            if (a / Display >= along.Length) { StatusText.Text = $"╱ Deze rand is maar {Mm(along.Length)} mm lang."; return; }
+            StartDraw(dh.Face, edge.Corner + along.Normalized() * (a / Display), null);
+            StatusText.Text = $"╱ Lijn begint {typed} mm van de hoek. Klik op een andere rand, of typ een lengte + Enter.";
+            return;
+        }
+        if (RectMode)
+        {
+            if (!two || a <= 0 || b <= 0) { StatusText.Text = "▭ Typ breedte;hoogte in mm, bijvoorbeeld 30;20, en Enter."; return; }
+            // in the directions the mouse is pulling the rectangle
+            var (_, cw, ch) = Rect(_drawEnd);
+            var c = _drawStart + _drawU * (a / Display * (cw < 0 ? -1 : 1)) + NormalOf(f).Cross(_drawU) * (b / Display * (ch < 0 ? -1 : 1));
+            var (st, u) = (_drawStart, _drawU);
+            EndDraw();
+            DrawShape(_doc!, f, st, c, u, "rect");
+            return;
+        }
+        if (parts.Length != 1 || a <= 0) { StatusText.Text = "╱ Typ een lengte in mm + Enter."; return; }
+        // along the way the line is going now (the axis held, or towards the point under the mouse)
+        var lastPt = _linePts[^1];
+        var dirTyped = _lineAxis is int la ? Axes[la].Dir * ((_drawEnd - lastPt).Dot(Axes[la].Dir) < 0 ? -1 : 1) : (_drawEnd - lastPt);
+        if (dirTyped.Length < 1e-9) { StatusText.Text = "╱ Beweeg de muis eerst in de richting van de lijn."; return; }
+        AddLinePoint(lastPt + dirTyped.Normalized() * (a / Display));
+    }
+
+    /// <summary>What is being drawn: "rect", "line" or "circle".</summary>
+    private string Kind => RectMode ? "rect" : CircleMode ? "circle" : "line";
+
+    /// <summary>A rectangle (corners a and c, first side along u), a line (a to c) or a circle (centre a, through c)
+    /// drawn on face f of <paramref name="before"/>.</summary>
+    private void DrawShape(SketchDocument before, FaceRef f, Vec3 a, Vec3 c, Vec3 u, string kind)
+    {
+        static string P(Vec3 v) => string.Create(CultureInfo.InvariantCulture, $"{v.X * Display:0.####},{v.Y * Display:0.####},{v.Z * Display:0.####}");
+        string where = $"{kind} on face {f.Face} ({P(a)}) ({P(c)})";
+        try
+        {
+            var (doc, nf) = kind switch
+            {
+                "rect" => before.DrawRectangle(f, a, c, u),
+                "circle" => before.DrawCircle(f, a, (c - a).Length),
+                _ => before.DrawLine(f, a, c),
+            };
+            Commit(before, doc);
+            _last = null; _selected = nf; _lastDrawn = nf;
+            Render();
+            StatusText.Text = kind switch
+            {
+                "rect" => "✅ Rechthoek getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.",
+                "circle" => $"✅ Cirkel getekend (straal {Mm((c - a).Length)} mm). Kies ⇕ (P): eruit trekken geeft een staaf, tot de achterkant duwen een gat.",
+                _ => "✅ Het vlak is in tweeën gedeeld. Kies ⇕ (P) om een deel te verschuiven.",
+            };
+            Log($"{where}: ok, new face {nf.Face}");
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log($"{where}: {ex.Message}");
+        }
+    }
+
+    private void EndDraw()
+    {
+        _drawFace = null; _drawEndOk = false; _drawEdgeDir = null;
+        _linePts.Clear(); _lineAxis = null; _chainLines.Clear();
+        ShowSketch([]);
+        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
+    }
+
+    /// <summary>
+    /// A point moved a little toward the camera (a fraction of its distance), along the ray through it: it stays exactly
+    /// where it was on the screen, but in front of the face it lies on. (Lifting along the face's normal shifted it
+    /// sideways when seen at an angle: millimetres on a large model.)
+    /// </summary>
+    private Point3D TowardEye(Point3D p, double fraction)
+    {
+        switch (View.Camera)
+        {
+            case PerspectiveCamera pc: return p + (pc.Position - p) * fraction;
+            case ProjectionCamera oc:
+                var look = oc.LookDirection; look.Normalize();
+                return p - look * ((oc.Position - p).Length * fraction);
+            default: return p;
+        }
+    }
+
+    /// <summary>The last sketch shown (to show it again when the camera moves).</summary>
+    private (IReadOnlyList<Vec3> Pts, bool Closed, Color? Color)? _sketchShown;
+
+    /// <summary>What is being drawn, as lines (a single point as a small cross), moved a little toward the camera so the
+    /// face (and its highlight) does not hide them. (n: the face's normal; no longer used.)</summary>
+    private void ShowSketch(IReadOnlyList<Vec3> pts, Vec3 n = default, bool closed = false, Color? color = null)
+    {
+        if (_sketch != null) { View.Children.Remove(_sketch); _sketch = null; }
+        _sketchShown = pts.Count == 0 ? null : (pts.ToList(), closed, color);
+        if (pts.Count == 0) return;
+        Point3D Q(Vec3 v) => TowardEye(P(v), 2e-3);
+        var lines = new Point3DCollection();
+        if (pts.Count == 1)
+        {
+            double s = _modelSize * 0.01;
+            var c = Q(pts[0]);
+            foreach (var d in new[] { new Vector3D(s, 0, 0), new Vector3D(0, s, 0), new Vector3D(0, 0, s) }) { lines.Add(c - d); lines.Add(c + d); }
+        }
+        else
+            for (int i = 0; i < (closed ? pts.Count : pts.Count - 1); i++) { lines.Add(Q(pts[i])); lines.Add(Q(pts[(i + 1) % pts.Count])); }
+        _sketch = new LinesVisual3D { Points = lines, Color = color ?? SelectColor, Thickness = color == null ? 2.5 : 4 };
+        View.Children.Add(_sketch);
+    }
+
+    /// <summary>The face the last rectangle or line made (for the test aid).</summary>
+    private FaceRef? _lastDrawn;
+
+    // ------------------------------------------------------------------ move (as in SketchUp)
+
+    private static readonly Color AxisX = Color.FromRgb(0xE1, 0x1D, 0x48), AxisY = Color.FromRgb(0x16, 0xA3, 0x4A), AxisZ = Color.FromRgb(0x25, 0x63, 0xEB);
+    private static readonly (Vec3 Dir, string Name, Color Color)[] Axes =
+    [
+        (new Vec3(1, 0, 0), "rode as", AxisX), (new Vec3(0, 1, 0), "groene as", AxisY), (new Vec3(0, 0, 1), "blauwe as", AxisZ),
+    ];
+
+    // a move in progress: what is picked up (body, selection, a word for it), where it was grabbed, the document it
+    // started from, the axis it is held to (by an arrow key), the offset now and whether that works
+    private (int Body, MoveSelection Pick, string What)? _movePick;
+    private Vec3 _moveGrab;
+    private SketchDocument? _moveBase;
+    private int? _moveAxis;
+    private Vec3 _moveOffset;
+    private bool _moveValid;
+
+    /// <summary>The modifier keys held (or, in the test aid, the ones it plays).</summary>
+    private ModifierKeys Mods => _simMods ?? Keyboard.Modifiers;
+    private ModifierKeys? _simMods;
+
+    /// <summary>The last move: typing a distance right after it changes it (as with Push/Pull).</summary>
+    private (SketchDocument Before, int Body, MoveSelection Pick, Vec3 Dir)? _lastMove;
+
+    /// <summary>What the mouse points at to move: a corner of the face under it (within 10 pixels), else an edge of it
+    /// (within 8), else the face; with the point it is grabbed at.</summary>
+    private (int Body, MoveSelection Pick, string What, Vec3 Grab)? MovePickAt((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (hit is not { } h || _doc == null) return null;
+        // Ctrl: a copy of the whole body (as SketchUp's Move with Ctrl); Shift: the whole body
+        if ((Mods & ModifierKeys.Control) != 0) return (h.Face.Body, MoveSelection.Copy(), "lichaam (als kopie)", V(h.Point));
+        if ((Mods & ModifierKeys.Shift) != 0) return (h.Face.Body, MoveSelection.WholeBody(), "lichaam", V(h.Point));
+        // (a face of the choice, with more chosen: all of them together)
+        if (_multi is { } mm && mm.Body == h.Face.Body && mm.Faces.Count > 1 && mm.Faces.Contains(h.Face.Face))
+            return (mm.Body, new MoveSelection(mm.Faces.ToList(), [], []), $"geheel van {mm.Faces.Count} vlakken", V(h.Point));
+        var body = _doc.Bodies[h.Face.Body];
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        var corners = body.Faces[h.Face.Face].Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0)
+            .SelectMany(e => new[] { e.Start, e.End }).Distinct()
+            .Select(v => (V: v, Px: (Screen(body.Vertices[v]) - pos).Length)).Where(x => x.Px < 10).OrderBy(x => x.Px).ToList();
+        if (corners.Count > 0) return (h.Face.Body, MoveSelection.Vertex(corners[0].V), "hoekpunt", body.Vertices[corners[0].V]);
+        if (EdgeAt(hit, pos) is { } e && ScreenDistanceToEdge(body, e.Edge, pos) < 8)
+        {
+            var ed = body.Edges[e.Edge];
+            var pts = FaceGeometry.EdgePoints(body, ed);
+            var grab = pts.MinBy(p => (Screen(p) - pos).Length);
+            return (e.Body, MoveSelection.Edge(e.Edge), "rand", grab);
+        }
+        return (h.Face.Body, MoveSelection.Face(h.Face.Face), "vlak", V(h.Point));
+    }
+
+    private double ScreenDistanceToEdge(BrepBody body, int edge, Point pos)
+    {
+        var pts = FaceGeometry.EdgePoints(body, body.Edges[edge]).Select(p => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(p))).ToList();
+        double best = double.MaxValue;
+        for (int i = 0; i + 1 < pts.Count; i++)
+        {
+            var ab = pts[i + 1] - pts[i]; double l2 = ab.LengthSquared;
+            double t = l2 == 0 ? 0 : Math.Clamp(Vector.Multiply(pos - pts[i], ab) / l2, 0, 1);
+            best = Math.Min(best, (pts[i] + ab * t - pos).Length);
+        }
+        return best;
+    }
+
+    /// <summary>What is picked up shown: a corner as a small cross, an edge as a line, a face lit up.</summary>
+    private void ShowPick(int body, MoveSelection pick, Vec3 grab)
+    {
+        var b = (_shown ?? _doc)!.Bodies[body];
+        if (pick.Vertices.Count > 0) ShowSketch([grab]);
+        else if (pick.Edges.Count > 0) ShowSketch(FaceGeometry.EdgePoints(b, b.Edges[pick.Edges.First()]), default, color: SelectColor);
+        else ShowSketch([]);
+    }
+
+    private void HoverMove((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (MovePickAt(hit, pos) is not { } p) { ShowSketch([]); StatusText.Text = "✥ Wijs een hoekpunt, rand of vlak aan om te verplaatsen."; return; }
+        if (p.Pick.Faces.Count == 0 && _hover != null) { _hover = null; UpdateHighlight(); }
+        ShowPick(p.Body, p.Pick, p.Grab);
+        StatusText.Text = $"✥ Klik om dit {p.What} op te pakken.{(p.Pick.Whole == MoveWhole.None ? " Shift: het hele lichaam · Ctrl: een kopie." : "")}";
+    }
+
+    private void StartMove((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (MovePickAt(hit, pos) is not { } p || _doc == null) return;
+        _movePick = (p.Body, p.Pick, p.What); _moveGrab = p.Grab; _moveBase = _doc; _moveAxis = null;
+        _moveOffset = default; _moveValid = false; _typed = ""; _last = null; _lastMove = null; _selected = null;
+        if (p.Pick.Faces.Count > 0) _hover = new FaceRef(p.Body, p.Pick.Faces.First());
+        UpdateHighlight();
+        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm"; MeasureBox.Text = "0";
+        StatusText.Text = $"✥ Beweeg om het {p.What} te verplaatsen; klik om neer te zetten, of typ de afstand + Enter. Pijltjes: rood, groen, blauw. Esc breekt af.";
+    }
+
+    private void EndMove()
+    {
+        _movePick = null; _moveBase = null; _moveAxis = null; _moveValid = false;
+        ShowSketch([]);
+    }
+
+    /// <summary>
+    /// The offset for the mouse at <paramref name="pos"/>: onto a corner close by (within 12 pixels; "naar dit punt"),
+    /// else along the axis held by an arrow key, or the axis the mouse is close to (within 15 pixels), else free in the
+    /// plane across the view through the grab point; with what it snapped to.
+    /// </summary>
+    private (Vec3 Offset, string? Snap, int? Axis)? MoveOffsetAt(Point pos)
+    {
+        if (_moveBase == null || _movePick is not { } mp) return null;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
+        if (ray == null) return null;
+        var org = V(ray.Origin); var dir = new Vec3(ray.Direction.X, ray.Direction.Y, ray.Direction.Z).Normalized();
+        // a corner close by (not one that is moved along)
+        if (_moveAxis == null)
+        {
+            var body = _moveBase.Bodies[mp.Body];
+            // (the whole body: none of its corners; a copy: the original stays, its corners are fine)
+            var moving = mp.Pick.Whole == MoveWhole.Body ? Enumerable.Range(0, body.Vertices.Count).ToHashSet() : mp.Pick.Vertices.Concat(mp.Pick.Edges.Select(e => body.Edges[e]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End }))
+                .Concat(mp.Pick.Faces.SelectMany(f => body.Faces[f].Loops.SelectMany(l => l)).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End })).ToHashSet();
+            (Vec3 V, double Px)? near = null;
+            for (int bi = 0; bi < _moveBase.Bodies.Count; bi++)
+                for (int vi = 0; vi < _moveBase.Bodies[bi].Vertices.Count; vi++)
+                {
+                    if (bi == mp.Body && moving.Contains(vi)) continue;
+                    var v = _moveBase.Bodies[bi].Vertices[vi];
+                    double px = (Screen(v) - pos).Length;
+                    if (px < 12 && (near == null || px < near.Value.Px)) near = (v, px);
+                }
+            if (near is { } nv) return (nv.V - _moveGrab, "naar dit punt", null);
+            if (GuideCrossingNear(pos) is { } gc) return (gc - _moveGrab, "naar het snijpunt met de hulplijn", null);
+        }
+        // the point on the line through the grab point along a direction nearest to the mouse ray
+        Vec3? OnLine(Vec3 d)
+        {
+            double b = d.Dot(dir);
+            if (1 - b * b < 1e-9) return null;
+            var w0 = _moveGrab - org;
+            double t = (b * w0.Dot(dir) - w0.Dot(d)) / (1 - b * b);
+            return _moveGrab + d * t;
+        }
+        Vec3 Round(Vec3 v, Vec3 d) { double l = Math.Round(v.Dot(d) * Display * 10) / 10 / Display; return d * l; }
+        if (_moveAxis is int held && OnLine(Axes[held].Dir) is { } ph) return (Round(ph - _moveGrab, Axes[held].Dir), null, held);
+        var best = Enumerable.Range(0, 3).Select(i => (I: i, P: OnLine(Axes[i].Dir))).Where(x => x.P != null)
+            .Select(x => (x.I, P: x.P!.Value, Px: (Screen(x.P!.Value) - pos).Length)).Where(x => x.Px < 15 && (x.P - _moveGrab).Length > 1e-6).OrderBy(x => x.Px).ToList();
+        if (best.Count > 0) return (Round(best[0].P - _moveGrab, Axes[best[0].I].Dir), null, best[0].I);
+        // free: in the plane across the view
+        double den = dir.Dot(dir);
+        var look = View.Camera is ProjectionCamera cam ? new Vec3(cam.LookDirection.X, cam.LookDirection.Y, cam.LookDirection.Z).Normalized() : dir;
+        double dn = dir.Dot(look);
+        if (Math.Abs(dn) < 1e-9) return null;
+        var hitP = org + dir * ((_moveGrab - org).Dot(look) / dn);
+        var free = hitP - _moveGrab;
+        free = new Vec3(Math.Round(free.X * Display * 10) / 10 / Display, Math.Round(free.Y * Display * 10) / 10 / Display, Math.Round(free.Z * Display * 10) / 10 / Display);
+        return (free, null, null);
+    }
+
+    private void MoveTo(Point pos)
+    {
+        if (_movePick == null || _typed.Length > 0) return;
+        if (MoveOffsetAt(pos) is not { } m) return;
+        if ((m.Offset - _moveOffset).Length < 1e-12 && _moveValid) return;
+        PreviewMove(m.Offset, m.Snap, m.Axis);
+    }
+
+    private void PreviewMove(Vec3 offset, string? snap, int? axis)
+    {
+        if (_movePick is not { } mp || _moveBase == null) return;
+        _moveOffset = offset;
+        MeasureBox.Text = Mm(offset.Length);
+        // the axis it runs along, as a coloured guide line
+        if (axis is int a)
+        {
+            var d = Axes[a].Dir * Math.Max(offset.Length, 0.005);
+            ShowSketch([_moveGrab - d, _moveGrab + offset + d], default, color: Axes[a].Color);
+        }
+        else ShowSketch([_moveGrab, _moveGrab + offset]);
+        if (offset.Length < 1e-9) { _moveValid = false; Render(_moveBase); return; }
+        try
+        {
+            var (doc, _) = _moveBase.Move(mp.Body, mp.Pick, offset, checkCrossing: false);
+            _moveValid = true;
+            Render(doc);
+            StatusText.Text = $"✥ {Mm(offset.Length)} mm{(axis is int ax ? " langs de " + Axes[ax].Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · klik om neer te zetten, of typ de afstand + Enter. Esc breekt af.";
+        }
+        catch (PushPullException ex) { _moveValid = false; StatusText.Text = "⛔ " + ex.Message; }
+    }
+
+    private void FinishMove()
+    {
+        if (_movePick is not { } mp || _moveBase is not { } before) return;
+        var offset = _moveOffset;
+        EndMove();
+        if (offset.Length < 1e-9) { Render(); return; }
+        ApplyMove(before, mp.Body, mp.Pick, offset, replaceLast: false);
+    }
+
+    private void ApplyMove(SketchDocument before, int body, MoveSelection pick, Vec3 offset, bool replaceLast)
+    {
+        string what = pick.Whole == MoveWhole.Copy ? "copy" : pick.Whole == MoveWhole.Body ? "all"
+            : pick.Faces.Count > 1 ? $"faces {string.Join(",", pick.Faces)}"
+            : pick.Vertices.Count > 0 ? $"vertex {pick.Vertices.First()}" : pick.Edges.Count > 0 ? $"edge {pick.Edges.First()}" : $"face {pick.Faces.First()}";
+        string off = string.Create(CultureInfo.InvariantCulture, $"{offset.X * Display:0.###},{offset.Y * Display:0.###},{offset.Z * Display:0.###}");
+        try
+        {
+            var (doc, r) = before.Move(body, pick, offset);
+            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            else Commit(before, doc);
+            _lastMove = (before, body, pick, offset.Normalized());
+            _last = null; _selected = null;
+            Render();
+            MeasureBox.Text = Mm(offset.Length);
+            StatusText.Text = $"✅ {(pick.Whole == MoveWhole.Copy ? "Gekopieerd" : "Verplaatst")}: {Mm(offset.Length)} mm. Typ een andere afstand + Enter om het aan te passen.";
+            Log($"move {what} of body {body} by ({off}) mm: ok, {doc.Bodies[body].Faces.Count} faces");
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log($"move {what} of body {body} by ({off}) mm: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------------ the tape measure and guide lines
+
+    private static readonly Color GuideColor = Color.FromRgb(0x94, 0xA3, 0xB8);
+    private readonly List<Guide> _guides = new();
+    private LinesVisual3D? _guideVisual;
+
+    // a tape measure in progress: where it starts, and (from an edge) the edge's line and the face it was picked on
+    private Vec3? _tapeStart;
+    private (Vec3 A, Vec3 Dir, FaceRef Face)? _tapeEdge;
+    private Vec3 _tapeOffset;
+
+    /// <summary>The guide lines as dashed lines, long enough to cross the whole model.</summary>
+    private void RenderGuides()
+    {
+        if (_guideVisual != null) { View.Children.Remove(_guideVisual); _guideVisual = null; }
+        if (_guides.Count == 0) return;
+        var pts = new Point3DCollection();
+        double len = Math.Max(_modelSize, 10) * 1.5 / Display, dash = len / 60;
+        foreach (var g in _guides)
+            for (double t = -len; t < len; t += 2 * dash) { pts.Add(P(g.Point + g.Dir * t)); pts.Add(P(g.Point + g.Dir * (t + dash))); }
+        _guideVisual = new LinesVisual3D { Points = pts, Color = GuideColor, Thickness = 1.2 };
+        View.Children.Add(_guideVisual);
+    }
+
+    private void ClearGuides()
+    {
+        _guides.Clear();
+        RenderGuides();
+    }
+
+    /// <summary>
+    /// A point to snap to on the plane through <paramref name="o"/> with normal <paramref name="n"/>, near the mouse:
+    /// where guide lines meet each other or an edge of a face in that plane (within 12 pixels), else the nearest point on
+    /// a guide line in that plane (within 8 pixels); with what it is.
+    /// </summary>
+    private (Vec3 Point, string Kind)? GuideSnap(Vec3 p, Point pos, Vec3 n, Vec3 o)
+    {
+        if (_doc == null) return null;
+        if (CentreSnap(n, o, pos) is { } cs) return (cs, "middelpunt");
+        if (_guides.Count == 0) return null;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        var inPlane = _guides.Where(g => Guides.InPlane(g, o, n)).ToList();
+        var crossings = new List<Vec3>();
+        for (int i = 0; i < inPlane.Count; i++)
+            for (int j = i + 1; j < inPlane.Count; j++)
+                if (Guides.Meet(inPlane[i].Point, inPlane[i].Dir, inPlane[j].Point, inPlane[j].Dir) is { } m) crossings.Add(m);
+        foreach (var b in _doc.Bodies)
+            foreach (var e in b.Edges.Where(e => e.Curve is BrepLine && e.Start >= 0))
+            {
+                Vec3 a = b.Vertices[e.Start], c = b.Vertices[e.End];
+                if (Math.Abs((a - o).Dot(n)) > Guides.Tol || Math.Abs((c - o).Dot(n)) > Guides.Tol) continue;
+                foreach (var g in inPlane) if (Guides.MeetSegment(g, a, c) is { } m) crossings.Add(m);
+            }
+        var best = crossings.Select(q => (Q: q, Px: (Screen(q) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
+        if (best.Count > 0) return (best[0].Q, "snijpunt met de hulplijn");
+        var on = inPlane.Select(g => Guides.Closest(g, p)).Select(q => (Q: q, Px: (Screen(q) - pos).Length)).Where(x => x.Px < 8).OrderBy(x => x.Px).ToList();
+        return on.Count > 0 ? (on[0].Q, "op de hulplijn") : null;
+    }
+
+    // ------------------------------------------------------------------ loose lines
+
+    private LinesVisual3D? _looseVisual, _looseConstruction;
+
+    /// <summary>The loose lines, as edges (construction lines dashed, in the guide colour), just in front of the faces as
+    /// seen from the camera (they mostly lie on one).</summary>
+    private void RenderLoose(SketchDocument? doc)
+    {
+        if (_looseVisual != null) { View.Children.Remove(_looseVisual); _looseVisual = null; }
+        if (_looseConstruction != null) { View.Children.Remove(_looseConstruction); _looseConstruction = null; }
+        if (doc == null || doc.Lines.Count == 0) return;
+        var solid = new Point3DCollection(); var dashed = new Point3DCollection();
+        foreach (var l in doc.Lines)
+        {
+            var pts = l.Points();
+            if (!l.Construction)
+                for (int i = 0; i + 1 < pts.Count; i++) { solid.Add(TowardEye(P(pts[i]), 2e-3)); solid.Add(TowardEye(P(pts[i + 1]), 2e-3)); }
+            else
+            {
+                // dashes about 1/60 of the model across
+                double dash = Math.Max(_modelSize, 10) / 60 / Display;
+                for (int i = 0; i + 1 < pts.Count; i++)
+                {
+                    var (a, b) = (pts[i], pts[i + 1]); double len = (b - a).Length;
+                    for (double t = 0; t < len; t += 2 * dash) { dashed.Add(TowardEye(P(a + (b - a) * (t / len)), 2e-3)); dashed.Add(TowardEye(P(a + (b - a) * (Math.Min(t + dash, len) / len)), 2e-3)); }
+                }
+            }
+        }
+        if (solid.Count > 0) View.Children.Add(_looseVisual = new LinesVisual3D { Points = solid, Color = EdgeColor, Thickness = 1.6 });
+        if (dashed.Count > 0) View.Children.Add(_looseConstruction = new LinesVisual3D { Points = dashed, Color = GuideColor, Thickness = 1.4 });
+    }
+
+    /// <summary>The loose line under the mouse (within 6 pixels on screen): its index.</summary>
+    private int? LooseAt(Point pos)
+    {
+        if (_doc == null) return null;
+        var mat = Viewport3DHelper.GetTotalTransform(View.Viewport);
+        Point Screen(Vec3 v) { var q = mat.Transform(P(v)); return new Point(q.X, q.Y); }
+        (int I, double D)? best = null;
+        for (int i = 0; i < _doc.Lines.Count; i++)
+        {
+            var s = _doc.Lines[i].Points().Select(Screen).ToList();
+            for (int k = 0; k + 1 < s.Count; k++)
+            {
+                Point a = s[k], b = s[k + 1]; var ab = b - a; double l2 = ab.LengthSquared;
+                double t = l2 == 0 ? 0 : Math.Clamp(Vector.Multiply(pos - a, ab) / l2, 0, 1);
+                double d = (a + ab * t - pos).Length;
+                if (d < 6 && (best == null || d < best.Value.D)) best = (i, d);
+            }
+        }
+        return best?.I;
+    }
+
+    /// <summary>A point of a loose line in the plane through o with normal n near the mouse: its end or middle (within 12
+    /// pixels), else the nearest point on it (within 20 pixels); with what it is.</summary>
+    private (Vec3 Point, string Kind)? LooseSnap(Vec3 n, Vec3 o, Vec3 at, Point pos)
+    {
+        if (_doc == null || _doc.Lines.Count == 0) return null;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        bool InPlane(Vec3 q) => Math.Abs((q - o).Dot(n)) < 1e-7;
+        var inPlane = _doc.Lines.Where(l => InPlane(l.Start) && InPlane(l.End)).ToList();
+        var key = inPlane.SelectMany(l => new[] { (P: l.Start, K: "eindpunt van een losse lijn"), (P: l.End, K: "eindpunt van een losse lijn"), (P: l.Middle, K: "midden van een losse lijn") })
+            .Select(x => (x.P, x.K, Px: (Screen(x.P) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
+        if (key.Count > 0) return (key[0].P, key[0].K);
+        (Vec3 P, double Px)? best = null;
+        foreach (var l in inPlane)
+        {
+            var pts = l.Points();
+            for (int i = 0; i + 1 < pts.Count; i++)
+            {
+                var (a, b) = (pts[i], pts[i + 1]); var ab = b - a;
+                double t = Math.Clamp((at - a).Dot(ab) / Math.Max(ab.Dot(ab), 1e-30), 0, 1);
+                var q = a + ab * t; double px = (Screen(q) - pos).Length;
+                if (px < 20 && (best == null || px < best.Value.Px)) best = (q, px);
+            }
+        }
+        return best is { } bp ? (bp.P, "op een losse lijn") : null;
+    }
+
+    // ------------------------------------------------------------------ snap marks (as DesignSpark)
+
+    /// <summary>The centre of a circle or arc of the model in the plane through o with normal n, within 12 pixels of the
+    /// mouse.</summary>
+    private Vec3? CentreSnap(Vec3 n, Vec3 o, Point pos)
+    {
+        if (_doc == null) return null;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        (Vec3 C, double Px)? best = null;
+        foreach (var l in _doc.Lines)
+            if (l.Centre is { } lc && l.Axis is { } la && Math.Abs(la.Normalized().Dot(n)) > 0.9999 && Math.Abs((lc - o).Dot(n)) < 1e-7)
+            {
+                double px = (Screen(lc) - pos).Length;
+                if (px < 12 && (best == null || px < best.Value.Px)) best = (lc, px);
+            }
+        foreach (var b in _doc.Bodies)
+            foreach (var e in b.Edges)
+                if (e.Curve is BrepCircle c && Math.Abs(c.Normal.Normalized().Dot(n)) > 0.9999 && Math.Abs((c.Centre - o).Dot(n)) < 1e-7)
+                {
+                    double px = (Screen(c.Centre) - pos).Length;
+                    if (px < 12 && (best == null || px < best.Value.Px)) best = (c.Centre, px);
+                }
+        return best?.C;
+    }
+
+    private LinesVisual3D? _marks;
+    private static readonly Color MarkColor = Color.FromRgb(0x1E, 0x29, 0x3B);
+
+    /// <summary>
+    /// The edge under the mouse (of the face under it, or of the faces in the plane being drawn on) gets its snap points
+    /// marked: dots on its ends, a triangle on the middle of a straight edge, a cross on the centre of a circle or arc
+    /// (also shown when the mouse is near that centre).
+    /// </summary>
+    private void UpdateMarks(Point pos)
+    {
+        var marks = new List<(Vec3 P, char Kind)>();
+        if (_doc != null && _movePick == null && _dragFace == null && _lasso == null)
+        {
+            var faces = new List<FaceRef>();
+            if ((_drawFace ?? _arcFace ?? _swFace ?? _polyFace ?? _rrFace ?? _offsetFace) is { } af && IsPlanar(af))
+                faces.AddRange(PlaneFaces(af).Select(g => new FaceRef(af.Body, g)));
+            if (FaceAt(pos) is { } hit) faces.Add(hit.Face);
+            var mat = Viewport3DHelper.GetTotalTransform(View.Viewport);
+            Point Screen(Vec3 v) { var q = mat.Transform(P(v)); return new Point(q.X, q.Y); }
+            double Dist(IReadOnlyList<Vec3> along, bool closed)
+            {
+                double d = double.MaxValue;
+                var s = along.Select(Screen).ToList();
+                for (int i = 0; i < (closed ? s.Count : s.Count - 1); i++)
+                {
+                    Point a = s[i], b = s[(i + 1) % s.Count]; var ab = b - a; double l2 = ab.LengthSquared;
+                    double t = l2 == 0 ? 0 : Math.Clamp(Vector.Multiply(pos - a, ab) / l2, 0, 1);
+                    d = Math.Min(d, (a + ab * t - pos).Length);
+                }
+                return d;
+            }
+            (double D, List<(Vec3, char)> Marks)? best = null;
+            foreach (var (body, e) in faces.Distinct().SelectMany(f => _doc.Bodies[f.Body].Faces[f.Face].Loops.SelectMany(l => l)
+                         .Select(c => (Body: _doc.Bodies[f.Body], E: _doc.Bodies[f.Body].Edges[c.Edge]))).Distinct())
+            {
+                List<(Vec3, char)> m; double d;
+                if (e.Curve is BrepLine && e.Start >= 0)
+                {
+                    Vec3 a = body.Vertices[e.Start], b = body.Vertices[e.End];
+                    d = Dist([a, b], false);
+                    m = [(a, '.'), (b, '.'), ((a + b) * 0.5, '^')];
+                }
+                else if (e.Curve is BrepCircle c)
+                {
+                    bool ring = e.Start < 0 || e.Start == e.End;
+                    var a = e.Start >= 0 ? body.Vertices[e.Start] : c.Centre + c.XAxis.Normalized() * c.Radius;
+                    var b = e.Start >= 0 ? body.Vertices[e.End] : a;
+                    d = Math.Min(Dist(PushPullMe.Core.Drawing.ArcPoints(c, a, b, 32), ring), (Screen(c.Centre) - pos).Length < 12 ? 0 : double.MaxValue);
+                    m = ring ? [(c.Centre, '+')] : [(a, '.'), (b, '.'), (c.Centre, '+')];
+                }
+                else continue;
+                if (d < 8 && (best == null || d < best.Value.D)) best = (d, m);
+            }
+            foreach (var l in _doc.Lines)
+            {
+                double d = Dist(l.Points(), false);
+                if (l.Centre is { } lc && (Screen(lc) - pos).Length < 12) d = 0;
+                List<(Vec3, char)> m = l.Centre is { } c ? [(l.Start, '.'), (l.End, '.'), (c, '+')] : [(l.Start, '.'), (l.End, '.'), (l.Middle, '^')];
+                if (d < 8 && (best == null || d < best.Value.D)) best = (d, m);
+            }
+            if (best is { } bm) marks.AddRange(bm.Marks);
+        }
+        ShowMarks(marks);
+    }
+
+    private void ShowMarks(List<(Vec3 P, char Kind)> marks)
+    {
+        if (_marks != null) { View.Children.Remove(_marks); _marks = null; }
+        if (marks.Count == 0 || View.Camera is not ProjectionCamera cam) return;
+        var look = cam.LookDirection; look.Normalize();
+        var right = Vector3D.CrossProduct(look, cam.UpDirection); right.Normalize();
+        var up = Vector3D.CrossProduct(right, look); up.Normalize();
+        var mat = Viewport3DHelper.GetTotalTransform(View.Viewport);
+        var lines = new Point3DCollection();
+        foreach (var (p, kind) in marks)
+        {
+            var q = TowardEye(P(p), 0.05); // (well toward the eye along the ray: the same spot on screen, not half under the face)
+            var s0 = mat.Transform(q); var s1 = mat.Transform(q + right);
+            double px = Math.Sqrt((s1.X - s0.X) * (s1.X - s0.X) + (s1.Y - s0.Y) * (s1.Y - s0.Y));
+            if (px < 1e-9) continue;
+            double u = 1 / px; // model units per pixel here
+            void L(double x0, double y0, double x1, double y1) { lines.Add(q + right * (x0 * u) + up * (y0 * u)); lines.Add(q + right * (x1 * u) + up * (y1 * u)); }
+            switch (kind)
+            {
+                case '.': // a dot: a small filled square
+                    for (double y = -2; y <= 2; y += 1) L(-2, y, 2, y);
+                    break;
+                case '^': // a triangle
+                    L(-4, -3, 4, -3); L(4, -3, 0, 4); L(0, 4, -4, -3);
+                    break;
+                default: // a cross
+                    L(-6, 0, 6, 0); L(0, -6, 0, 6);
+                    break;
+            }
+        }
+        _marks = new LinesVisual3D { Points = lines, Color = MarkColor, Thickness = 1.5 };
+        View.Children.Add(_marks);
+    }
+
+    /// <summary>Where guide lines meet each other or a straight edge, near the mouse on screen (within 12 pixels).</summary>
+    private Vec3? GuideCrossingNear(Point pos)
+    {
+        if (_guides.Count == 0 || _doc == null) return null;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        var pts = new List<Vec3>();
+        for (int i = 0; i < _guides.Count; i++)
+            for (int j = i + 1; j < _guides.Count; j++)
+                if (Guides.Meet(_guides[i].Point, _guides[i].Dir, _guides[j].Point, _guides[j].Dir) is { } m) pts.Add(m);
+        foreach (var b in _doc.Bodies)
+            foreach (var e in b.Edges.Where(e => e.Curve is BrepLine && e.Start >= 0))
+                foreach (var g in _guides)
+                    if (Guides.MeetSegment(g, b.Vertices[e.Start], b.Vertices[e.End]) is { } m) pts.Add(m);
+        var best = pts.Select(q => (Q: q, Px: (Screen(q) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
+        return best.Count > 0 ? best[0].Q : null;
+    }
+
+    /// <summary>A guide line near the mouse on screen (within 6 pixels): its index.</summary>
+    private int? GuideAt(Point pos)
+    {
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        double len = Math.Max(_modelSize, 10) * 1.5 / Display;
+        (int, double)? best = null;
+        for (int i = 0; i < _guides.Count; i++)
+        {
+            Point a = Screen(_guides[i].Point - _guides[i].Dir * len), b = Screen(_guides[i].Point + _guides[i].Dir * len);
+            var ab = b - a; double l2 = ab.LengthSquared;
+            double t = l2 == 0 ? 0 : Math.Clamp(Vector.Multiply(pos - a, ab) / l2, 0, 1);
+            double d = (a + ab * t - pos).Length;
+            if (d < 6 && (best == null || d < best.Value.Item2)) best = (i, d);
+        }
+        return best?.Item1;
+    }
+
+    /// <summary>The point the tape points at: a corner close by (12 pixels), else where the mouse hits the model.</summary>
+    private (Vec3 Point, string? Kind)? TapePoint((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (_doc == null) return null;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        (Vec3 V, double Px)? near = null;
+        foreach (var b in _doc.Bodies)
+            foreach (var v in b.Vertices)
+            {
+                double px = (Screen(v) - pos).Length;
+                if (px < 12 && (near == null || px < near.Value.Px)) near = (v, px);
+            }
+        if (near is { } nv) return (nv.V, "hoekpunt");
+        if (hit is not { } h) return null;
+        var p = V(h.Point);
+        var face = _doc.Bodies[h.Face.Body].Faces[h.Face.Face];
+        if (face.Surface is BrepPlane pl && GuideSnap(p, pos, FaceGeometry.Normal(face), pl.Origin) is { } g) return g;
+        return (p, null);
+    }
+
+    private static string Measure(Vec3 d) =>
+        $"{Mm(d.Length)} mm (x {Mm(Math.Abs(d.X))} · y {Mm(Math.Abs(d.Y))} · z {Mm(Math.Abs(d.Z))})";
+
+    private void HoverTape((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (_tapeStart != null) { TapeTo(hit, pos); return; }
+        if (MovePickAt(hit, pos) is { Pick.Edges.Count: > 0 } p && _doc!.Bodies[p.Body].Edges[p.Pick.Edges.First()] is { Curve: BrepLine } edge)
+        {
+            ShowSketch([_doc.Bodies[p.Body].Vertices[edge.Start], _doc.Bodies[p.Body].Vertices[edge.End]], default, color: SelectColor);
+            StatusText.Text = "📏 Klik om vanaf deze rand een hulplijn te trekken (evenwijdig eraan).";
+            return;
+        }
+        var tp = TapePoint(hit, pos);
+        ShowSketch(tp is { } t ? [t.Point] : []);
+        StatusText.Text = tp is { Kind: { } k } ? $"📏 {k} · klik om vanaf hier te meten." : "📏 Klik een punt om te meten, of een rand voor een hulplijn. Delete: alle hulplijnen weg.";
+    }
+
+    private void StartTape((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (_doc == null) return;
+        _typed = "";
+        if (MovePickAt(hit, pos) is { Pick.Edges.Count: > 0 } p && _doc.Bodies[p.Body].Edges[p.Pick.Edges.First()] is { Curve: BrepLine } edge && hit is { } h)
+        {
+            var b = _doc.Bodies[p.Body];
+            _tapeEdge = (b.Vertices[edge.Start], (b.Vertices[edge.End] - b.Vertices[edge.Start]).Normalized(), h.Face);
+            _tapeStart = p.Grab; _tapeOffset = default;
+            MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
+            StatusText.Text = "📏 Trek de hulplijn van de rand af; klik om hem te plaatsen, of typ de afstand + Enter. Esc breekt af.";
+            return;
+        }
+        if (TapePoint(hit, pos) is not { } tp) return;
+        _tapeStart = tp.Point; _tapeEdge = null;
+        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
+        StatusText.Text = "📏 Beweeg naar het punt om te meten en klik. Esc breekt af.";
+    }
+
+    private void TapeTo((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (_tapeStart is not { } start || _typed.Length > 0) return;
+        if (_tapeEdge is { } te)
+        {
+            // the point under the mouse: on the model, or else on the plane of the face the edge was picked on
+            Vec3? p = hit is { } h ? V(h.Point) : OnPlane(te.Face, pos);
+            if (p is not { } pp) return;
+            var (g, off) = Guides.Parallel(te.A, te.Dir, pp);
+            off = off.Length > 0 ? off.Normalized() * (Math.Round(off.Length * Display * 10) / 10 / Display) : off;
+            _tapeOffset = off;
+            g = new Guide(te.A + off, te.Dir);
+            double len = Math.Max(_modelSize, 10) * 1.5 / Display;
+            ShowSketch([g.Point - g.Dir * len, g.Point + g.Dir * len], default, color: GuideColor);
+            MeasureBox.Text = Mm(off.Length);
+            StatusText.Text = $"📏 Hulplijn op {Mm(off.Length)} mm van de rand · klik om hem te plaatsen, of typ de afstand + Enter. Esc breekt af.";
+            return;
+        }
+        if (TapePoint(hit, pos) is not { } tp) return;
+        ShowSketch([start, tp.Point]);
+        MeasureBox.Text = Mm((tp.Point - start).Length);
+        StatusText.Text = $"📏 {Measure(tp.Point - start)}{(tp.Kind != null ? " · 🎯 " + tp.Kind : "")} · klik om de maat vast te houden.";
+    }
+
+    private void FinishTape((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (_tapeStart is not { } start) return;
+        if (_tapeEdge is { } te)
+        {
+            if (_tapeOffset.Length < 1e-9) { StatusText.Text = "📏 Trek de hulplijn eerst een stukje van de rand af."; return; }
+            AddGuide(new Guide(te.A + _tapeOffset, te.Dir), _tapeOffset.Length);
+            EndTape();
+            return;
+        }
+        if (TapePoint(hit, pos) is not { } tp) return;
+        EndTape();
+        ShowSketch([start, tp.Point]);
+        MeasureBox.Text = Mm((tp.Point - start).Length);
+        StatusText.Text = $"📏 Gemeten: {Measure(tp.Point - start)}.";
+        Log($"measured {Measure(tp.Point - start)}");
+    }
+
+    /// <summary>A typed distance with the tape from an edge: the guide that far off, the way it is being pulled.</summary>
+    private void TypedTape(double mm)
+    {
+        if (_tapeEdge is not { } te) return;
+        if (_tapeOffset.Length < 1e-12) { StatusText.Text = "📏 Trek eerst een stukje de kant op waar de hulplijn moet komen."; return; }
+        var off = _tapeOffset.Normalized() * (Math.Abs(mm) / Display);
+        AddGuide(new Guide(te.A + off, te.Dir), off.Length);
+        EndTape();
+    }
+
+    private void AddGuide(Guide g, double offset)
+    {
+        _guides.Add(g);
+        RenderGuides();
+        ShowSketch([]);
+        MeasureBox.Text = Mm(offset);
+        StatusText.Text = $"✅ Hulplijn op {Mm(offset)} mm. Rechthoek, cirkel, lijn en verplaatsen klikken erop vast.";
+        Log($"guide at {Mm(offset)} mm");
+    }
+
+    private void EndTape()
+    {
+        _tapeStart = null; _tapeEdge = null; _tapeOffset = default;
+        ShowSketch([]);
+    }
+
+    // ------------------------------------------------------------------ the paint bucket
+
+    private static Color Argb(uint c) => Color.FromArgb((byte)(c >> 24), (byte)(c >> 16), (byte)(c >> 8), (byte)c);
+
+    /// <summary>The palette: name and colour (null: the standard colour, the paint taken off).</summary>
+    private static readonly (string Name, uint? Color)[] Palette =
+    [
+        ("standaard (geen kleur)", null),
+        ("wit", 0xFFF8FAFC), ("lichtgrijs", 0xFFCBD5E1), ("grijs", 0xFF64748B), ("antraciet", 0xFF1E293B), ("zwart", 0xFF0F172A),
+        ("rood", 0xFFE11D48), ("oranje", 0xFFF97316), ("geel", 0xFFFACC15), ("lichtgroen", 0xFF84CC16), ("groen", 0xFF16A34A),
+        ("turkoois", 0xFF14B8A6), ("lichtblauw", 0xFF38BDF8), ("blauw", 0xFF2563EB), ("paars", 0xFF7C3AED), ("roze", 0xFFEC4899),
+        ("bruin", 0xFF92400E), ("hout", 0xFFC8A27A),
+    ];
+
+    /// <summary>The colour the bucket holds (null: none, taking paint off).</summary>
+    private uint? _paint = 0xFFE11D48;
+
+    /// <summary>The palette's swatches, made once.</summary>
+    private void BuildPalette()
+    {
+        if (Swatches.Children.Count > 0) return;
+        foreach (var (name, color) in Palette)
+        {
+            var swatch = new Border
+            {
+                Width = 26, Height = 26, CornerRadius = new CornerRadius(13), Margin = new Thickness(3), Cursor = Cursors.Hand,
+                BorderThickness = new Thickness(2), ToolTip = name, Tag = color,
+                Background = color is { } c ? new SolidColorBrush(Argb(c)) : new SolidColorBrush(FrontColor),
+            };
+            if (color == null) swatch.Child = new TextBlock { Text = "∅", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.Gray };
+            swatch.MouseLeftButtonDown += (_, e) => { SetPaint(color); e.Handled = true; };
+            Swatches.Children.Add(swatch);
+        }
+        SetPaint(_paint);
+    }
+
+    private void SetPaint(uint? color)
+    {
+        _paint = color;
+        foreach (var sw in Swatches.Children.OfType<Border>())
+            sw.BorderBrush = Equals(sw.Tag, color) ? new SolidColorBrush(SelectColor) : new SolidColorBrush(Color.FromRgb(0xE2, 0xE8, 0xF0));
+        PaintName.Text = Palette.First(p => p.Color == color).Name;
+        if (EraserMode || !PaintMode) return;
+        StatusText.Text = $"🎨 Verf: {PaintName.Text}. Klik een vlak · Ctrl: het hele lichaam · Shift: alle vlakken in dezelfde kleur · Alt: kleur overnemen.";
+    }
+
+    /// <summary>The pipette (💧): the next click with the bucket takes up a colour (as Alt+click).</summary>
+    private bool _sampleOnce;
+
+    private void SampleButton_Click(object sender, RoutedEventArgs e)
+    {
+        PaintTool.IsChecked = true;
+        _sampleOnce = true;
+        StatusText.Text = "💧 Pipet: klik een vlak om zijn kleur over te nemen.";
+    }
+
+    /// <summary>⛶: the whole model in view.</summary>
+    private void ZoomExtentsButton_Click(object sender, RoutedEventArgs e) => View.ZoomExtents(300);
+
+    /// <summary>A click with the bucket: the face painted (Ctrl the whole body, Shift every face of the same colour in the
+    /// body), or with Alt its colour taken up.</summary>
+    private void PaintAt((FaceRef Face, Point3D Point)? hit)
+    {
+        if (hit is not { } h || _doc is not { } before) return;
+        var mods = Mods;
+        if ((mods & ModifierKeys.Alt) != 0 || _sampleOnce)
+        {
+            _sampleOnce = false;
+            SetPaint(before.ColorOf(h.Face));
+            StatusText.Text = $"🎨 Kleur overgenomen: {PaintName.Text}.";
+            return;
+        }
+        var body = before.Bodies[h.Face.Body];
+        IEnumerable<FaceRef> faces = (mods & ModifierKeys.Control) != 0
+            ? Enumerable.Range(0, body.Faces.Count).Select(f => new FaceRef(h.Face.Body, f))
+            : (mods & ModifierKeys.Shift) != 0
+                ? Enumerable.Range(0, body.Faces.Count).Select(f => new FaceRef(h.Face.Body, f)).Where(f => before.ColorOf(f) == before.ColorOf(h.Face))
+                : _multi is { } mp && mp.Body == h.Face.Body && mp.Faces.Contains(h.Face.Face) ? mp.Faces.Select(f => new FaceRef(mp.Body, f)) : [h.Face];
+        var list = faces.ToList();
+        if (list.All(f => before.ColorOf(f) == _paint)) return;
+        var doc = before.Paint(list, _paint);
+        Commit(before, doc);
+        _last = null; _lastMove = null;
+        Render();
+        StatusText.Text = $"✅ {(list.Count == 1 ? "Vlak" : $"{list.Count} vlakken")} geverfd: {PaintName.Text}.";
+        Log($"paint {list.Count} face(s) of body {h.Face.Body} {(_paint is { } c ? $"#{c:X8}" : "none")}");
+    }
+
+    // ------------------------------------------------------------------ the eraser
+
+    private static readonly Color EraseColor = Color.FromRgb(0xE1, 0x1D, 0x48);
+
+    /// <summary>The edge of the face under the mouse nearest to it on screen (within 10 pixels): body, edge.</summary>
+    private (int Body, int Edge)? EdgeAt((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (hit is not { } h || _doc == null) return null;
+        var body = _doc.Bodies[h.Face.Body];
+        (int, double)? best = null;
+        foreach (var c in body.Faces[h.Face.Face].Loops.SelectMany(l => l))
+        {
+            var pts = FaceGeometry.EdgePoints(body, body.Edges[c.Edge]).Select(p => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(p))).ToList();
+            for (int i = 0; i + 1 < pts.Count; i++)
+            {
+                var (a, b) = (pts[i], pts[i + 1]);
+                var ab = b - a; double l2 = ab.LengthSquared;
+                double t = l2 == 0 ? 0 : Math.Clamp(Vector.Multiply(pos - a, ab) / l2, 0, 1);
+                double d = (a + ab * t - pos).Length;
+                if (d < 10 && (best == null || d < best.Value.Item2)) best = (c.Edge, d);
+            }
+        }
+        return best is { } bb ? (h.Face.Body, bb.Item1) : null;
+    }
+
+    private void HoverErase((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (GuideAt(pos) is int gi)
+        {
+            double len = Math.Max(_modelSize, 10) * 1.5 / Display;
+            ShowSketch([_guides[gi].Point - _guides[gi].Dir * len, _guides[gi].Point + _guides[gi].Dir * len], default, color: EraseColor);
+            StatusText.Text = "⌫ Klik om deze hulplijn weg te halen.";
+            return;
+        }
+        if (LooseAt(pos) is int li)
+        {
+            ShowSketch(_doc!.Lines[li].Points(), default, color: EraseColor);
+            StatusText.Text = "⌫ Klik om deze losse lijn weg te halen.";
+            return;
+        }
+        if (EdgeAt(hit, pos) is not { } e) { ShowSketch([]); StatusText.Text = "⌫ Wijs een getekende lijn, rechthoek of cirkel aan."; return; }
+        var body = _doc!.Bodies[e.Body];
+        var face = body.Faces[hit!.Value.Face.Face];
+        ShowSketch(FaceGeometry.EdgePoints(body, body.Edges[e.Edge]), face.Surface is BrepPlane ? FaceGeometry.Normal(face) : default, color: EraseColor);
+        StatusText.Text = "⌫ Klik om deze rand te wissen.";
+    }
+
+    private void EraseAt((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (GuideAt(pos) is int gi) { _guides.RemoveAt(gi); RenderGuides(); ShowSketch([]); StatusText.Text = "✅ Hulplijn weggehaald."; Log("guide erased"); return; }
+        if (LooseAt(pos) is int li && _doc is { } lbefore)
+        {
+            Commit(lbefore, lbefore.RemoveLines([lbefore.Lines[li]]));
+            ShowSketch([]);
+            Render();
+            StatusText.Text = "✅ Losse lijn weggehaald.";
+            Log($"loose line {li} erased");
+            return;
+        }
+        if (EdgeAt(hit, pos) is not { } e || _doc is not { } before) return;
+        try
+        {
+            var doc = before.Erase(e.Body, e.Edge);
+            Commit(before, doc);
+            _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
+            ShowSketch([]);
+            Render();
+            StatusText.Text = "✅ Gewist: de vlakken zijn weer één.";
+            Log($"erase edge {e.Edge} of body {e.Body}: ok, {doc.Bodies[e.Body].Faces.Count} faces");
+        }
+        catch (PushPullException ex)
+        {
+            StatusText.Text = "⛔ " + ex.Message;
+            Log($"erase edge {e.Edge} of body {e.Body}: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------------ push/pull
+
+    private SketchDocument? _preview;
+    private FaceRef? _previewFace;
+
+    /// <summary>While dragging: the distances (mm) to faces on the back side, right across the face and facing away
+    /// from it (pushed in that far it goes through: a hole).</summary>
+    private List<double> _through = new();
+
+    private List<double> ThroughDepths(FaceRef f)
+    {
+        var body = _doc!.Bodies[f.Body];
+        var face = body.Faces[f.Face];
+        var n = FaceGeometry.Normal(face); var o = ((BrepPlane)face.Surface).Origin;
+        var tris = _doc.TrianglesOf(f);
+        if (tris.Count == 0) return [];
+        var mid = tris.Select(t => (t.A + t.B + t.C) * (1.0 / 3)).Aggregate((a, b) => a + b) * (1.0 / tris.Count);
+        var depths = new List<double>();
+        for (int g = 0; g < body.Faces.Count; g++)
+        {
+            if (g == f.Face || body.Faces[g].Surface is not BrepPlane pg || FaceGeometry.Normal(body.Faces[g]).Dot(n) > -0.999) continue;
+            double d = (o - pg.Origin).Dot(n);
+            if (d < 1e-6) continue;
+            if (PushPullMe.Core.Drawing.Contains(body, g, mid - n * d)) depths.Add(d * Display);
+        }
+        return depths.Distinct().Order().ToList();
+    }
+
+    private void StartDrag(FaceRef f, Point3D at)
+    {
+        var face = _doc!.Bodies[f.Body].Faces[f.Face];
+        _through = face.Surface is BrepPlane ? ThroughDepths(f) : [];
+        _dragFace = f; _dragStart = at; _dragBase = _doc; _dragDist = 0; _dragValid = false; _typed = "";
+        Vec3 n;
+        if (face.Surface is BrepSphere sp) n = (V(at) - sp.Centre).Normalized() * (face.Reversed ? -1 : 1);
+        else if (face.Surface is BrepTorus tr)
+        {
+            // away from the tube's centre circle
+            var ax = tr.Axis.Normalized(); var p = V(at);
+            var w = p - tr.Centre; w -= ax * w.Dot(ax);
+            var ring = tr.Centre + w.Normalized() * tr.MajorRadius;
+            n = (p - ring).Normalized() * (face.Reversed ? -1 : 1);
+        }
+        else if (face.Surface is BrepCylinder cy)
+        {
+            var axis = cy.Axis.Normalized(); var p = V(at);
+            var foot = cy.Origin + axis * (p - cy.Origin).Dot(axis);
+            n = (p - foot).Normalized() * (face.Reversed ? -1 : 1);
+        }
+        else n = FaceGeometry.Normal(face);
+        _dragNormal = new Vector3D(n.X, n.Y, n.Z);
+        _selected = null;
+        _dragRadius = HasRadius(_doc, f);
+        MeasureLabel.Text = _dragRadius ? "Straal" : "Afstand";
+        MeasureBox.Text = _dragRadius ? Mm(RadiusOf(_doc, f)) : "0";
+        StatusText.Text = _dragRadius
+            ? $"⇕ {CylinderText(_doc, f)} · beweeg de muis om de straal te veranderen; klik om vast te zetten, of typ de straal + Enter. Esc breekt af."
+            : face.Surface is BrepCylinder
+            ? $"⇕ {CylinderText(_doc, f)} · beweeg de muis om de straal te veranderen; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af."
+            : "⇕ Beweeg de muis om het vlak te verschuiven; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.";
+    }
+
+    private void EndDrag()
+    {
+        HideTag();
+        if (_movePick != null) EndMove();
+        if (_tapeStart != null) EndTape();
+        _dragFace = null; _dragBase = null; _preview = null; _previewFace = null; _dragValid = false;
+        _previewMap = null; _previewNew.Clear(); _snapBase = null;
+    }
+
+    /// <summary>The distance (mm) along the face's normal nearest to the mouse ray (the line through where the face was
+    /// grabbed, along its normal, against the ray under the mouse).</summary>
+    private double? DistanceAt(Point pos)
+    {
+        var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
+        if (ray == null) return null;
+        var dir = ray.Direction; dir.Normalize();
+        double b = Vector3D.DotProduct(_dragNormal, dir);
+        if (1 - b * b < 1e-6) return null;
+        var w0 = _dragStart - ray.Origin;
+        double d = Vector3D.DotProduct(_dragNormal, w0), e = Vector3D.DotProduct(dir, w0);
+        return (b * e - d) / (1 - b * b);
+    }
+
+    private void DragTo(Point pos)
+    {
+        if (_dragFace is not { } f || _dragBase == null || _typed.Length > 0) return;
+        double mm;
+        string? flush = null;
+        var snap = FlushAt(pos);
+        if (snap is { } s) { mm = s.Mm; flush = s.Label; _snapBase = s.Face; }
+        else
+        {
+            _snapBase = null;
+            if (DistanceAt(pos) is not double m) return;
+            // steps of 0.1 mm (finer than that is typed); close to the back side right across: through to it (a hole)
+            mm = Math.Round(m * 10) / 10;
+            if (_dragRadius)
+                try
+                {
+                    // (a pin, hole or rounding: steps of 0.1 mm in its radius)
+                    var rb = _dragBase.Bodies[f.Body];
+                    double radius = Math.Round(PushPullMe.Core.PushPull.RadiusAfter(rb, f.Face, m / Display) * Display * 10) / 10;
+                    mm = PushPullMe.Core.PushPull.DistanceForRadius(rb, f.Face, radius / Display) * Display;
+                }
+                catch (PushPullException) { }
+            foreach (double depth in _through)
+                if (Math.Abs(m + depth) < Math.Max(0.4, 0.03 * depth)) { mm = -depth; flush = "door tot de achterkant (een gat)"; break; }
+        }
+        if (Math.Abs(mm / Display - _dragDist) < 1e-12 && (_preview != null || Math.Abs(mm) < 1e-9)) { UpdateHighlight(); ShowDragStatus(flush); ShowRadiusTag(pos); return; }
+        Preview(mm / Display, flush);
+        ShowRadiusTag(pos);
+    }
+
+    /// <summary>
+    /// "Gelijk met dit vlak / dit punt": under the mouse a corner (within 12 pixels) or a face parallel to the one being
+    /// moved (not that face itself, nor a side face it just made); the distance (mm) that brings the face level with it,
+    /// and that face in the document the drag started from.
+    /// </summary>
+    private (double Mm, string Label, FaceRef Face)? FlushAt(Point pos)
+    {
+        if (_dragFace is not { } f || _dragBase == null || _shown == null) return null;
+        var baseFace = _dragBase.Bodies[f.Body].Faces[f.Face];
+        if (baseFace.Surface is not BrepPlane) return null;
+        var origin = ((BrepPlane)baseFace.Surface).Origin;
+        var n = FaceGeometry.Normal(baseFace);
+        // (what is shown is the preview only while it is valid; its face numbers differ from the document's)
+        var map = _preview != null && ReferenceEquals(_shown, _preview) ? _previewMap : null;
+        if (map != null && f.Face >= map.Count) return null;
+        int moving = map != null ? map[f.Face] : f.Face;
+        // (the face can be gone in the preview: merged away)
+        if (f.Body >= _shown.Bodies.Count || moving < 0 || moving >= _shown.Bodies[f.Body].Faces.Count) return null;
+        foreach (var hit in View.Viewport.FindHits(pos))
+        {
+            if (hit.RayHit is not RayMeshGeometry3DHitTestResult r) continue;
+            var m = _meshes.FirstOrDefault(x => ReferenceEquals(x.Mesh, r.MeshHit));
+            if (m.Mesh == null || r.VertexIndex1 / 3 >= m.FaceOfTriangle.Count) continue;
+            int shownFace = m.FaceOfTriangle[r.VertexIndex1 / 3];
+            // only what is in front counts: the face being moved (or a side face it made) hides what is behind it
+            if (m.Body != f.Body || shownFace == moving || (map != null && _previewNew.Contains(shownFace))) return null;
+            var body = _shown.Bodies[m.Body];
+            if (shownFace >= body.Faces.Count) return null;
+            var face = body.Faces[shownFace];
+            int baseIndex = map == null ? shownFace : IndexOf(map, shownFace);
+            if (baseIndex < 0) return null;
+            // a corner of it close to the mouse (not one that moves along)
+            var movingVerts = map == null ? [] : body.Faces[moving].Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End }).ToHashSet();
+            var corners = face.Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End })
+                .Distinct().Where(v => !movingVerts.Contains(v)).Select(v => body.Vertices[v]).ToList();
+            var near = corners.Select(v => (V: v, Px: (Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v)) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
+            if (near.Count > 0) return ((near[0].V - origin).Dot(n) * Display, "gelijk met dit punt", new FaceRef(m.Body, baseIndex));
+            if (face.Surface is BrepPlane pl && Math.Abs(pl.Normal.Normalized().Dot(n)) > 1 - 1e-6)
+                return ((pl.Origin - origin).Dot(n) * Display, "gelijk met dit vlak", new FaceRef(m.Body, baseIndex));
+            return null;
+        }
+        return null;
+    }
+
+    private static int IndexOf(IReadOnlyList<int> map, int value)
+    {
+        for (int i = 0; i < map.Count; i++) if (map[i] == value) return i;
+        return -1;
+    }
+
+    private void ShowDragStatus(string? flush)
+    {
+        if (!_dragValid) return;
+        string cyl = _preview != null && _previewFace is { } pf && _preview.Bodies[pf.Body].Faces[pf.Face].Surface is BrepCylinder ? " · " + CylinderText(_preview, pf) : "";
+        StatusText.Text = _dragRadius
+            ? $"⇕ {cyl.TrimStart(' ', '·')} · klik om vast te zetten, of typ de straal + Enter. Esc breekt af."
+            : $"⇕ {_dragDist * Display:0.##} mm{cyl}{(flush != null ? " · 🎯 " + flush : "")} · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.";
+    }
+
+    /// <summary>The tag next to the mouse with a text (the radius of a rounding, pin or hole).</summary>
+    private void ShowTag(string text, Point pos)
+    {
+        RadiusTagText.Text = text;
+        RadiusTag.Visibility = Visibility.Visible;
+        var at = View.Viewport.TranslatePoint(pos, TagLayer);
+        Canvas.SetLeft(RadiusTag, at.X + 16);
+        Canvas.SetTop(RadiusTag, at.Y - 34);
+    }
+
+    private void HideTag() => RadiusTag.Visibility = Visibility.Collapsed;
+
+    /// <summary>While a rounding, pin or hole is dragged: its new radius next to the mouse.</summary>
+    private void ShowRadiusTag(Point pos)
+    {
+        if (!_dragRadius || _dragFace is not { } f || _dragBase == null) { HideTag(); return; }
+        string r = RadiusText(_dragBase, f, _dragDist);
+        if (r.Length > 0 && _dragValid) ShowTag("R " + r + " mm", pos); else HideTag();
+    }
+
+    private static double RadiusOf(SketchDocument doc, FaceRef f) => doc.Bodies[f.Body].Faces[f.Face].Surface switch
+    {
+        BrepCylinder c => c.Radius,
+        BrepSphere s => s.Radius,
+        BrepTorus t => t.MinorRadius,
+        _ => 0,
+    };
+
+    /// <summary>The radius (mm, as text) a cylinder face gets when pushed/pulled over dist; empty when that cannot be told.</summary>
+    private static string RadiusText(SketchDocument doc, FaceRef f, double dist)
+    {
+        try { return Mm(PushPullMe.Core.PushPull.RadiusAfter(doc.Bodies[f.Body], f.Face, dist)); }
+        catch (PushPullException) { return ""; }
+    }
+
+    /// <summary>A cylinder face in words: a rounding and its radius, or a hole or a rod and its diameter.</summary>
+    private static string CylinderText(SketchDocument doc, FaceRef f)
+    {
+        var face = doc.Bodies[f.Body].Faces[f.Face];
+        if (face.Surface is BrepSphere sp) return $"bolhoek R {sp.Radius * Display:0.##} mm";
+        if (face.Surface is BrepTorus tr) return $"hoekstuk R {tr.MinorRadius * Display:0.##} mm";
+        if (face.Surface is not BrepCylinder c) return "";
+        if (PushPullMe.Core.PushPull.IsRounding(doc.Bodies[f.Body], f.Face)) return $"ronding R {c.Radius * Display:0.##} mm";
+        return $"{(face.Reversed ? "gat" : "cilinder")} R {c.Radius * Display:0.##} mm (Ø {c.Radius * 2 * Display:0.##})";
+    }
+
+    private void Preview(double dist, string? flush = null)
+    {
+        if (_dragFace is not { } f || _dragBase == null) return;
+        _dragDist = dist;
+        MeasureBox.Text = _dragRadius ? RadiusText(_dragBase, f, dist) : (dist * Display).ToString("0.##", CultureInfo.CurrentCulture);
+        if (Math.Abs(dist) < 1e-9) { _preview = null; _previewMap = null; _dragValid = false; Render(_dragBase); return; }
+        try
+        {
+            var (doc, r) = _dragBase.PushPull(f, dist, checkCrossing: false);
+            if (r.FaceMap[f.Face] < 0 && !r.Punched) throw new PushPullException("Zo verdwijnt het vlak helemaal.");
+            _preview = doc; _previewFace = new FaceRef(f.Body, r.FaceMap[f.Face]); _dragValid = true;
+            _previewMap = r.FaceMap; _previewNew = r.NewFaces.ToHashSet();
+            Render(doc);
+            ShowDragStatus(flush);
+        }
+        catch (PushPullException ex)
+        {
+            _dragValid = false;
+            StatusText.Text = "⛔ " + ex.Message;
+        }
+    }
+
+    /// <summary>The push/pull done for good (with the check that nothing runs into another part).</summary>
+    private void Finish(double dist)
+    {
+        if (_dragFace is not { } f || _dragBase is not { } before) return;
+        var start = before;
+        EndDrag(); EndDraw();
+        _typed = "";
+        if (Math.Abs(dist) < 1e-9) { Render(); return; }
+        Apply(start, f, dist, replaceLast: false);
+    }
+
+    private void Apply(SketchDocument before, FaceRef f, double dist, bool replaceLast)
+    {
+        try
+        {
+            var (doc, r) = before.PushPull(f, dist);
+            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            else Commit(before, doc);
+            _last = (before, f, dist);
+            _selected = r.FaceMap[f.Face] >= 0 ? new FaceRef(f.Body, r.FaceMap[f.Face]) : null;
+            Render();
+            bool rounding = HasRadius(before, f); // (pin, hole or rounding: shown by its radius)
+            MeasureLabel.Text = rounding ? "Straal" : "Afstand";
+            MeasureBox.Text = rounding ? RadiusText(before, f, dist) : (dist * Display).ToString("0.##", CultureInfo.CurrentCulture);
+            StatusText.Text = rounding
+                ? $"✅ Nu {CylinderText(doc, new FaceRef(f.Body, Math.Max(0, r.FaceMap[f.Face])))}. Typ een andere straal + Enter om het aan te passen."
+                : before.Bodies[f.Body].Faces[f.Face].Surface is BrepCylinder
+                ? $"✅ {(dist > 0 ? "Getrokken" : "Geduwd")}: {Math.Abs(dist) * Display:0.##} mm, nu {CylinderText(doc, f)}. Typ een andere afstand + Enter om het aan te passen."
+                : r.Punched ? $"✅ Doorgeduwd: er gaat nu een gat doorheen ({Math.Abs(dist) * Display:0.##} mm)."
+                : $"✅ {(dist > 0 ? "Getrokken" : "Geduwd")}: {Math.Abs(dist) * Display:0.##} mm. Typ een andere afstand + Enter om het aan te passen.";
+            Log($"pushpull face {f.Face} {dist * Display:0.###} mm: ok, {doc.Bodies[f.Body].Faces.Count} faces");
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log($"pushpull face {f.Face} {dist * Display:0.###} mm: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------------ arc from its centre, and pie (as in SketchUp)
+
+    /// <summary>A sweep round a centre (◜ an arc, ◔ a pie): the centre set (stage 1), the start too (stage 2: the radius),
+    /// the angle now (radians, counter-clockwise round the face's normal).</summary>
+    private FaceRef? _swFace;
+    private int _swStage;
+    private Vec3 _swCentre, _swStart, _swDir;
+    private double _swAngle;
+    private string SweepIcon => PieMode ? "◔" : "◜";
+
+    private void StartSweep((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (hit is not { } h || _doc == null) return;
+        if (!IsPlanar(h.Face)) { StatusText.Text = $"{SweepIcon} Dat kan alleen op een plat vlak."; return; }
+        _swFace = h.Face; _swStage = 1; _swAngle = 0; _swDir = default; _typed = "";
+        _swCentre = ArcPoint(h.Face, pos) ?? V(h.Point);
+        _selected = null; _hover = null; UpdateHighlight();
+        MeasureLabel.Text = "Straal"; MeasureBox.Text = "";
+        ShowSketch([_swCentre], NormalOf(h.Face));
+        StatusText.Text = $"{SweepIcon} Klik het beginpunt (de straal), of typ de straal + Enter. Esc breekt af.";
+    }
+
+    private void EndSweep()
+    {
+        if (_swFace == null) return;
+        _swFace = null; _swStage = 0;
+        MeasureUnit.Text = "mm";
+        ShowSketch([]);
+    }
+
+    /// <summary>The point at an angle round the centre from the start (counter-clockwise round n).</summary>
+    private Vec3 SweepPoint(Vec3 n, double angle) => new BrepTransform.Turn(_swCentre, n, angle).Point(_swStart);
+
+    private void SweepTo(Point pos)
+    {
+        if (_swFace is not { } f || _doc == null || _typed.Length > 0) return;
+        var n = NormalOf(f);
+        if (_swStage == 1)
+        {
+            if (ArcPoint(f, pos) is not { } p) return;
+            var d = p - _swCentre; d -= n * d.Dot(n);
+            if (d.Length < 1e-9) return;
+            _swDir = d.Normalized();
+            ShowSketch([_swCentre, _swCentre + d], n);
+            MeasureBox.Text = Mm(d.Length);
+            return;
+        }
+        if (OnPlane(f, pos) is not { } q) return;
+        var v = q - _swCentre; v -= n * v.Dot(n);
+        if (v.Length < 1e-9) return;
+        var r0 = (_swStart - _swCentre).Normalized();
+        double deg = Math.Atan2(r0.Cross(v.Normalized()).Dot(n), r0.Dot(v.Normalized())) * 180 / Math.PI;
+        // (past half a turn the way it went: on round, up to almost a whole one)
+        if (_swAngle * 180 / Math.PI > 90 && deg < 0) deg += 360;
+        if (_swAngle * 180 / Math.PI < -90 && deg > 0) deg -= 360;
+        double snapped = Math.Round(deg / 15) * 15;
+        deg = Math.Abs(deg - snapped) < 2.5 ? snapped : Math.Round(deg * 2) / 2;
+        if (Math.Abs(deg) >= 359.5) deg = 359.5 * Math.Sign(deg);
+        _swAngle = deg * Math.PI / 180;
+        MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(deg).ToString("0.#", CultureInfo.CurrentCulture);
+        if (Math.Abs(deg) < 0.4) { ShowSketch([_swCentre, _swStart], n); return; }
+        var arc = Enumerable.Range(0, 49).Select(k => SweepPoint(n, _swAngle * k / 48)).ToList();
+        ShowSketch(PieMode ? arc.Prepend(_swCentre).Append(_swCentre).ToList() : arc, n);
+        StatusText.Text = $"{SweepIcon} {Math.Abs(deg).ToString("0.#", CultureInfo.CurrentCulture)}°, straal {Mm((_swStart - _swCentre).Length)} mm · klik, of typ de hoek + Enter. Esc breekt af.";
+    }
+
+    private void SweepClick(Point pos)
+    {
+        if (_swFace is not { } f || _doc is not { } before) return;
+        if (_swStage == 1)
+        {
+            if (ArcPoint(f, pos) is not { } p) return;
+            var n = NormalOf(f);
+            var d = p - _swCentre; d -= n * d.Dot(n);
+            if (d.Length < 1e-6) return;
+            _swStart = _swCentre + d; _swStage = 2; _swAngle = 0;
+            StatusText.Text = $"{SweepIcon} Beweeg voor de hoek en klik, of typ de hoek + Enter. Esc breekt af.";
+            return;
+        }
+        SweepTo(pos);
+        if (Math.Abs(_swAngle) < 1e-6) return;
+        var (c, s0, ang, pie) = (_swCentre, _swStart, _swAngle, PieMode);
+        EndSweep();
+        ApplySweep(before, f, c, s0, ang, pie);
+    }
+
+    private void ApplySweep(SketchDocument before, FaceRef f, Vec3 centre, Vec3 start, double angle, bool pie)
+    {
+        var n = NormalOf(f);
+        var t = new BrepTransform.Turn(centre, n, angle);
+        var end = t.Point(start);
+        var through = new BrepTransform.Turn(centre, n, angle / 2).Point(start);
+        string what = pie ? "taartpunt" : "boog";
+        if (!pie && !(OnPlaneEdge(f, start) && OnPlaneEdge(f, end)))
+        {
+            AddLooseArc(before, f, start, end, through);
+            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
+            return;
+        }
+        try
+        {
+            var (doc, nf) = pie ? before.DrawPie(f, centre, start, end, through) : before.DrawArc(f, start, end, through);
+            Commit(before, doc);
+            _last = null; _selected = nf; _lastDrawn = nf;
+            Render();
+            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
+            StatusText.Text = $"✅ {(pie ? "Taartpunt" : "Boog")} getekend ({Math.Abs(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture)}°). Kies ⇕ (P) om hem eruit te trekken of in te duwen.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"{(pie ? "pie" : "centre arc")} on face {f.Face} r {(start - centre).Length * Display:0.###} mm {angle * 180 / Math.PI:0.#}°: ok, new face {nf.Face}"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log(string.Create(CultureInfo.InvariantCulture, $"{what} on face {f.Face} {angle * 180 / Math.PI:0.#}°: {ex.Message}"));
+        }
+    }
+
+    // ------------------------------------------------------------------ union: two bodies made one
+
+    /// <summary>The first body picked to unite (by the face clicked on it).</summary>
+    private FaceRef? _unionFirst;
+
+    private void UnionClick((FaceRef Face, Point3D Point)? hit)
+    {
+        if (hit is not { } h || _doc is not { } before) return;
+        if (_unionFirst is not { } first)
+        {
+            _unionFirst = h.Face; _selected = h.Face; UpdateHighlight();
+            StatusText.Text = "∪ Klik het tweede deel (dat het eerste overlapt of met een vlak raakt). Esc breekt af.";
+            return;
+        }
+        if (h.Face.Body == first.Body) { StatusText.Text = "∪ Dat is hetzelfde deel; klik een ander deel."; return; }
+        _unionFirst = null;
+        try
+        {
+            var doc = before.Union(first.Body, h.Face.Body);
+            Commit(before, doc);
+            _last = null; _lastMove = null; _selected = null; _hover = null;
+            Render();
+            int body = first.Body > h.Face.Body ? first.Body - 1 : first.Body;
+            StatusText.Text = $"✅ Verenigd: één deel met {doc.Bodies[body].Faces.Count} vlakken.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"union of bodies {first.Body} and {h.Face.Body}: ok, {doc.Bodies[body].Faces.Count} faces, volume {doc.Volume() * 1e9:0.###} mm³"));
+        }
+        catch (PushPullException ex)
+        {
+            _selected = null; UpdateHighlight();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log($"union of bodies {first.Body} and {h.Face.Body}: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------------ follow me: a face turned out round an axis
+
+    /// <summary>Turning a face out: the face (stage 1: picking the axis, 2: the angle), the axis (a point and the
+    /// direction that turns the face out), the angle now, the document it started from.</summary>
+    private FaceRef? _fmFace;
+    private int _fmStage;
+    private Vec3 _fmAxisP, _fmAxisDir, _fmRef;
+    private double _fmAngle;
+    private bool _fmOk;
+    private SketchDocument? _fmBase;
+
+    private void StartFollow((FaceRef Face, Point3D Point)? hit)
+    {
+        if (hit is not { } h || _doc == null) return;
+        if (!IsPlanar(h.Face)) { StatusText.Text = "↝ Ronddraaien kan alleen met een plat vlak."; return; }
+        _fmFace = h.Face; _fmStage = 1; _fmBase = _doc; _typed = "";
+        _selected = h.Face; _hover = null; UpdateHighlight();
+        StatusText.Text = "↝ Klik de as: een rechte rand, losse lijn of hulplijn in het vlak van dit vlak. Esc breekt af.";
+    }
+
+    private void EndFollow()
+    {
+        if (_fmFace == null) return;
+        _fmFace = null; _fmStage = 0; _fmBase = null; _fmOk = false;
+        ShowSketch([]);
+        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
+    }
+
+    /// <summary>A straight line in the face's plane near the mouse (within 8 pixels): an edge of a body, a loose line or a
+    /// guide line; its two points (a guide: two points on it).</summary>
+    private (Vec3 A, Vec3 B)? AxisAt(FaceRef f, Point pos)
+    {
+        if (_doc == null) return null;
+        var face = _doc.Bodies[f.Body].Faces[f.Face];
+        var n = FaceGeometry.Normal(face); var o = ((BrepPlane)face.Surface).Origin;
+        bool In(Vec3 q) => Math.Abs((q - o).Dot(n)) < 1e-7;
+        var mat = Viewport3DHelper.GetTotalTransform(View.Viewport);
+        Point Screen(Vec3 v) { var q = mat.Transform(P(v)); return new Point(q.X, q.Y); }
+        var cands = new List<(Vec3, Vec3)>();
+        foreach (var b in _doc.Bodies)
+            foreach (var e in b.Edges.Where(e => e.Curve is BrepLine && e.Start >= 0))
+                if (In(b.Vertices[e.Start]) && In(b.Vertices[e.End])) cands.Add((b.Vertices[e.Start], b.Vertices[e.End]));
+        foreach (var l in _doc.Lines.Where(l => !l.IsArc && In(l.Start) && In(l.End))) cands.Add((l.Start, l.End));
+        double len = Math.Max(_modelSize, 10) * 1.5 / Display;
+        foreach (var g in _guides.Where(g => Guides.InPlane(g, o, n))) cands.Add((g.Point - g.Dir * len, g.Point + g.Dir * len));
+        (Vec3, Vec3)? best = null; double bd = 8;
+        foreach (var (a, b) in cands)
+        {
+            Point sa = Screen(a), sb = Screen(b); var ab = sb - sa; double l2 = ab.LengthSquared;
+            double t = l2 == 0 ? 0 : Math.Clamp(Vector.Multiply(pos - sa, ab) / l2, 0, 1);
+            double d = (sa + ab * t - pos).Length;
+            if (d < bd) { bd = d; best = (a, b); }
+        }
+        return best;
+    }
+
+    /// <summary>The middle of the face (the average of its triangles' centres, by area).</summary>
+    private Vec3 FaceMiddle(SketchDocument doc, FaceRef f)
+    {
+        var tris = doc.TrianglesOf(f);
+        double w = 0; var sum = new Vec3(0, 0, 0);
+        foreach (var (a, b, c) in tris) { double ar = (b - a).Cross(c - a).Length; sum += (a + b + c) * (ar / 3); w += ar; }
+        return w > 0 ? sum * (1 / w) : tris[0].A;
+    }
+
+    private void FollowTo(Point pos)
+    {
+        if (_fmFace is not { } f || _fmBase is not { } baseDoc) return;
+        if (_fmStage == 1)
+        {
+            if (AxisAt(f, pos) is { } ax) { ShowSketch([ax.A, ax.B], default, color: AxisZ); StatusText.Text = "↝ Klik om deze lijn als as te nemen."; }
+            else { ShowSketch([]); StatusText.Text = "↝ Klik de as: een rechte rand, losse lijn of hulplijn in het vlak van dit vlak. Esc breekt af."; }
+            return;
+        }
+        if (_typed.Length > 0) return;
+        // the angle: where the mouse is on the plane square to the axis through the face's middle
+        var mid = FaceMiddle(baseDoc, f);
+        var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
+        if (ray == null) return;
+        var org = V(ray.Origin); var dir = new Vec3(ray.Direction.X, ray.Direction.Y, ray.Direction.Z).Normalized();
+        double den = dir.Dot(_fmAxisDir);
+        Vec3 q;
+        if (Math.Abs(den) > 1e-6) q = org + dir * ((mid - org).Dot(_fmAxisDir) / den);
+        else if (OnPlane(f, pos) is { } qp) q = qp; else return;
+        var foot = _fmAxisP + _fmAxisDir * (mid - _fmAxisP).Dot(_fmAxisDir);
+        var v = q - foot; v -= _fmAxisDir * v.Dot(_fmAxisDir);
+        if (v.Length < 1e-9) return;
+        v = v.Normalized();
+        double deg = Math.Atan2(_fmRef.Cross(v).Dot(_fmAxisDir), _fmRef.Dot(v)) * 180 / Math.PI;
+        if (deg < 0) deg += 360;
+        double snapped = Math.Round(deg / 15) * 15;
+        deg = Math.Abs(deg - snapped) < 2.5 ? snapped : Math.Round(deg * 2) / 2;
+        if (deg <= 0 || deg >= 360) { Render(baseDoc); _fmOk = false; return; }
+        _fmAngle = deg * Math.PI / 180;
+        MeasureBox.Text = deg.ToString("0.#", CultureInfo.CurrentCulture);
+        try
+        {
+            var (doc, _) = baseDoc.Revolve(f, _fmAxisP, _fmAxisDir, _fmAngle);
+            _fmOk = true;
+            Render(doc);
+            StatusText.Text = $"↝ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 ? " · 🎯 15°-stap" : "")} · klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.";
+        }
+        catch (PushPullException ex) { _fmOk = false; Render(baseDoc); StatusText.Text = "⛔ " + ex.Message; }
+    }
+
+    private void FollowClick(Point pos)
+    {
+        if (_fmFace is not { } f || _fmBase is not { } baseDoc) return;
+        if (_fmStage == 1)
+        {
+            if (AxisAt(f, pos) is not { } ax) return;
+            try
+            {
+                var a = PushPullMe.Core.Revolve.OutwardAxis(baseDoc.Bodies[f.Body], f.Face, ax.A, ax.B - ax.A);
+                _fmAxisP = ax.A; _fmAxisDir = a.Normalized();
+                var mid = FaceMiddle(baseDoc, f);
+                var r = mid - ax.A; r -= _fmAxisDir * r.Dot(_fmAxisDir);
+                _fmRef = r.Length > 1e-9 ? r.Normalized() : NormalOf(f).Cross(_fmAxisDir).Normalized();
+                _fmStage = 2; _fmAngle = 0; _fmOk = false;
+                ShowSketch([ax.A, ax.B], default, color: AxisZ);
+                MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = "";
+                StatusText.Text = "↝ Beweeg om het vlak eruit te draaien (stappen van 15°) en klik, of typ de hoek + Enter. Esc breekt af.";
+            }
+            catch (PushPullException ex) { StatusText.Text = "⛔ " + ex.Message; }
+            return;
+        }
+        FollowTo(pos);
+        if (!_fmOk) return;
+        var (p, dir, ang) = (_fmAxisP, _fmAxisDir, _fmAngle);
+        EndFollow();
+        ApplyFollow(baseDoc, f, p, dir, ang);
+    }
+
+    private void ApplyFollow(SketchDocument before, FaceRef f, Vec3 p, Vec3 dir, double angle)
+    {
+        try
+        {
+            var (doc, cap) = before.Revolve(f, p, dir, angle);
+            Commit(before, doc);
+            _last = null; _selected = cap;
+            Render();
+            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = (angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture);
+            StatusText.Text = $"✅ Rondgedraaid: {(angle * 180 / Math.PI).ToString("0.#", CultureInfo.CurrentCulture)}°.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"follow me face {f.Face} round ({p.X * Display:0.###},{p.Y * Display:0.###},{p.Z * Display:0.###}) along ({dir.X:0.###},{dir.Y:0.###},{dir.Z:0.###}) {angle * 180 / Math.PI:0.#}°: ok, {doc.Bodies[f.Body].Faces.Count} faces, volume {doc.Volume() * 1e9:0.###} mm³"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log(string.Create(CultureInfo.InvariantCulture, $"follow me face {f.Face} {angle * 180 / Math.PI:0.#}°: {ex.Message}"));
+        }
+    }
+
+    // ------------------------------------------------------------------ rotated rectangle (as in SketchUp)
+
+    /// <summary>A rectangle at any angle: its first corner (stage 1), the second (stage 2: the first side), and its width
+    /// now (signed: to the left of A → B seen along the normal).</summary>
+    private FaceRef? _rrFace;
+    private int _rrStage;
+    private Vec3 _rrA, _rrB;
+    private double _rrWidth;
+
+    private List<Vec3> RotRectCorners(Vec3 a, Vec3 b, double w, Vec3 n)
+    {
+        var side = n.Cross(b - a).Normalized() * w;
+        return [a, b, b + side, a + side];
+    }
+
+    private void StartRotRect((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (hit is not { } h || _doc == null) return;
+        if (!IsPlanar(h.Face)) { StatusText.Text = "◇ Dat kan alleen op een plat vlak."; return; }
+        _rrFace = h.Face; _rrStage = 1; _rrWidth = 0; _typed = "";
+        _rrA = ArcPoint(h.Face, pos) ?? V(h.Point);
+        _selected = null; _hover = null; UpdateHighlight();
+        MeasureLabel.Text = "Lengte"; MeasureBox.Text = "";
+        ShowSketch([_rrA], NormalOf(h.Face));
+        StatusText.Text = "◇ Klik de tweede hoek (de eerste zijde). Esc breekt af.";
+    }
+
+    private void EndRotRect()
+    {
+        if (_rrFace == null) return;
+        _rrFace = null; _rrStage = 0;
+        ShowSketch([]);
+    }
+
+    private void RotRectTo(Point pos)
+    {
+        if (_rrFace is not { } f || _doc == null || _typed.Length > 0) return;
+        var n = NormalOf(f);
+        if (_rrStage == 1)
+        {
+            if (ArcPoint(f, pos) is { } p) { ShowSketch([_rrA, p], n); MeasureBox.Text = Mm((p - _rrA).Length); }
+            return;
+        }
+        if (OnPlane(f, pos) is not { } q) return;
+        var w = n.Cross(_rrB - _rrA).Normalized();
+        double width = Math.Round((q - _rrA).Dot(w) * Display * 10) / 10 / Display;
+        if (Math.Abs(width) < 1e-7) { ShowSketch([_rrA, _rrB], n); return; }
+        _rrWidth = width;
+        ShowSketch(RotRectCorners(_rrA, _rrB, width, n), n, closed: true);
+        MeasureLabel.Text = "Breedte"; MeasureBox.Text = Mm(Math.Abs(width));
+        StatusText.Text = $"◇ {Mm((_rrB - _rrA).Length)} × {Mm(Math.Abs(width))} mm · klik, of typ de breedte + Enter. Esc breekt af.";
+    }
+
+    private void RotRectClick(Point pos)
+    {
+        if (_rrFace is not { } f || _doc is not { } before) return;
+        if (_rrStage == 1)
+        {
+            if (ArcPoint(f, pos) is not { } p || (p - _rrA).Length < 1e-6) return;
+            _rrB = p; _rrStage = 2; _rrWidth = 0;
+            StatusText.Text = "◇ Beweeg voor de breedte en klik, of typ de breedte + Enter. Esc breekt af.";
+            return;
+        }
+        RotRectTo(pos);
+        if (Math.Abs(_rrWidth) < 1e-7) return;
+        var (a, b, w) = (_rrA, _rrB, _rrWidth);
+        EndRotRect();
+        ApplyRotRect(before, f, a, b, w);
+    }
+
+    private void ApplyRotRect(SketchDocument before, FaceRef f, Vec3 a, Vec3 b, double width)
+    {
+        var corners = RotRectCorners(a, b, width, NormalOf(f));
+        try
+        {
+            var (doc, nf) = before.DrawPath(f, corners.Append(corners[0]).ToList());
+            Commit(before, doc);
+            _last = null; _selected = nf; _lastDrawn = nf;
+            Render();
+            MeasureLabel.Text = "Breedte"; MeasureBox.Text = Mm(Math.Abs(width));
+            StatusText.Text = $"✅ Rechthoek {Mm((b - a).Length)} × {Mm(Math.Abs(width))} mm getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"rotated rectangle {(b - a).Length * Display:0.###} x {Math.Abs(width) * Display:0.###} mm on face {f.Face}: ok, new face {nf.Face}"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+        }
+    }
+
+    // ------------------------------------------------------------------ arc (as SketchUp's 2 point arc)
+
+    /// <summary>The arc being drawn: on this face, from A (stage 1), to B (stage 2), bulging this far (metres, signed:
+    /// to the left of A → B seen along the normal) from the middle of A–B.</summary>
+    private FaceRef? _arcFace;
+    private int _arcStage;
+    private Vec3 _arcA, _arcB;
+    private double _arcBulge;
+    /// <summary>Drawing a 3 point arc: then B is the point the arc goes through, and the mouse gives its end (C).</summary>
+    private bool _arc3;
+    private Vec3? _arcC;
+
+    /// <summary>The point under the mouse on the face's plane, snapped to a corner, middle or edge as the line does.</summary>
+    private Vec3? ArcPoint(FaceRef f, Point pos)
+    {
+        if (OnPlane(f, pos) is not { } p) return null;
+        return EdgeSnap(f, p, pos) is { } s ? s.Point : p;
+    }
+
+    private void StartArc((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (hit is not { } h || _doc == null) return;
+        if (!IsPlanar(h.Face)) { StatusText.Text = "⌒ Een boog tekenen kan alleen op een plat vlak."; return; }
+        _arcFace = h.Face; _arcStage = 1; _typed = ""; _arc3 = Arc3Mode; _arcC = null;
+        _arcA = ArcPoint(h.Face, pos) ?? V(h.Point);
+        _selected = null; _hover = null; UpdateHighlight();
+        MeasureLabel.Text = _arc3 ? "Lengte" : "Bolling"; MeasureBox.Text = "";
+        ShowSketch([_arcA], NormalOf(h.Face));
+        StatusText.Text = _arc3 ? "⌓ Klik een punt waar de boog doorheen gaat. Esc breekt af." : "⌒ Klik het eindpunt van de boog. Esc breekt af.";
+    }
+
+    private void EndArc()
+    {
+        if (_arcFace == null) return;
+        _arcFace = null; _arcStage = 0;
+        ShowSketch([]);
+    }
+
+    private void ArcTo(Point pos)
+    {
+        if (_arcFace is not { } f || _doc == null || _typed.Length > 0) return;
+        var n = NormalOf(f);
+        if (_arcStage == 1)
+        {
+            if (ArcPoint(f, pos) is { } p) { ShowSketch([_arcA, p], n); MeasureBox.Text = Mm((p - _arcA).Length); }
+            return;
+        }
+        if (_arc3)
+        {
+            // the end under the mouse; the arc from A through B to it
+            _arcC = null;
+            if (ArcPoint(f, pos) is not { } e) return;
+            if (!Bends(_arcA, _arcB, e, n)) { ShowSketch([_arcA, _arcB, e], n); StatusText.Text = "⌓ De drie punten liggen (bijna) op een lijn; beweeg verder opzij."; return; }
+            _arcC = e;
+            var c3 = PushPullMe.Core.Drawing.ArcThrough(_arcA, _arcB, e, n);
+            ShowSketch(PushPullMe.Core.Drawing.ArcPoints(c3, _arcA, e), n);
+            MeasureBox.Text = Mm((e - _arcA).Length);
+            StatusText.Text = $"⌓ Straal {Mm(c3.Radius)} mm · klik het eindpunt. Esc breekt af.";
+            return;
+        }
+        if (OnPlane(f, pos) is not { } q) return;
+        var chord = _arcB - _arcA;
+        var w = n.Cross(chord).Normalized();
+        double bulge = (q - (_arcA + _arcB) * 0.5).Dot(w);
+        // near a half circle: that
+        double half = chord.Length / 2;
+        bool semi = Math.Abs(Math.Abs(bulge) - half) < 0.06 * half;
+        bulge = semi ? half * Math.Sign(bulge) : Math.Round(bulge * Display * 10) / 10 / Display;
+        if (Math.Abs(bulge) < 1e-7) { ShowSketch([_arcA, _arcB], n); return; }
+        _arcBulge = bulge;
+        var through = (_arcA + _arcB) * 0.5 + w * bulge;
+        var c = PushPullMe.Core.Drawing.ArcThrough(_arcA, through, _arcB, n);
+        ShowSketch(PushPullMe.Core.Drawing.ArcPoints(c, _arcA, _arcB), n);
+        MeasureBox.Text = Mm(Math.Abs(bulge));
+        StatusText.Text = $"⌒ Bolling {Mm(Math.Abs(bulge))} mm, straal {Mm(c.Radius)} mm{(semi ? " · 🎯 halve cirkel" : "")} · klik, of typ de bolling + Enter. Esc breekt af.";
+    }
+
+    private void ArcClick(Point pos)
+    {
+        if (_arcFace is not { } f || _doc is not { } before) return;
+        if (_arcStage == 1)
+        {
+            if (ArcPoint(f, pos) is not { } p || (p - _arcA).Length < 1e-6) return;
+            _arcB = p; _arcStage = 2; _arcBulge = 0;
+            StatusText.Text = _arc3 ? "⌓ Klik het eindpunt van de boog. Esc breekt af." : "⌒ Beweeg voor de bolling en klik, of typ de bolling + Enter. Esc breekt af.";
+            return;
+        }
+        if (_arc3)
+        {
+            ArcTo(pos);
+            if (_arcC is not { } end) return;
+            var (a3, b3) = (_arcA, _arcB);
+            EndArc();
+            ApplyArcThrough(before, f, a3, end, b3, "");
+            return;
+        }
+        ArcTo(pos);
+        if (Math.Abs(_arcBulge) < 1e-7) return;
+        var (a, b, bulge) = (_arcA, _arcB, _arcBulge);
+        EndArc();
+        ApplyArc(before, f, a, b, bulge);
+    }
+
+    /// <summary>Whether a, b and c bend enough to make an arc (not on one line).</summary>
+    private static bool Bends(Vec3 a, Vec3 b, Vec3 c, Vec3 n)
+    {
+        double ab = (b - a).Length, bc = (c - b).Length, ac = (c - a).Length;
+        if (ab < 1e-6 || bc < 1e-6 || ac < 1e-6) return false;
+        return Math.Abs((b - a).Cross(c - a).Dot(n)) / (ab * ac) > 0.01;
+    }
+
+    private void ApplyArc(SketchDocument before, FaceRef f, Vec3 a, Vec3 b, double bulge)
+    {
+        var n = NormalOf(f);
+        ApplyArcThrough(before, f, a, b, (a + b) * 0.5 + n.Cross(b - a).Normalized() * bulge, Mm(Math.Abs(bulge)));
+    }
+
+    private void ApplyArcThrough(SketchDocument before, FaceRef f, Vec3 a, Vec3 b, Vec3 through, string bulgeText)
+    {
+        // not from edge to edge: a loose arc (as SketchUp), a face once it closes a shape
+        if (!(OnPlaneEdge(f, a) && OnPlaneEdge(f, b)))
+        {
+            AddLooseArc(before, f, a, b, through);
+            MeasureLabel.Text = bulgeText.Length > 0 ? "Bolling" : "Lengte"; MeasureBox.Text = bulgeText.Length > 0 ? bulgeText : Mm((b - a).Length);
+            return;
+        }
+        try
+        {
+            var (doc, nf) = before.DrawArc(f, a, b, through);
+            Commit(before, doc);
+            _last = null; _selected = nf; _lastDrawn = nf;
+            Render();
+            MeasureLabel.Text = bulgeText.Length > 0 ? "Bolling" : "Lengte"; MeasureBox.Text = bulgeText.Length > 0 ? bulgeText : Mm((b - a).Length);
+            StatusText.Text = "✅ Boog getekend. Kies ⇕ (P) om een deel eruit te trekken of in te duwen (zijn zijkant wordt rond).";
+            Log(string.Create(CultureInfo.InvariantCulture, $"arc on face {f.Face} ({a.X * Display:0.###},{a.Y * Display:0.###},{a.Z * Display:0.###}) → ({b.X * Display:0.###},{b.Y * Display:0.###},{b.Z * Display:0.###}) through ({through.X * Display:0.###},{through.Y * Display:0.###},{through.Z * Display:0.###}): ok, new face {nf.Face}"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log(string.Create(CultureInfo.InvariantCulture, $"arc on face {f.Face} ({a.X * Display:0.###},{a.Y * Display:0.###},{a.Z * Display:0.###}) → ({b.X * Display:0.###},{b.Y * Display:0.###},{b.Z * Display:0.###}) through ({through.X * Display:0.###},{through.Y * Display:0.###},{through.Z * Display:0.###}): {ex.Message}"));
+        }
+    }
+
+    /// <summary>An arc from a to b by way of <paramref name="through"/> as a loose arc on f's plane; with the loose lines
+    /// and edges there it may close a shape: then that becomes a face.</summary>
+    private void AddLooseArc(SketchDocument before, FaceRef f, Vec3 a, Vec3 b, Vec3 through)
+    {
+        try
+        {
+            var c = PushPullMe.Core.Drawing.ArcThrough(a, through, b, NormalOf(f));
+            var with = before.AddLines([new SketchLine(a, b, c.Centre, c.Normal)]);
+            var (doc, made) = with.CloseLooseLines(f);
+            Commit(before, doc);
+            _last = null;
+            if (made.Count > 0) { _selected = made[^1]; _lastDrawn = made[^1]; }
+            Render();
+            StatusText.Text = made.Count > 0
+                ? $"✅ Boog getekend; met de lijnen die er al lagen {(made.Count == 1 ? "is een vlak" : $"zijn {made.Count} vlakken")} gesloten. Kies ⇕ (P) om het eruit te trekken of in te duwen."
+                : $"✅ Losse boog getekend (straal {Mm(c.Radius)} mm). Sluit hem met lijnen of randen tot een vorm, dan wordt het een vlak.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"loose arc on face {f.Face} ({a.X * Display:0.###},{a.Y * Display:0.###},{a.Z * Display:0.###}) → ({b.X * Display:0.###},{b.Y * Display:0.###},{b.Z * Display:0.###}) r {c.Radius * Display:0.###}: {made.Count} face(s) closed"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+        }
+    }
+
+    // ------------------------------------------------------------------ polygon (as in SketchUp)
+
+    /// <summary>The polygon being drawn: on this face, round this centre; its first corner the way of <see cref="_polyDir"/>
+    /// (unit) at <see cref="_polyRadius"/>; how many corners.</summary>
+    private FaceRef? _polyFace;
+    private Vec3 _polyCentre, _polyDir;
+    private double _polyRadius;
+    private int _polySides = 6;
+
+    /// <summary>The corners of a regular polygon on a face with normal n: the first at centre + dir·r.</summary>
+    private List<Vec3> PolygonCorners(Vec3 centre, Vec3 dir, double r, Vec3 n)
+    {
+        var u = (dir - n * dir.Dot(n)).Normalized(); var v = n.Cross(u);
+        return Enumerable.Range(0, _polySides).Select(k => centre + (u * Math.Cos(2 * Math.PI * k / _polySides) + v * Math.Sin(2 * Math.PI * k / _polySides)) * r).ToList();
+    }
+
+    private void StartPolygon((FaceRef Face, Point3D Point)? hit)
+    {
+        if (hit is not { } h || _doc == null) return;
+        if (!IsPlanar(h.Face)) { StatusText.Text = "⬡ Een veelhoek tekenen kan alleen op een plat vlak."; return; }
+        var n = NormalOf(h.Face);
+        var p = V(h.Point);
+        // (on a guide line's crossing or an edge's middle or corner, as the rectangle and circle do)
+        if (_doc.Bodies[h.Face.Body].Faces[h.Face.Face].Surface is BrepPlane pl && GuideSnap(p, Mouse.GetPosition(View.Viewport), n, pl.Origin) is { } gs) p = gs.Point;
+        _polyFace = h.Face; _polyCentre = p; _polyDir = default; _polyRadius = 0; _typed = "";
+        _selected = null; _hover = null; UpdateHighlight();
+        MeasureLabel.Text = "Straal"; MeasureBox.Text = "";
+        ShowSketch([p], n);
+        StatusText.Text = $"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): beweeg voor de grootte en de stand, klik; of typ de straal + Enter. Esc breekt af.";
+    }
+
+    private void EndPolygon()
+    {
+        if (_polyFace == null) return;
+        _polyFace = null;
+        ShowSketch([]);
+    }
+
+    private void PolygonTo(Point pos)
+    {
+        if (_polyFace is not { } f || _doc == null || _typed.Length > 0) return;
+        if (OnPlane(f, pos) is not { } p) return;
+        var n = NormalOf(f);
+        var d = p - _polyCentre; d -= n * d.Dot(n);
+        double r = Math.Round(d.Length * Display * 10) / 10 / Display;
+        if (r < 1e-7) return;
+        _polyDir = d.Normalized(); _polyRadius = r;
+        ShowSketch(PolygonCorners(_polyCentre, _polyDir, r, n), n, closed: true);
+        MeasureBox.Text = Mm(r);
+        StatusText.Text = $"⬡ {_polySides} hoeken, straal {Mm(r)} mm (zijde {Mm(2 * r * Math.Sin(Math.PI / _polySides))} mm) · klik, of typ de straal + Enter. ↑/↓: meer/minder hoeken. Esc breekt af.";
+    }
+
+    private void FinishPolygon()
+    {
+        if (_polyFace is not { } f || _doc is not { } before || _polyRadius < 1e-7) return;
+        var (c, d, r) = (_polyCentre, _polyDir, _polyRadius);
+        EndPolygon();
+        ApplyPolygon(before, f, c, d, r);
+    }
+
+    private void ApplyPolygon(SketchDocument before, FaceRef f, Vec3 centre, Vec3 dir, double r)
+    {
+        var corners = PolygonCorners(centre, dir, r, NormalOf(f));
+        try
+        {
+            // (a closed path: a face of its own; across other faces in the plane as the line does)
+            var (doc, nf) = before.DrawPath(f, corners.Append(corners[0]).ToList());
+            Commit(before, doc);
+            _last = null; _selected = nf; _lastDrawn = nf;
+            Render();
+            MeasureLabel.Text = "Straal"; MeasureBox.Text = Mm(r);
+            StatusText.Text = $"✅ Veelhoek ({_polySides} hoeken, straal {Mm(r)} mm) getekend. Kies ⇕ (P) om hem eruit te trekken of in te duwen.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"polygon {_polySides} corners r {r * Display:0.###} mm on face {f.Face}: ok, new face {nf.Face}"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log(string.Create(CultureInfo.InvariantCulture, $"polygon {_polySides} corners r {r * Display:0.###} mm on face {f.Face}: {ex.Message}"));
+        }
+    }
+
+    // ------------------------------------------------------------------ mirror
+
+    /// <summary>⇋: the body of the face clicked mirrored in that face's plane (Ctrl: a mirrored copy added).</summary>
+    private void MirrorAt((FaceRef Face, Point3D Point)? hit)
+    {
+        if (hit is not { } h || _doc is not { } before) return;
+        var face = before.Bodies[h.Face.Body].Faces[h.Face.Face];
+        if (face.Surface is not BrepPlane pl) { StatusText.Text = "⇋ Spiegelen kan in een plat vlak."; return; }
+        bool copy = (Mods & ModifierKeys.Control) != 0;
+        var n = FaceGeometry.Normal(face);
+        try
+        {
+            var (doc, _) = before.MirrorBody(h.Face.Body, pl.Origin, n, copy);
+            Commit(before, doc);
+            _last = null; _lastMove = null; _selected = null; _hover = null;
+            Render();
+            StatusText.Text = copy ? "✅ Gespiegelde kopie erbij." : "✅ Gespiegeld.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"mirror body {h.Face.Body}{(copy ? " (copy)" : "")} in face {h.Face.Face}: ok"));
+        }
+        catch (PushPullException ex)
+        {
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+        }
+    }
+
+    // ------------------------------------------------------------------ the choice and the lasso
+
+    /// <summary>The chosen faces (of one body): with the lasso or Shift+click; ✥ moves them together, 🎨 paints them all.</summary>
+    private (int Body, HashSet<int> Faces)? _multi;
+
+    /// <summary>The lasso being drawn (screen points), or null.</summary>
+    private List<Point>? _lasso;
+
+    private void ToggleChosen(FaceRef f)
+    {
+        if (_multi is not { } m || m.Body != f.Body) m = (f.Body, new HashSet<int>());
+        if (!m.Faces.Remove(f.Face)) m.Faces.Add(f.Face);
+        _multi = m.Faces.Count > 0 ? m : null;
+        _selected = null;
+        UpdateHighlight();
+        StatusText.Text = ChoiceText();
+    }
+
+    private string ChoiceText() => _multi is { } m
+        ? $"✔ {m.Faces.Count} {(m.Faces.Count == 1 ? "vlak" : "vlakken")} gekozen · ✥ verplaatst ze samen, 🎨 verft ze in één keer · Esc: keuze leeg."
+        : "Niets gekozen.";
+
+    private void StartLasso(Point pos)
+    {
+        _lasso = [pos];
+        LassoLine.Points = new PointCollection([View.Viewport.TranslatePoint(pos, TagLayer)]);
+        LassoLine.Visibility = Visibility.Visible;
+        StatusText.Text = "➰ Trek de lus om de vlakken en klik om hem te sluiten. Esc breekt af.";
+    }
+
+    private void LassoTo(Point pos)
+    {
+        if (_lasso == null) return;
+        if ((pos - _lasso[^1]).Length < 4) return;
+        _lasso.Add(pos);
+        LassoLine.Points.Add(View.Viewport.TranslatePoint(pos, TagLayer));
+    }
+
+    private void EndLasso()
+    {
+        _lasso = null;
+        LassoLine.Visibility = Visibility.Collapsed;
+        LassoLine.Points = new PointCollection();
+    }
+
+    /// <summary>The lasso closed: the faces whose middle (on screen) lies inside it are chosen (Shift: added, Ctrl:
+    /// taken out); of one body, the one with the most.</summary>
+    private void FinishLasso()
+    {
+        if (_lasso is not { } poly || _doc == null) return;
+        EndLasso();
+        if (poly.Count < 3) { StatusText.Text = "➰ Trek een lus: klik, beweeg om de vlakken heen en klik nog eens."; return; }
+        bool Inside(Point p)
+        {
+            bool inside = false;
+            for (int i = 0, j = poly.Count - 1; i < poly.Count; j = i++)
+                if ((poly[i].Y > p.Y) != (poly[j].Y > p.Y) && p.X < (poly[j].X - poly[i].X) * (p.Y - poly[i].Y) / (poly[j].Y - poly[i].Y) + poly[i].X)
+                    inside = !inside;
+            return inside;
+        }
+        var hits = new List<FaceRef>();
+        for (int b = 0; b < _doc.Bodies.Count; b++)
+            for (int f = 0; f < _doc.Bodies[b].Faces.Count; f++)
+            {
+                var tris = _doc.TrianglesOf(new FaceRef(b, f));
+                if (tris.Count == 0) continue;
+                // the middle: weighted by area
+                Vec3 sum = new(0, 0, 0); double area = 0;
+                foreach (var (a, bb, c) in tris) { double ar = (bb - a).Cross(c - a).Length; sum += (a + bb + c) * (ar / 3); area += ar; }
+                if (area <= 0) continue;
+                var mid = sum * (1 / area);
+                if (Inside(Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(mid)))) hits.Add(new FaceRef(b, f));
+            }
+        var mods = Mods;
+        if (hits.Count == 0 && (mods & (ModifierKeys.Shift | ModifierKeys.Control)) == 0) { _multi = null; UpdateHighlight(); StatusText.Text = "➰ Geen vlak binnen de lus."; return; }
+        int body = _multi is { } cur && (mods & (ModifierKeys.Shift | ModifierKeys.Control)) != 0 ? cur.Body
+            : hits.GroupBy(h => h.Body).OrderByDescending(g => g.Count()).First().Key;
+        var set = (mods & (ModifierKeys.Shift | ModifierKeys.Control)) != 0 && _multi is { } c0 && c0.Body == body ? new HashSet<int>(c0.Faces) : new HashSet<int>();
+        foreach (var h in hits.Where(h => h.Body == body))
+            if ((mods & ModifierKeys.Control) != 0) set.Remove(h.Face); else set.Add(h.Face);
+        _multi = set.Count > 0 ? (body, set) : null;
+        _selected = null;
+        UpdateHighlight();
+        StatusText.Text = ChoiceText() + (hits.Any(h => h.Body != body) ? " (alleen van één lichaam)" : "");
+        Log($"lasso: {set.Count} face(s) of body {body}");
+    }
+
+    // ------------------------------------------------------------------ scale (as in SketchUp)
+
+    // a scale in progress: 1 = the fixed point is set, 2 = the point pulled at too; the body (a copy?), only along an axis?,
+    // the factor now and whether it works, and the document it started from
+    private int _scStage;
+    private int _scBody;
+    private bool _scCopy, _scOk;
+    private Vec3 _scFixed, _scGrab;
+    private Vec3? _scAxis;
+    private double _scFactor = 1;
+    private SketchDocument? _scBase;
+
+    /// <summary>The last scale (to change its factor by typing another one).</summary>
+    private (SketchDocument Before, int Body, Vec3 Fixed, Vec3? Along, bool Copy)? _lastScale;
+
+    private void StartScale((FaceRef Face, Point3D Point)? hit)
+    {
+        if (hit is not { } h || _doc == null) return;
+        _scBody = h.Face.Body; _scCopy = (Mods & ModifierKeys.Control) != 0;
+        _scFixed = V(h.Point); _scAxis = null; _scFactor = 1; _scOk = false;
+        _scBase = _doc; _scStage = 1; _lastScale = null; _last = null; _lastMove = null; _lastRotate = null; _typed = "";
+        _selected = null; _hover = null; UpdateHighlight();
+        MeasureLabel.Text = "Factor"; MeasureUnit.Text = "×"; MeasureBox.Text = "";
+        ShowSketch([_scFixed]);
+        StatusText.Text = $"⇲ Schalen{(_scCopy ? " (kopie)" : "")}: dit punt blijft staan. Klik het punt waaraan je trekt, of typ de factor + Enter. Esc breekt af.";
+    }
+
+    private void EndScale()
+    {
+        if (_scStage == 0) return;
+        _scStage = 0; _scOk = false; _scBase = null;
+        MeasureUnit.Text = "mm";
+        ShowSketch([]);
+    }
+
+    /// <summary>The point under the mouse: on the model, else on the plane across the view through the fixed point.</summary>
+    private Vec3? ScalePoint(Point pos)
+    {
+        if (FaceAt(pos) is { } h) return V(h.Point);
+        var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
+        if (ray == null || View.Camera is not ProjectionCamera cam) return null;
+        var org = V(ray.Origin); var dir = new Vec3(ray.Direction.X, ray.Direction.Y, ray.Direction.Z).Normalized();
+        var look = new Vec3(cam.LookDirection.X, cam.LookDirection.Y, cam.LookDirection.Z).Normalized();
+        double dn = dir.Dot(look);
+        return Math.Abs(dn) < 1e-9 ? null : org + dir * ((_scFixed - org).Dot(look) / dn);
+    }
+
+    /// <summary>The point on the line through <paramref name="a"/> along <paramref name="d"/> nearest to the mouse ray.</summary>
+    private Vec3? NearestOnLine(Point pos, Vec3 a, Vec3 d)
+    {
+        var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
+        if (ray == null) return null;
+        var org = V(ray.Origin); var dir = new Vec3(ray.Direction.X, ray.Direction.Y, ray.Direction.Z).Normalized();
+        d = d.Normalized();
+        double b = d.Dot(dir);
+        if (1 - b * b < 1e-9) return null;
+        var w0 = a - org;
+        double t = (b * w0.Dot(dir) - w0.Dot(d)) / (1 - b * b);
+        return a + d * t;
+    }
+
+    private void ScaleTo(Point pos)
+    {
+        if (_scStage == 0 || _scBase == null || _typed.Length > 0) return;
+        if (_scStage == 1)
+        {
+            if (ScalePoint(pos) is { } p) ShowSketch([_scFixed, p]);
+            return;
+        }
+        // the factor: how far the mouse is from the fixed point compared with the point pulled at (along the axis held)
+        var dir = _scAxis ?? (_scGrab - _scFixed);
+        double baseLen = (_scGrab - _scFixed).Dot(dir.Normalized());
+        if (Math.Abs(baseLen) < 1e-9) { StatusText.Text = "⇲ Het punt waaraan je trekt ligt niet langs deze as; kies een andere (pijltjes) of typ de factor."; return; }
+        if (NearestOnLine(pos, _scGrab, dir) is not { } q) return;
+        double f = (q - _scFixed).Dot(dir.Normalized()) / baseLen;
+        f = Math.Max(0.01, Math.Round(f * 100) / 100);
+        if (Math.Abs(f - _scFactor) < 1e-12 && _scOk) return;
+        _scFactor = f;
+        MeasureBox.Text = f.ToString("0.##", CultureInfo.CurrentCulture);
+        var axisName = _scAxis is { } ax ? Axes.First(a => a.Dir.Dot(ax) > 0.99).Name : null;
+        var axisColor = _scAxis is { } ax2 ? Axes.First(a => a.Dir.Dot(ax2) > 0.99).Color : (Color?)null;
+        ShowSketch([_scFixed, _scFixed + (_scGrab - _scFixed) * f], default, color: axisColor);
+        try
+        {
+            var (doc, _) = _scBase.ScaleBody(_scBody, _scFixed, f, _scAxis, _scCopy);
+            _scOk = true;
+            Render(doc);
+            StatusText.Text = $"⇲ {f.ToString("0.##", CultureInfo.CurrentCulture)}×{(axisName != null ? " langs de " + axisName : "")} · klik om vast te zetten, of typ de factor + Enter. Pijltjes: langs één as. Esc breekt af.";
+        }
+        catch (PushPullException ex) { _scOk = false; Render(_scBase); StatusText.Text = "⛔ " + ex.Message; }
+    }
+
+    private void ScaleClick(Point pos)
+    {
+        if (_scStage == 1)
+        {
+            if (ScalePoint(pos) is not { } p || (p - _scFixed).Length < 1e-6) return;
+            _scGrab = p; _scStage = 2;
+            StatusText.Text = "⇲ Beweeg om te schalen; klik om vast te zetten, of typ de factor + Enter. Pijltjes: langs één as. Esc breekt af.";
+            return;
+        }
+        ScaleTo(pos);
+        if (!_scOk || Math.Abs(_scFactor - 1) < 1e-9 || _scBase is not { } before) return;
+        var (b, fx, f, ax, copy) = (_scBody, _scFixed, _scFactor, _scAxis, _scCopy);
+        EndScale();
+        ApplyScale(before, b, fx, f, ax, copy, replaceLast: false);
+    }
+
+    private void ApplyScale(SketchDocument before, int body, Vec3 fixedPoint, double factor, Vec3? along, bool copy, bool replaceLast)
+    {
+        try
+        {
+            var (doc, _) = before.ScaleBody(body, fixedPoint, factor, along, copy);
+            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            else Commit(before, doc);
+            _lastScale = (before, body, fixedPoint, along, copy);
+            _last = null; _lastMove = null; _selected = null;
+            Render();
+            MeasureLabel.Text = "Factor"; MeasureUnit.Text = "×"; MeasureBox.Text = factor.ToString("0.###", CultureInfo.CurrentCulture);
+            StatusText.Text = $"✅ {(copy ? "Geschaalde kopie" : "Geschaald")}: {factor.ToString("0.###", CultureInfo.CurrentCulture)}×. Typ een andere factor + Enter om het aan te passen.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"scale body {body}{(copy ? " (copy)" : "")} {factor:0.###}x{(along is { } a ? $" along ({a.X:0},{a.Y:0},{a.Z:0})" : "")} from ({fixedPoint.X * Display:0.###},{fixedPoint.Y * Display:0.###},{fixedPoint.Z * Display:0.###}): ok"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+        }
+    }
+
+    // ------------------------------------------------------------------ rotate (as in SketchUp)
+
+    // a turn in progress: 1 = the centre is set (its axis), 2 = the start direction too; the body (a copy?), the axis
+    // square to the face clicked (for ↓), the angle now and whether it works, and the document it started from
+    private int _rotStage;
+    private int _rotBody;
+    private bool _rotCopy, _rotOk;
+    private Vec3 _rotCentre, _rotAxis, _rotFaceAxis, _rotRef;
+    private double _rotAngle;
+    private SketchDocument? _rotBase;
+    /// <summary>Not the whole body but this face, tilted round one of its edges (clicked near it).</summary>
+    private FaceRef? _rotTilt;
+
+    /// <summary>The last turn (to change its angle by typing another one).</summary>
+    private (SketchDocument Before, int Body, Vec3 Centre, Vec3 Axis, bool Copy, double Sign, FaceRef? Tilt)? _lastRotate;
+
+    private void StartRotate((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (hit is not { } h || _doc == null) return;
+        var face = _doc.Bodies[h.Face.Body].Faces[h.Face.Face];
+        // close to a straight edge of a flat face: that face tilts round the edge (its neighbours follow)
+        _rotTilt = null;
+        if (face.Surface is BrepPlane && EdgeAt(hit, pos) is { } he && he.Body == h.Face.Body
+            && _doc.Bodies[he.Body].Edges[he.Edge] is { Curve: BrepLine, Start: >= 0 } hinge && ScreenDistanceToEdge(_doc.Bodies[he.Body], he.Edge, pos) < 8)
+        {
+            var bd = _doc.Bodies[he.Body];
+            Vec3 a = bd.Vertices[hinge.Start], ax = (bd.Vertices[hinge.End] - a).Normalized(), n = FaceGeometry.Normal(face);
+            // the start direction: from the edge into the face
+            var into = n.Cross(ax);
+            var mid = FaceGeometry.LoopPoints(bd, face.Loops[0]).Aggregate(new Vec3(0, 0, 0), (s, q) => s + q) * (1.0 / face.Loops[0].Count);
+            if (into.Dot(mid - a) < 0) into = into * -1;
+            _rotTilt = h.Face; _rotBody = h.Face.Body; _rotCopy = false;
+            // (on the edge where it was clicked: the mouse turns it in the plane there)
+            _rotCentre = a + ax * (V(h.Point) - a).Dot(ax); _rotAxis = ax; _rotFaceAxis = ax; _rotRef = into.Normalized();
+            _rotBase = _doc; _lastRotate = null; _last = null; _lastMove = null; _typed = "";
+            _selected = null; _hover = null; UpdateHighlight();
+            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = "";
+            _rotStage = 2; _rotOk = false; _rotAngle = 0;
+            ShowProtractor(_rotRef, null);
+            StatusText.Text = "↻ Kantelen om deze rand: beweeg (stappen van 15°) en klik, of typ de hoek + Enter. Esc breekt af.";
+            return;
+        }
+        _rotBody = h.Face.Body; _rotCopy = (Mods & ModifierKeys.Control) != 0;
+        _rotCentre = V(h.Point);
+        _rotFaceAxis = face.Surface is BrepPlane ? FaceGeometry.Normal(face) : Axes[2].Dir;
+        _rotBase = _doc; _lastRotate = null; _last = null; _lastMove = null; _typed = "";
+        _selected = null; _hover = null; UpdateHighlight();
+        MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = "";
+        SetRotateAxis(_rotFaceAxis);
+    }
+
+    private void SetRotateAxis(Vec3 axis)
+    {
+        _rotAxis = axis.Normalized(); _rotStage = 1; _rotOk = false; _rotAngle = 0;
+        if (_rotBase != null) Render(_rotBase);
+        string which = Axes.FirstOrDefault(a => Math.Abs(a.Dir.Dot(_rotAxis)) > 1 - 1e-9).Name ?? "as haaks op het vlak";
+        StatusText.Text = $"↻ Draaien{(_rotCopy ? " (kopie)" : "")} om de {which}: klik de beginrichting, of typ de hoek + Enter. Pijltjes: andere as. Esc breekt af.";
+        ShowProtractor(null, null);
+    }
+
+    private void EndRotate()
+    {
+        if (_rotStage == 0) return;
+        _rotStage = 0; _rotOk = false; _rotBase = null; _rotTilt = null;
+        MeasureUnit.Text = "mm";
+        ShowSketch([]);
+    }
+
+    /// <summary>Where the ray under the mouse meets the plane through the centre square to the axis.</summary>
+    private Vec3? OnRotatePlane(Point pos)
+    {
+        var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
+        if (ray == null) return null;
+        var org = V(ray.Origin); var dir = new Vec3(ray.Direction.X, ray.Direction.Y, ray.Direction.Z).Normalized();
+        double den = dir.Dot(_rotAxis);
+        if (Math.Abs(den) < 1e-9) return null;
+        return org + dir * ((_rotCentre - org).Dot(_rotAxis) / den);
+    }
+
+    /// <summary>The protractor: a circle round the centre in the plane of the turn, with the start direction and the one
+    /// now.</summary>
+    private void ShowProtractor(Vec3? start, Vec3? now)
+    {
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        var u = Math.Abs(_rotAxis.Dot(new Vec3(1, 0, 0))) < 0.9 ? new Vec3(1, 0, 0).Cross(_rotAxis).Normalized() : new Vec3(0, 1, 0).Cross(_rotAxis).Normalized();
+        var w = _rotAxis.Cross(u);
+        double pxPerM = (Screen(_rotCentre + u * 0.001) - Screen(_rotCentre)).Length * 1000;
+        double r = pxPerM > 1e-6 ? 70 / pxPerM : _modelSize / Display * 0.1;
+        var segs = new List<Vec3>();
+        for (int i = 0; i < 48; i++)
+        {
+            segs.Add(_rotCentre + (u * Math.Cos(i * Math.PI / 24) + w * Math.Sin(i * Math.PI / 24)) * r);
+            segs.Add(_rotCentre + (u * Math.Cos((i + 1) * Math.PI / 24) + w * Math.Sin((i + 1) * Math.PI / 24)) * r);
+        }
+        if (start is { } s0) { segs.Add(_rotCentre); segs.Add(_rotCentre + s0 * (r * 1.3)); }
+        if (now is { } n0) { segs.Add(_rotCentre); segs.Add(_rotCentre + n0 * (r * 1.3)); }
+        if (_sketch != null) { View.Children.Remove(_sketch); _sketch = null; }
+        _sketchShown = null;
+        var axisColor = Axes.FirstOrDefault(a => Math.Abs(a.Dir.Dot(_rotAxis)) > 1 - 1e-9).Color;
+        _sketch = new LinesVisual3D { Points = new Point3DCollection(segs.Select(v => TowardEye(P(v), 2e-3))), Color = axisColor == default ? SelectColor : axisColor, Thickness = 2.5 };
+        View.Children.Add(_sketch);
+    }
+
+    private void RotateTo(Point pos)
+    {
+        if (_rotStage == 0 || _rotBase == null || _typed.Length > 0) return;
+        if (OnRotatePlane(pos) is not { } p) return;
+        var v = p - _rotCentre; v -= _rotAxis * v.Dot(_rotAxis);
+        if (v.Length < 1e-9) return;
+        v = v.Normalized();
+        if (_rotStage == 1) { ShowProtractor(v, null); return; }
+        // the angle from the start direction, counter-clockwise round the axis; near a multiple of 15°: that
+        double deg = Math.Atan2(_rotRef.Cross(v).Dot(_rotAxis), _rotRef.Dot(v)) * 180 / Math.PI;
+        double snapped = Math.Round(deg / 15) * 15;
+        deg = Math.Abs(deg - snapped) < 2.5 ? snapped : Math.Round(deg * 2) / 2;
+        _rotAngle = deg * Math.PI / 180;
+        MeasureBox.Text = deg.ToString("0.#", CultureInfo.CurrentCulture);
+        ShowProtractor(_rotRef, new BrepTransform.Turn(new Vec3(0, 0, 0), _rotAxis, _rotAngle).Dir(_rotRef));
+        try
+        {
+            var doc = _rotTilt is { } tf ? _rotBase.Tilt(tf, _rotCentre, _rotAxis, _rotAngle, checkCrossing: false).Doc
+                : _rotBase.RotateBody(_rotBody, _rotCentre, _rotAxis, _rotAngle, _rotCopy).Doc;
+            _rotOk = true;
+            Render(doc);
+            StatusText.Text = $"↻ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 && deg != 0 ? " · 🎯 15°-stap" : "")} · klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.";
+        }
+        catch (PushPullException ex) { _rotOk = false; StatusText.Text = "⛔ " + ex.Message; }
+    }
+
+    private void RotateClick(Point pos)
+    {
+        if (_rotStage == 1)
+        {
+            if (OnRotatePlane(pos) is not { } p) return;
+            var v = p - _rotCentre; v -= _rotAxis * v.Dot(_rotAxis);
+            if (v.Length < 1e-7) return;
+            _rotRef = v.Normalized(); _rotStage = 2;
+            StatusText.Text = "↻ Beweeg om te draaien; klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.";
+            return;
+        }
+        RotateTo(pos);
+        if (!_rotOk || Math.Abs(_rotAngle) < 1e-9 || _rotBase is not { } before) return;
+        var (b, c, a, ang, copy, tilt) = (_rotBody, _rotCentre, _rotAxis, _rotAngle, _rotCopy, _rotTilt);
+        EndRotate();
+        ApplyRotate(before, b, c, a, ang, copy, replaceLast: false, tilt);
+    }
+
+    private void ApplyRotate(SketchDocument before, int body, Vec3 centre, Vec3 axis, double angle, bool copy, bool replaceLast, FaceRef? tilt = null)
+    {
+        double deg = angle * 180 / Math.PI;
+        try
+        {
+            var doc = tilt is { } tf ? before.Tilt(tf, centre, axis, angle).Doc : before.RotateBody(body, centre, axis, angle, copy).Doc;
+            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            else Commit(before, doc);
+            _lastRotate = (before, body, centre, axis, copy, Math.Sign(angle) == 0 ? 1 : Math.Sign(angle), tilt);
+            _last = null; _lastMove = null; _selected = null;
+            Render();
+            MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = deg.ToString("0.#", CultureInfo.CurrentCulture);
+            StatusText.Text = $"✅ {(tilt != null ? "Gekanteld" : copy ? "Gedraaide kopie" : "Gedraaid")}: {deg.ToString("0.#", CultureInfo.CurrentCulture)}°. Typ een andere hoek + Enter om het aan te passen.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"rotate {(tilt is { } lt ? $"face {lt.Face} of" : "")} body {body}{(copy ? " (copy)" : "")} {deg:0.###}° round ({axis.X:0.###},{axis.Y:0.###},{axis.Z:0.###}) at ({centre.X * Display:0.###},{centre.Y * Display:0.###},{centre.Z * Display:0.###}): ok"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+        }
+    }
+
+    // ------------------------------------------------------------------ rounding sharp edges (as DesignSpark)
+
+    /// <summary>The edges chosen to round (one body), before the radius is given.</summary>
+    private (int Body, List<int> Edges)? _roundSel;
+
+    /// <summary>The edge clicked to give the radius with the mouse (the chosen ones go with it), the radius now (metres)
+    /// and whether it works.</summary>
+    private (int Body, int Edge)? _roundEdge;
+    private double _roundRadius;
+    private bool _roundOk;
+
+    /// <summary>The last rounding made (to change its radius by typing another one).</summary>
+    private (SketchDocument Before, int Body, List<int> Edges, double Radius)? _lastRound;
+
+    /// <summary>The chosen edges (and the one under the mouse) shown.</summary>
+    private void ShowRoundEdges(int? hoverBody = null, int? hoverEdge = null)
+    {
+        if (_doc == null) return;
+        var lines = new List<Vec3>();
+        void AddEdge(int body, int edge)
+        {
+            var pts = FaceGeometry.EdgePoints(_doc.Bodies[body], _doc.Bodies[body].Edges[edge]);
+            for (int i = 0; i + 1 < pts.Count; i++) { lines.Add(pts[i]); lines.Add(pts[i + 1]); }
+        }
+        if (_roundSel is { } sel) foreach (int e in sel.Edges) AddEdge(sel.Body, e);
+        if (hoverBody is int hb && hoverEdge is int he) AddEdge(hb, he);
+        if (_sketch != null) { View.Children.Remove(_sketch); _sketch = null; }
+        _sketchShown = null;
+        if (lines.Count == 0) return;
+        var pts3 = new Point3DCollection(lines.Select(v => TowardEye(P(v), 2e-3)));
+        _sketch = new LinesVisual3D { Points = pts3, Color = SelectColor, Thickness = 3.5 };
+        View.Children.Add(_sketch);
+    }
+
+    private string RoundSelText() => _roundSel is { } sel && sel.Edges.Count > 0
+        ? $"{sel.Edges.Count} {(sel.Edges.Count == 1 ? "rand" : "randen")} gekozen · klik een rand om de straal met de muis te geven, of typ de straal + Enter · "
+        : "";
+
+    private void HoverRound((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        var e = EdgeAt(hit, pos);
+        ShowRoundEdges(e?.Body, e?.Edge);
+        StatusText.Text = "◠ " + RoundSelText() + (e is { } he && _doc!.Bodies[he.Body].Edges[he.Edge].Curve is not BrepLine
+            ? "alleen rechte randen kunnen (nog) afgerond worden."
+            : "klik een rand · Shift: rand erbij/eraf · Ctrl: alle randen van het vlak · Ctrl+Shift: alle randen van het lichaam.");
+    }
+
+    /// <summary>A click with ◠: Shift toggles an edge, Ctrl takes all edges of the face (with Shift: of the body), a plain
+    /// click on an edge starts giving the radius with the mouse.</summary>
+    private void StartRound((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (_doc == null || hit is not { } h) return;
+        var body = _doc.Bodies[h.Face.Body];
+        bool shift = (Mods & ModifierKeys.Shift) != 0, ctrl = (Mods & ModifierKeys.Control) != 0;
+        bool Straight(int e) => body.Edges[e].Curve is BrepLine && body.Edges[e].Start >= 0;
+        var sel = _roundSel is { } s0 && s0.Body == h.Face.Body ? s0.Edges : [];
+        if (ctrl)
+        {
+            var add = (shift ? Enumerable.Range(0, body.Edges.Count) : body.Faces[h.Face.Face].Loops.SelectMany(l => l).Select(c => c.Edge)).Where(Straight);
+            _roundSel = (h.Face.Body, sel.Union(add).ToList());
+            _lastRound = null;
+            ShowRoundEdges();
+            StatusText.Text = "◠ " + RoundSelText();
+            return;
+        }
+        if (EdgeAt(hit, pos) is not { } e) return;
+        if (!Straight(e.Edge)) { StatusText.Text = "◠ Alleen een rechte rand kan (nog) afgerond worden."; return; }
+        if (shift)
+        {
+            var list = sel.ToList();
+            if (!list.Remove(e.Edge)) list.Add(e.Edge);
+            _roundSel = (e.Body, list);
+            _lastRound = null;
+            ShowRoundEdges();
+            StatusText.Text = "◠ " + (list.Count > 0 ? RoundSelText() : "Geen randen gekozen.");
+            return;
+        }
+        if (!sel.Contains(e.Edge)) _roundSel = (e.Body, sel.Append(e.Edge).ToList());
+        _roundEdge = e; _roundRadius = 0; _roundOk = false; _typed = "";
+        _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
+        UpdateHighlight();
+        ShowRoundEdges();
+        MeasureLabel.Text = "Straal"; MeasureBox.Text = "";
+        StatusText.Text = "◠ Beweeg de muis van de rand af voor de straal; klik om vast te zetten, of typ de straal + Enter. Esc breekt af.";
+    }
+
+    /// <summary>A sharp straight edge between two flat faces within 6 pixels of the mouse (for ⇕: a click rounds it).</summary>
+    private (int Body, int Edge)? SharpEdgeNear((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (_doc == null || EdgeAt(hit, pos) is not { } e) return null;
+        var body = _doc.Bodies[e.Body];
+        if (body.Edges[e.Edge].Curve is not BrepLine || ScreenDistanceToEdge(body, e.Edge, pos) > 6) return null;
+        var faces = Enumerable.Range(0, body.Faces.Count).Where(f => body.Faces[f].Loops.Any(l => l.Any(c => c.Edge == e.Edge))).ToList();
+        if (faces.Count != 2 || faces.Any(f => body.Faces[f].Surface is not BrepPlane)) return null;
+        double cos = FaceGeometry.Normal(body.Faces[faces[0]]).Dot(FaceGeometry.Normal(body.Faces[faces[1]]));
+        return cos > 1 - 1e-6 ? null : e;
+    }
+
+    private void EndRound()
+    {
+        HideTag();
+        _roundEdge = null; _roundOk = false; _roundSel = null;
+        ShowSketch([]);
+    }
+
+    /// <summary>The radius as far as the mouse (on the face under it) is from the clicked edge, in steps of 0.1 mm;
+    /// shown.</summary>
+    private void RoundTo(Point pos)
+    {
+        if (_roundEdge is not { } re || _roundSel is not { } sel || _doc == null || _typed.Length > 0) return;
+        var body = _doc.Bodies[re.Body];
+        var ed = body.Edges[re.Edge];
+        Vec3 a = body.Vertices[ed.Start], ab = body.Vertices[ed.End] - a;
+        if (FaceAt(pos) is not { } h) return;
+        var p = V(h.Point);
+        double t = (p - a).Dot(ab) / ab.Dot(ab);
+        double r = Math.Round((a + ab * t - p).Length * Display * 10) / 10 / Display;
+        if (r < 1e-7) { _roundOk = false; Render(); MeasureBox.Text = "0"; return; }
+        if (Math.Abs(r - _roundRadius) < 1e-12 && _roundOk) return;
+        _roundRadius = r;
+        MeasureBox.Text = Mm(r);
+        try
+        {
+            var (doc, _) = _doc.RoundEdges(sel.Body, sel.Edges, r);
+            _roundOk = true;
+            Render(doc);
+            StatusText.Text = $"◠ Straal {Mm(r)} mm · klik om vast te zetten, of typ de straal + Enter. Esc breekt af.";
+            ShowTag("R " + Mm(r) + " mm", pos);
+        }
+        catch (PushPullException ex) { _roundOk = false; Render(); StatusText.Text = "⛔ " + ex.Message; }
+    }
+
+    private void FinishRound()
+    {
+        if (_roundSel is not { } sel || _doc is not { } before || !_roundOk) return;
+        double r = _roundRadius;
+        EndRound();
+        ApplyRound(before, sel.Body, sel.Edges, r, replaceLast: false);
+    }
+
+    private void ApplyRound(SketchDocument before, int body, List<int> edges, double radius, bool replaceLast)
+    {
+        string which = edges.Count == 1 ? $"edge {edges[0]}" : $"{edges.Count} edges";
+        try
+        {
+            var (doc, faces) = before.RoundEdges(body, edges, radius);
+            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            else Commit(before, doc);
+            _last = null; _lastMove = null;
+            _lastRound = (before, body, edges, radius);
+            _selected = faces[0];
+            Render();
+            MeasureLabel.Text = "Straal"; MeasureBox.Text = Mm(radius);
+            StatusText.Text = $"✅ {(edges.Count == 1 ? "Afgerond" : $"{edges.Count} randen afgerond")} met R {Mm(radius)} mm. Typ een andere straal + Enter om het aan te passen.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"round {which} of body {body} r {radius * Display:0.###} mm: ok, {faces.Count} new faces"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log(string.Create(CultureInfo.InvariantCulture, $"round {which} of body {body} r {radius * Display:0.###} mm: {ex.Message}"));
+        }
+    }
+
+    // ------------------------------------------------------------------ offset (as in SketchUp)
+
+    /// <summary>The face being offset (after the first click), the distance now (metres) and whether it works.</summary>
+    private FaceRef? _offsetFace;
+    private double _offsetDist;
+    private bool _offsetOk;
+
+    /// <summary>The last offset (to change it by typing another distance).</summary>
+    private (SketchDocument Before, FaceRef Face, double Dist)? _lastOffset;
+
+    private void StartOffset(FaceRef f)
+    {
+        _offsetFace = f; _offsetDist = 0; _offsetOk = false; _typed = "";
+        _selected = null; _hover = null; _lastOffset = null;
+        UpdateHighlight();
+        MeasureLabel.Text = "Afstand"; MeasureUnit.Text = "mm";
+        MeasureBox.Text = "0";
+        StatusText.Text = "▣ Beweeg de muis naar binnen; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.";
+    }
+
+    private void EndOffset()
+    {
+        if (_offsetFace == null) return;
+        _offsetFace = null; _offsetOk = false;
+        ShowSketch([]);
+    }
+
+    /// <summary>The offset as far in as the mouse is from the face's outer edge (in steps of 0.1 mm), shown as a sketch.</summary>
+    private void OffsetTo(Point pos)
+    {
+        if (_offsetFace is not { } f || _doc == null || _typed.Length > 0) return;
+        if (OnPlane(f, pos) is not { } p) return;
+        var body = _doc.Bodies[f.Body];
+        var face = body.Faces[f.Face];
+        _offsetOk = false;
+        if (!PushPullMe.Core.Drawing.Contains(body, f.Face, p)) { ShowSketch([]); MeasureBox.Text = "0"; StatusText.Text = "▣ Beweeg de muis naar binnen, op het vlak."; return; }
+        var outline = FaceGeometry.LoopPoints(body, face.Loops[0]);
+        double d = double.MaxValue;
+        for (int i = 0; i < outline.Count; i++)
+        {
+            Vec3 a = outline[i], ab = outline[(i + 1) % outline.Count] - a;
+            double t = ab.Dot(ab) < 1e-24 ? 0 : Math.Clamp((p - a).Dot(ab) / ab.Dot(ab), 0, 1);
+            d = Math.Min(d, (a + ab * t - p).Length);
+        }
+        _offsetDist = Math.Round(d * Display * 10) / 10 / Display;
+        MeasureBox.Text = Mm(_offsetDist);
+        try
+        {
+            var (corners, circle) = PushPullMe.Core.Drawing.OffsetOutline(body, f.Face, _offsetDist);
+            var n = NormalOf(f);
+            var pts = corners ?? Enumerable.Range(0, 60).Select(i => circle!.Centre + (circle.XAxis * Math.Cos(i * Math.PI / 30) + circle.Normal.Cross(circle.XAxis) * Math.Sin(i * Math.PI / 30)) * circle.Radius).ToList();
+            ShowSketch(pts, n, closed: true);
+            _offsetOk = true;
+            StatusText.Text = $"▣ {Mm(_offsetDist)} mm naar binnen · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.";
+        }
+        catch (PushPullException ex)
+        {
+            ShowSketch([]);
+            StatusText.Text = "⛔ " + ex.Message;
+        }
+    }
+
+    private void FinishOffset()
+    {
+        if (_offsetFace is not { } f || _doc is not { } before) return;
+        if (!_offsetOk) return;
+        double dist = _offsetDist;
+        EndOffset();
+        ApplyOffset(before, f, dist, replaceLast: false);
+    }
+
+    private void ApplyOffset(SketchDocument before, FaceRef f, double dist, bool replaceLast)
+    {
+        try
+        {
+            var (doc, inner) = before.Offset(f, dist);
+            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            else Commit(before, doc);
+            _last = null; _lastMove = null;
+            _lastOffset = (before, f, dist);
+            _selected = inner; _lastDrawn = inner;
+            Render();
+            MeasureBox.Text = Mm(dist);
+            StatusText.Text = $"✅ Nieuwe rand {Mm(dist)} mm naar binnen. Typ een andere afstand + Enter om het aan te passen, of kies ⇕ (P) om het binnenvlak te verschuiven.";
+            Log(string.Create(CultureInfo.InvariantCulture, $"offset face {f.Face} {dist * Display:0.###} mm: ok, new face {inner.Face}"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast("⛔ Dat lukt niet", ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log(string.Create(CultureInfo.InvariantCulture, $"offset face {f.Face} {dist * Display:0.###} mm: {ex.Message}"));
+        }
+    }
+
+    // ------------------------------------------------------------------ keyboard: tools, undo, the measurements box
+
+    private void Window_TextInput(object sender, TextCompositionEventArgs e)
+    {
+        if (e.Text.Length == 1 && TypeChar(e.Text[0])) e.Handled = true;
+    }
+
+    /// <summary>A typed character for the measurements box; whether it was taken.</summary>
+    private bool TypeChar(char ch)
+    {
+        if (_doc == null) return false;
+        // drawing: before the first click (over a face) or after it
+        bool drawing = DrawMode && (_drawFace != null || _drawHover != null);
+        if (char.IsDigit(ch) || ch == ',' || ch == '.' || (ch == '-' && _typed.Length == 0 && !drawing) || (ch == ';' && drawing && RectMode && !_typed.Contains(';')))
+        {
+            if (_dragFace == null && _last == null && _movePick == null && _lastMove == null && _tapeEdge == null && _offsetFace == null && _lastOffset == null && _roundEdge == null && _roundSel == null && _lastRound == null && _rotStage == 0 && _lastRotate == null && _scStage == 0 && _lastScale == null && _polyFace == null && !(_arcStage == 2 && !_arc3) && _swFace == null && _rrStage != 2 && _fmStage != 2 && !drawing) return false;
+            _typed += ch;
+            MeasureBox.Text = _typed;
+            return true;
+        }
+        return false;
+    }
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+        if (ctrl && e.Key == Key.Z) { Undo(); e.Handled = true; return; }
+        if (ctrl && e.Key == Key.Y) { Redo(); e.Handled = true; return; }
+        if (ctrl && e.Key == Key.O) { _ = OpenDialog(); e.Handled = true; return; }
+        if (ctrl && e.Key == Key.S) { Save_Click(this, new RoutedEventArgs()); e.Handled = true; return; }
+        if (ctrl) return;
+        switch (e.Key)
+        {
+            case Key.Escape:
+                if (_dragFace != null) { EndDrag(); _typed = ""; Render(); StatusText.Text = "Afgebroken."; }
+                else if (_movePick != null) { EndMove(); _typed = ""; Render(); StatusText.Text = "Afgebroken."; }
+                else if (_tapeStart != null) { EndTape(); _typed = ""; MeasureBox.Text = ""; StatusText.Text = "Afgebroken."; }
+                else if (_offsetFace != null) { EndOffset(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
+                else if (_swFace != null || _rrFace != null) { EndSweep(); EndRotRect(); EndFollow(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
+                else if (_arcFace != null) { EndArc(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
+                else if (_polyFace != null) { EndPolygon(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
+                else if (_scStage > 0) { EndScale(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = "Afgebroken."; }
+                else if (_rotStage > 0) { EndRotate(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = "Afgebroken."; }
+                else if (_roundEdge != null || _roundSel != null) { EndRound(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = "Afgebroken."; }
+                else if (_drawFace != null)
+                {
+                    // (a line: only the piece at the mouse goes; the ones clicked stay, as loose lines, as in SketchUp)
+                    int kept = LineMode ? _chainLines.Count : 0;
+                    EndDraw(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight();
+                    StatusText.Text = LineMode ? (kept > 0 ? $"Klaar met de lijn: {kept} {(kept == 1 ? "losse lijn" : "losse lijnen")}. Ctrl+Z haalt er één weg." : "Klaar met de lijn.") : "Afgebroken.";
+                }
+                else if (_lasso != null) { EndLasso(); StatusText.Text = "Afgebroken."; }
+                else if (_fmFace != null) { EndFollow(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = "Afgebroken."; }
+                else if (_unionFirst != null) { _unionFirst = null; _selected = null; UpdateHighlight(); StatusText.Text = "Afgebroken."; }
+                else if (_typed.Length > 0) { _typed = ""; MeasureBox.Text = ""; }
+                else if (_multi != null) { _multi = null; _selected = null; UpdateHighlight(); StatusText.Text = "Keuze leeg."; }
+                e.Handled = true;
+                break;
+            case Key.Back when _typed.Length > 0:
+                _typed = _typed[..^1];
+                MeasureBox.Text = _typed;
+                e.Handled = true;
+                break;
+            case Key.Enter or Key.Return when _typed.Length > 0:
+                TypedDistance();
+                e.Handled = true;
+                break;
+            case Key.P when _typed.Length == 0:
+                PushTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.R when _typed.Length == 0:
+                RectTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.C when _typed.Length == 0:
+                CircleTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.B when _typed.Length == 0:
+                PaintTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.T when _typed.Length == 0:
+                TapeTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.Delete when TapeMode && _typed.Length == 0:
+                ClearGuides(); EndTape();
+                StatusText.Text = "🧹 Alle hulplijnen zijn weg.";
+                Log("guides cleared");
+                e.Handled = true;
+                break;
+            case Key.S when _typed.Length == 0:
+                ScaleTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.Up or Key.Down when PolygonMode:
+                // more or fewer corners (3 to 24)
+                _polySides = Math.Clamp(_polySides + (e.Key == Key.Up ? 1 : -1), 3, 24);
+                if (_polyFace != null) PolygonTo(Mouse.GetPosition(View.Viewport));
+                else StatusText.Text = $"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): klik het middelpunt op een plat vlak.";
+                e.Handled = true;
+                break;
+            case Key.Right or Key.Left or Key.Up or Key.Down when _scStage > 0:
+                // only along the red, green or blue axis; down: all directions again
+                _scAxis = e.Key switch { Key.Right => Axes[0].Dir, Key.Left => Axes[1].Dir, Key.Up => Axes[2].Dir, _ => null };
+                ScaleTo(Mouse.GetPosition(View.Viewport));
+                e.Handled = true;
+                break;
+            case Key.Q when _typed.Length == 0:
+                RotateTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.Right or Key.Left or Key.Up or Key.Down when _rotStage > 0 && _rotTilt == null:
+                // the axis to turn round (as SketchUp: right red, left green, up blue), down: square to the face again
+                SetRotateAxis(e.Key switch { Key.Right => Axes[0].Dir, Key.Left => Axes[1].Dir, Key.Up => Axes[2].Dir, _ => _rotFaceAxis });
+                e.Handled = true;
+                break;
+            case Key.K when _typed.Length == 0:
+                RoundTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.F when _typed.Length == 0:
+                OffsetTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.M when _typed.Length == 0:
+                MoveTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.Right or Key.Left or Key.Up or Key.Down when LineMode && _drawFace != null:
+                _lineAxis = e.Key switch { Key.Right => _lineAxis == 0 ? null : 0, Key.Left => _lineAxis == 1 ? null : 1, Key.Up => _lineAxis == 2 ? null : 2, _ => null };
+                DrawTo(Mouse.GetPosition(View.Viewport));
+                e.Handled = true;
+                break;
+            case Key.Right or Key.Left or Key.Up or Key.Down when _movePick != null:
+                // an axis to hold to (as in SketchUp: right red, left green, up blue), down lets go
+                _moveAxis = e.Key switch { Key.Right => _moveAxis == 0 ? null : 0, Key.Left => _moveAxis == 1 ? null : 1, Key.Up => _moveAxis == 2 ? null : 2, _ => null };
+                MoveTo(Mouse.GetPosition(View.Viewport));
+                e.Handled = true;
+                break;
+            case Key.E when _typed.Length == 0:
+                EraserTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.G when _typed.Length == 0:
+                PolygonTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.A when _typed.Length == 0:
+                ArcTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.L when _typed.Length == 0:
+                LineTool.IsChecked = true; e.Handled = true;
+                break;
+            case Key.Space when _typed.Length == 0:
+                SelectTool.IsChecked = true; e.Handled = true;
+                break;
+        }
+    }
+
+    /// <summary>A typed distance: for the push/pull in progress (in the direction it was moving), or to change the last
+    /// one.</summary>
+    private void TypedDistance()
+    {
+        if (DrawMode && (_drawFace != null || _drawHover != null))
+        {
+            string typed = _typed;
+            _typed = "";
+            TypedDraw(typed);
+            return;
+        }
+        string t = _typed.Replace(',', '.');
+        _typed = "";
+        if (!double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out double mm) || mm == 0) { MeasureBox.Text = ""; return; }
+        double dist = mm / Display;
+        if (_tapeEdge != null) { TypedTape(mm); return; }
+        if (_swFace is { } sface && _doc is { } sdoc)
+        {
+            if (_swStage == 1)
+            {
+                // the radius: the start the way the mouse points (or along the face's axis)
+                var dir = _swDir.Length > 1e-12 ? _swDir : RectAxis(NormalOf(sface));
+                _swStart = _swCentre + dir * (Math.Abs(mm) / Display); _swStage = 2; _swAngle = 0;
+                StatusText.Text = $"{SweepIcon} Beweeg voor de hoek en klik, of typ de hoek + Enter. Esc breekt af.";
+                MeasureLabel.Text = "Hoek"; MeasureUnit.Text = "°"; MeasureBox.Text = "";
+                return;
+            }
+            double ang = Math.Abs(mm) * Math.PI / 180 * (_swAngle < 0 ? -1 : 1) * (mm < 0 ? -1 : 1);
+            var (sc, ss, pie) = (_swCentre, _swStart, PieMode);
+            EndSweep();
+            ApplySweep(sdoc, sface, sc, ss, ang, pie);
+            return;
+        }
+        if (_fmFace is { } fface && _fmStage == 2 && _fmBase is { } fdoc)
+        {
+            var (fp, fa) = (_fmAxisP, _fmAxisDir);
+            EndFollow();
+            ApplyFollow(fdoc, fface, fp, fa, Math.Abs(mm) * Math.PI / 180);
+            return;
+        }
+        if (_rrFace is { } rface && _rrStage == 2 && _doc is { } rdoc)
+        {
+            double wdt = Math.Abs(mm) / Display * (_rrWidth < 0 ? -1 : 1) * (mm < 0 ? -1 : 1);
+            var (rrA, rrB) = (_rrA, _rrB);
+            EndRotRect();
+            ApplyRotRect(rdoc, rface, rrA, rrB, wdt);
+            return;
+        }
+        if (_arcFace is { } aface && _arcStage == 2 && !_arc3 && _doc is { } adoc)
+        {
+            // the bulge (mm), on the side the mouse is on now
+            double bulge = Math.Abs(mm) / Display * (_arcBulge < 0 ? -1 : 1) * (mm < 0 ? -1 : 1);
+            var (aa, ab) = (_arcA, _arcB);
+            EndArc();
+            ApplyArc(adoc, aface, aa, ab, bulge);
+            return;
+        }
+        if (_polyFace is { } pface && _doc is { } pdoc)
+        {
+            // the radius (mm), the first corner the way the mouse points now (or along the face's axis)
+            var dir = _polyDir.Length > 1e-12 ? _polyDir : RectAxis(NormalOf(pface));
+            var c = _polyCentre;
+            EndPolygon();
+            ApplyPolygon(pdoc, pface, c, dir, Math.Abs(mm) / Display);
+            return;
+        }
+        if (_scStage > 0 && _scBase is { } scBefore)
+        {
+            var (sb, sf, sa, sc) = (_scBody, _scFixed, _scAxis, _scCopy);
+            EndScale();
+            ApplyScale(scBefore, sb, sf, Math.Abs(mm), sa, sc, replaceLast: false);
+            return;
+        }
+        if (_dragFace == null && _movePick == null && _lastScale is { } lsc)
+        {
+            ApplyScale(lsc.Before, lsc.Body, lsc.Fixed, Math.Abs(mm), lsc.Along, lsc.Copy, replaceLast: true);
+            return;
+        }
+        if (_rotStage > 0 && _rotBase is { } rotBefore)
+        {
+            // degrees (the way the mouse turns it now, if it does)
+            double ang = Math.Abs(mm) * Math.PI / 180 * (_rotStage == 2 && _rotAngle < 0 ? -1 : 1) * (mm < 0 ? -1 : 1);
+            var (rb0, rc, ra, rcopy, rtilt) = (_rotBody, _rotCentre, _rotAxis, _rotCopy, _rotTilt);
+            EndRotate();
+            ApplyRotate(rotBefore, rb0, rc, ra, ang, rcopy, replaceLast: false, rtilt);
+            return;
+        }
+        if (_dragFace == null && _movePick == null && _lastRotate is { } lrot)
+        {
+            ApplyRotate(lrot.Before, lrot.Body, lrot.Centre, lrot.Axis, Math.Abs(mm) * Math.PI / 180 * lrot.Sign * (mm < 0 ? -1 : 1), lrot.Copy, replaceLast: true, lrot.Tilt);
+            return;
+        }
+        if (_roundSel is { } rs && rs.Edges.Count > 0 && _doc is { } rb) { EndRound(); ApplyRound(rb, rs.Body, rs.Edges, Math.Abs(dist), replaceLast: false); return; }
+        if (_dragFace == null && _movePick == null && _lastRound is { } lr) { ApplyRound(lr.Before, lr.Body, lr.Edges, Math.Abs(dist), replaceLast: true); return; }
+        if (_offsetFace is { } of && _doc is { } ob) { EndOffset(); ApplyOffset(ob, of, Math.Abs(dist), replaceLast: false); return; }
+        if (_dragFace == null && _movePick == null && _lastOffset is { } lo) { ApplyOffset(lo.Before, lo.Face, Math.Abs(dist), replaceLast: true); return; }
+        if (_movePick is { } mp && _moveBase is { } mb)
+        {
+            // along the way it is going now (or the axis held)
+            var d = _moveAxis is int ax ? Axes[ax].Dir * (_moveOffset.Dot(Axes[ax].Dir) < 0 ? -1 : 1) : _moveOffset.Length > 1e-12 ? _moveOffset.Normalized() : default;
+            if (d.Length < 0.5) { StatusText.Text = "✥ Beweeg eerst de muis in de richting om te verplaatsen."; return; }
+            EndMove();
+            ApplyMove(mb, mp.Body, mp.Pick, d * Math.Abs(dist), replaceLast: false);
+            return;
+        }
+        if (_dragFace == null && _lastMove is { } lm)
+        {
+            ApplyMove(lm.Before, lm.Body, lm.Pick, lm.Dir * (dist < 0 ? -1 : 1) * Math.Abs(dist), replaceLast: true);
+            return;
+        }
+        if (_dragFace is { } f && _dragBase is { } before)
+        {
+            // (a pin, hole or rounding: the typed value is its new radius)
+            if (_dragRadius && !RadiusDistance(before, f, mm, out dist)) return;
+            else if (!_dragRadius && _dragDist < 0 && dist > 0) dist = -dist;
+            EndDrag();
+            Apply(before, f, dist, replaceLast: false);
+        }
+        else if (_last is { } last)
+        {
+            if (HasRadius(last.Before, last.Face)) { if (!RadiusDistance(last.Before, last.Face, mm, out dist)) return; }
+            else if (last.Dist < 0 && dist > 0) dist = -dist;
+            Apply(last.Before, last.Face, dist, replaceLast: true);
+        }
+    }
+
+    /// <summary>The push/pull distance that gives a pin, hole or rounding a radius of <paramref name="radiusMm"/> mm; false (with the
+    /// reason shown) when that cannot be.</summary>
+    private bool RadiusDistance(SketchDocument doc, FaceRef f, double radiusMm, out double dist)
+    {
+        dist = 0;
+        if (radiusMm <= 0) { StatusText.Text = "⛔ Een straal moet groter dan 0 zijn."; MeasureBox.Text = ""; return false; }
+        try { dist = PushPullMe.Core.PushPull.DistanceForRadius(doc.Bodies[f.Body], f.Face, radiusMm / Display); return true; }
+        catch (PushPullException ex) { StatusText.Text = "⛔ " + ex.Message; return false; }
+    }
+
+    private static bool TryMm(string s, out double mm) =>
+        double.TryParse(s.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out mm);
+
+    // ------------------------------------------------------------------ messages
+
+    private DispatcherTimer? _toastTimer;
+
+    private void ShowToast(string title, string text)
+    {
+        ToastTitle.Text = title; ToastText.Text = text;
+        Toast.Visibility = Visibility.Visible;
+        _toastTimer?.Stop();
+        _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        _toastTimer.Tick += (_, _) => { Toast.Visibility = Visibility.Collapsed; _toastTimer?.Stop(); };
+        _toastTimer.Start();
+    }
+
+    /// <summary>The session log: PPM_LOG, or else %LOCALAPPDATA%PushPullMesessie.log (the last session; it starts empty).</summary>
+    private static readonly string? LogPath = Environment.GetEnvironmentVariable("PPM_LOG") ?? SessionLog();
+
+    private static string? SessionLog()
+    {
+        try
+        {
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "sessie.log");
+            File.WriteAllText(path, $"PushPullMe, sessie van {DateTime.Now:yyyy-MM-dd HH:mm}\n");
+            return path;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    private static void Log(string what)
+    {
+        if (LogPath == null) return;
+        try { File.AppendAllText(LogPath, $"[{DateTime.Now:HH:mm:ss}] {what}\n"); } catch (IOException) { }
+    }
+
+    // ------------------------------------------------------------------ test aid (no clicking in the user's window)
+
+    /// <summary>
+    /// PPM_OPEN=file: opens it; PPM_DRAW="rect:face:x,y,z:x,y,z;line:…" draws on faces of body 0 (corners or ends in mm);
+    /// PPM_PUSH="face:mm;face:mm" pushes/pulls those faces of body 0 one after the other (face "new" = the last drawn one, face
+    /// "top" = the largest flat face facing up); PPM_SAVE=file saves; PPM_SNAPSHOT=png renders the window to it and closes.
+    /// </summary>
+    private async Task TestAid()
+    {
+        if (Environment.GetEnvironmentVariable("PPM_OPEN") is not { Length: > 0 } open) return;
+        string? shot = Environment.GetEnvironmentVariable("PPM_SNAPSHOT");
+        var report = new System.Text.StringBuilder();
+        try
+        {
+            if (Environment.GetEnvironmentVariable("PPM_VIA_CONVERTER") == "1")
+            {
+                // as the user opens a mesh: in the converter's window (its own test aid, RSUI_* with RSUI_TAKE=1, does the
+                // work and hands over)
+                await Open(open);
+                report.AppendLine($"converter: {StatusText.Text}");
+            }
+            else await Load(open);
+            report.AppendLine($"open: {StatusText.Text}");
+            if (Environment.GetEnvironmentVariable("PPM_DRAW") is { Length: > 0 } draws && _doc != null)
+                foreach (var step in draws.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    // rect|line:face:x,y,z:x,y,z (mm)
+                    var parts = step.Split(':');
+                    int face = parts[1] == "top" ? TopFace() : int.Parse(parts[1]);
+                    Vec3 Pt(string s) { var c = s.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture) / Display).ToArray(); return new Vec3(c[0], c[1], c[2]); }
+                    var f = new FaceRef(0, face);
+                    var u = RectAxis(FaceGeometry.Normal(_doc!.Bodies[0].Faces[face]));
+                    DrawShape(_doc, f, Pt(parts[2]), Pt(parts[3]), u, parts[0]);
+                    report.AppendLine($"{step}: {StatusText.Text} | faces {_doc!.Bodies[0].Faces.Count}");
+                }
+            if (Environment.GetEnvironmentVariable("PPM_PUSH") is { Length: > 0 } pushes && _doc != null)
+                foreach (var step in pushes.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var parts = step.Split(':');
+                    int face = parts[0] == "top" ? TopFace() : parts[0] == "new" && _lastDrawn is { } ld ? ld.Face : int.Parse(parts[0]);
+                    double mm = double.Parse(parts[1], CultureInfo.InvariantCulture);
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    Apply(_doc!, new FaceRef(0, face), mm / Display, replaceLast: false);
+                    report.AppendLine($"push {face} {mm} mm ({sw.ElapsedMilliseconds} ms): {StatusText.Text} | faces {_doc!.Bodies[0].Faces.Count}, volume {_doc.Volume() * 1e9:0.###} mm³");
+                }
+            if (Environment.GetEnvironmentVariable("PPM_DRAG") is { Length: > 0 } drag && _doc != null)
+            {
+                // face:from:to (mm): the mouse grabs the middle of the face and moves along its normal in 0.25 mm steps,
+                // through the real hit tests (and the "gelijk met" snap), as dragging does; then the click to finish
+                var parts = drag.Split(':');
+                int face = parts[0] == "top" ? TopFace() : int.Parse(parts[0]);
+                double from = double.Parse(parts[1], CultureInfo.InvariantCulture), to = double.Parse(parts[2], CultureInfo.InvariantCulture);
+                PushTool.IsChecked = true;
+                await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                var fr = new FaceRef(0, face);
+                var tris = _doc.TrianglesOf(fr);
+                var mid = tris.Select(t => (t.A + t.B + t.C) * (1.0 / 3)).Aggregate((a, b) => a + b) * (1.0 / tris.Count);
+                var n = FaceGeometry.Normal(_doc.Bodies[0].Faces[face]);
+                StartDrag(fr, P(mid));
+                var seen = new List<string>();
+                for (double mm = from; from < to ? mm <= to + 1e-9 : mm >= to - 1e-9; mm += from < to ? 0.25 : -0.25)
+                {
+                    var pos = Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(mid + n * (mm / Display)));
+                    DragTo(pos);
+                    await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+                    string line = $"{_dragDist * Display:0.##} mm: {StatusText.Text}";
+                    if (seen.Count == 0 || seen[^1] != line) seen.Add(line);
+                }
+                foreach (var l in seen) report.AppendLine("drag " + l);
+                Finish(_dragDist);
+                report.AppendLine($"drag done: {StatusText.Text} | faces {_doc!.Bodies[0].Faces.Count}, volume {_doc.Volume() * 1e9:0.###} mm³");
+            }
+            if (Environment.GetEnvironmentVariable("PPM_SIM") is { Length: > 0 } sim && _doc != null)
+            {
+                await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                await Simulate(sim, report);
+                report.AppendLine($"sim done: faces {_doc!.Bodies[0].Faces.Count}, volume {_doc.Volume() * 1e9:0.###} mm³");
+            }
+            if (Environment.GetEnvironmentVariable("PPM_SAVE") is { Length: > 0 } save) { Save(save); report.AppendLine($"saved {save}"); }
+        }
+        catch (Exception ex) { report.AppendLine("error: " + ex); }
+        if (shot is { Length: > 0 })
+        {
+            File.WriteAllText(shot + ".txt", report.ToString());
+            await Snapshot(shot);
+        }
+    }
+
+    private int TopFace()
+    {
+        var body = _doc!.Bodies[0];
+        return Enumerable.Range(0, body.Faces.Count).Where(f => body.Faces[f].Surface is BrepPlane && FaceGeometry.Normal(body.Faces[f]).Z > 0.999)
+            .MaxBy(f => _doc.TrianglesOf(new FaceRef(0, f)).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length));
+    }
+
+    /// <summary>Renders the window's own content to a PNG and closes (no screen capture involved).</summary>
+    private async Task Snapshot(string path)
+    {
+        await RenderPng(path);
+        Close();
+    }
+
+    /// <summary>
+    /// PPM_SIM: mouse and keys played in this window, steps split by '|': "tool:R" (P, R, L, S), "move:x,y,z" and
+    /// "click:x,y,z" (a world point in mm, through the real hit tests), "type:text" (characters for the box), "enter",
+    /// "esc", "shot:file.png" (this window as it is now).
+    /// </summary>
+    private async Task Simulate(string script, System.Text.StringBuilder report)
+    {
+        foreach (var step in script.Split('|', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int colon = step.IndexOf(':');
+            string what = colon < 0 ? step : step[..colon], arg = colon < 0 ? "" : step[(colon + 1)..];
+            Point Screen() { var c = arg.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray(); return Viewport3DHelper.Point3DtoPoint2D(View.Viewport, new Point3D(c[0], c[1], c[2])); }
+            switch (what)
+            {
+                case "tool": (arg switch { "P" => PushTool, "R" => RectTool, "L" => LineTool, "C" => CircleTool, "E" => EraserTool, "M" => MoveTool, "T" => TapeTool, "B" => PaintTool, "F" => OffsetTool, "K" => RoundTool, "Q" => RotateTool, "S" => ScaleTool, "LASSO" => LassoTool, "G" => PolygonTool, "A" => ArcTool, "CARC" => CentreArcTool, "PIE" => PieTool, "RRECT" => RotRectTool, "ARC3" => Arc3Tool, "FOLLOW" => FollowTool, "UNION" => UnionTool, "MIRROR" => MirrorTool, _ => SelectTool }).IsChecked = true; break;
+                case "key": Window_PreviewKeyDown(this, new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(this)!, 0, Enum.Parse<Key>(arg)) { RoutedEvent = Keyboard.PreviewKeyDownEvent }); break;
+                case "move": MouseMoveAt(Screen()); break;
+                case "mods": _simMods = arg switch { "ctrl" => ModifierKeys.Control, "shift" => ModifierKeys.Shift, "ctrl+shift" => ModifierKeys.Control | ModifierKeys.Shift, _ => null }; break;
+                case "click": ClickAt(Screen()); break;
+                case "type": foreach (char ch in arg) TypeChar(ch); break;
+                case "enter": if (_typed.Length > 0) TypedDistance(); break;
+                case "esc": Window_PreviewKeyDown(this, new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(this)!, 0, Key.Escape) { RoutedEvent = Keyboard.PreviewKeyDownEvent }); break;
+                case "shot": await RenderPng(arg); break;
+                case "camera":
+                {
+                    // camera:x,y,z:dx,dy,dz (mm): where it stands and where it looks
+                    var parts = arg.Split(':').Select(p => p.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray()).ToArray();
+                    if (View.Camera is ProjectionCamera pc)
+                    {
+                        pc.Position = new Point3D(parts[0][0], parts[0][1], parts[0][2]);
+                        pc.LookDirection = new Vector3D(parts[1][0], parts[1][1], parts[1][2]);
+                        pc.UpDirection = new Vector3D(0, 0, 1);
+                    }
+                    break;
+                }
+                case "push":
+                {
+                    // push:face:mm (body 0)
+                    var parts = arg.Split(':');
+                    Apply(_doc!, new FaceRef(0, int.Parse(parts[0])), double.Parse(parts[1], CultureInfo.InvariantCulture) / Display, replaceLast: false);
+                    break;
+                }
+                case "orbit":
+                {
+                    // dx,dy pixels, in steps of 5 as a mouse would, around the middle of the view
+                    var d = arg.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                    if (View.Camera is ProjectionCamera oc) _orbitPivot = oc.Position + oc.LookDirection;
+                    int steps = (int)Math.Ceiling(Math.Max(Math.Abs(d[0]), Math.Abs(d[1])) / 5);
+                    for (int i = 0; i < steps; i++) Orbit(d[0] / steps, d[1] / steps);
+                    if (View.Camera is ProjectionCamera c2) report.AppendLine($"  camera look {c2.LookDirection.X:0.00},{c2.LookDirection.Y:0.00},{c2.LookDirection.Z:0.00} up {c2.UpDirection}");
+                    break;
+                }
+            }
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+            report.AppendLine($"{step} → [{MeasureLabel.Text} {MeasureBox.Text}] {StatusText.Text}");
+        }
+    }
+
+    private async Task RenderPng(string path)
+    {
+        await Task.Delay(400);
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        var root = (FrameworkElement)Content;
+        double w = root.ActualWidth + root.Margin.Left + root.Margin.Right, h = root.ActualHeight + root.Margin.Top + root.Margin.Bottom;
+        var bmp = new System.Windows.Media.Imaging.RenderTargetBitmap((int)w, (int)h, 96, 96, PixelFormats.Pbgra32);
+        var bg = new DrawingVisual();
+        using (var dc = bg.RenderOpen()) dc.DrawRectangle(Background, null, new Rect(0, 0, w, h));
+        bmp.Render(bg);
+        bmp.Render(root);
+        var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bmp));
+        using (var f = File.Create(path)) enc.Save(f);
+    }
+}

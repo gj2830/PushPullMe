@@ -1,0 +1,15 @@
+# build output
+bin/
+obj/
+.vs/
+*.user
+
+# generated files and test files (not public)
+output/
+test/
+
+# notes (kept privately)
+NOTES.md
+PLAN.md
+SKETCHUP_TOOLS.md
+OVERDRACHT.md

@@ -1,0 +1,3 @@
+[submodule "StlConverter"]
+	path = StlConverter
+	url = https://github.com/gj2830/StlConverter.git

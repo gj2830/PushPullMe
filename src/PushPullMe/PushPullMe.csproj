@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- recognising a mesh runs its bodies in parallel (as in the converter) -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- the icon (Assets/pushpullme.ico, after the user's design; drawn by tools/icon.py) -->
+    <ApplicationIcon>Assets\pushpullme.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\pushpullme.ico" />
+    <Resource Include="Assets\pushpullme.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="HelixToolkit.Wpf" Version="3.1.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
+    <!-- the converter's window, opened here for a mesh (STL/3MF); its result is taken over in memory -->
+    <ProjectReference Include="$(RsConverterDir)tools\RsConverterUI\RsConverterUI.csproj" />
+  </ItemGroup>
+
+</Project>

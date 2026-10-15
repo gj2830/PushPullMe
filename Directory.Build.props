@@ -1,0 +1,9 @@
+<Project>
+  <!-- Where the converter (StlConverter) is: next to this folder (../RsCOnverter or ../StlConverter, as it is
+       developed), or else the git submodule in it (StlConverter/, as a clone of the repository gets it). -->
+  <PropertyGroup>
+    <RsConverterDir Condition="Exists('$(MSBuildThisFileDirectory)..\RsCOnverter\src\RsDocx.Core\RsDocx.Core.csproj')">$(MSBuildThisFileDirectory)..\RsCOnverter\</RsConverterDir>
+    <RsConverterDir Condition="'$(RsConverterDir)' == '' And Exists('$(MSBuildThisFileDirectory)..\StlConverter\src\RsDocx.Core\RsDocx.Core.csproj')">$(MSBuildThisFileDirectory)..\StlConverter\</RsConverterDir>
+    <RsConverterDir Condition="'$(RsConverterDir)' == ''">$(MSBuildThisFileDirectory)StlConverter\</RsConverterDir>
+  </PropertyGroup>
+</Project>
