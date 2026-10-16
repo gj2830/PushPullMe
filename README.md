@@ -9,7 +9,7 @@ geometry (planes, cylinders, cones, spheres, tori) and reads and writes DesignSp
 [StlConverter](https://github.com/gj2830/StlConverter), which comes along as a submodule. STL and 3MF can be imported
 too. The app speaks English and Dutch (the 🌐 button).
 
-![Drawing on the ground from an empty sheet: a block with a hole and a peg, beside it a loose face](docs/ground.png)
+![A simple birdhouse, drawn from an empty sheet with push/pull, a work plane and paint, saved as .rsdocx and opened again](docs/birdhouse.png)
 
 ## What it can do
 
@@ -29,6 +29,8 @@ too. The app speaks English and Dutch (the 🌐 button).
   walk. Drawn with DirectX 11 (HelixToolkit.Wpf.SharpDX).
 - Every tool works by dragging (press, drag, release) as well as by click, move, click; distances and angles can be
   typed.
+
+![Drawing on the ground from an empty sheet: a block with a hole and a peg, beside it a loose face](docs/ground.png)
 
 ![The work plane upright against the front face, with its handle; a cylinder drawn on it beside the model](docs/workplane.png)
 
