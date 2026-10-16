@@ -11,6 +11,8 @@ too. The app speaks English and Dutch (the 🌐 button).
 
 ![A simple birdhouse, drawn from an empty sheet with push/pull, a work plane and paint, saved as .rsdocx and opened again](docs/birdhouse.png)
 
+The birdhouse is in [examples/birdhouse.rsdocx](examples/birdhouse.rsdocx): open it in PushPullMe or in DesignSpark Mechanical.
+
 ## What it can do
 
 - **Start drawing right away** on an empty work sheet: rectangles, circles and lines on the ground (or on any face)
@@ -70,6 +72,9 @@ SketchUp, offset, afronden, verplaatsen, draaien, schalen, spiegelen, Follow Me 
 verenigen/aftrekken/doorsnede/wegsnijden/splitsen (ook met ronde vlakken), meten, maatlijnen, tekst, doorsnedevlak,
 verbergen, verven, vrij draaien, zoomen naar de muis en lopen. Alles werkt met slepen en met klik-beweeg-klik; maten en
 hoeken kun je typen.
+
+Het vogelhuisje bovenaan staat in [examples/birdhouse.rsdocx](examples/birdhouse.rsdocx); het opent in PushPullMe en in
+DesignSpark Mechanical.
 
 **Downloaden:** onder [Releases](https://github.com/gj2830/PushPullMe/releases) staat een zip voor Windows (64-bit);
 uitpakken en `PushPullMe.exe` starten. **Zelf bouwen:** Windows en de .NET 10 SDK, zie hierboven.
