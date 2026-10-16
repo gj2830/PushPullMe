@@ -793,6 +793,39 @@ public class DrawingTests(ITestOutputHelper output)
 
     private static double Mm3(SketchDocument d) => d.Volume() / (Mm * Mm * Mm);
 
+    private static double Mm2(SketchDocument d, FaceRef f) => d.TrianglesOf(f).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length / 2) / (Mm * Mm);
+
+    private static FaceRef Facing(SketchDocument d, Vec3 n) =>
+        new(0, Enumerable.Range(0, d.Bodies[0].Faces.Count).Where(f => d.Bodies[0].Faces[f].Surface is BrepPlane && FaceGeometry.Normal(d.Bodies[0].Faces[f]).Dot(n) > 0.999)
+            .MaxBy(f => Mm2(d, new FaceRef(0, f))));
+
+    [Fact]
+    public void A_gable_with_a_door_a_window_and_a_round_hole_is_still_drawn_whole()
+    {
+        // the birdhouse: a block of 100 × 80 × 150 with a pointed gable, then three pockets in the front
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 100 * Mm, 80 * Mm, 150 * Mm))]);
+        var (d, _) = doc.DrawPath(Facing(doc, new Vec3(0, -1, 0)), [new Vec3(0, 0, 100 * Mm), new Vec3(50 * Mm, 0, 150 * Mm), new Vec3(100 * Mm, 0, 100 * Mm)]);
+        foreach (var x in new[] { 8.0, 92.0 })
+        {
+            var corner = Enumerable.Range(0, d.Bodies[0].Faces.Count).Select(f => new FaceRef(0, f))
+                .Where(f => d.Bodies[0].Faces[f.Face].Surface is BrepPlane && FaceGeometry.Normal(d.Bodies[0].Faces[f.Face]).Y < -0.999 && Mm2(d, f) < 2000)
+                .First(f => d.TrianglesOf(f).Any(t => Math.Abs((t.A.X + t.B.X + t.C.X) / 3 / Mm - x) < 30));
+            (d, _) = d.PushPull(corner, -80 * Mm);
+        }
+        Assert.Equal(1_000_000, Mm3(d), 3);
+        var front = new Vec3(0, 1, 0);
+        Assert.Equal(12_500, Mm2(d, Facing(d, front)), 3);
+        var (d1, door) = d.DrawRectangle(Facing(d, front), new Vec3(12 * Mm, 80 * Mm, 8 * Mm), new Vec3(40 * Mm, 80 * Mm, 62 * Mm), XDir);
+        (d1, _) = d1.PushPull(door, -3 * Mm);
+        var (d2, window) = d1.DrawRectangle(Facing(d1, front), new Vec3(55 * Mm, 80 * Mm, 30 * Mm), new Vec3(88 * Mm, 80 * Mm, 64 * Mm), XDir);
+        (d2, _) = d2.PushPull(window, -3 * Mm);
+        Assert.Equal(12_500 - 28 * 54 - 33 * 34, Mm2(d2, Facing(d2, front)), 3);
+        var (d3, hole) = d2.DrawCircle(Facing(d2, front), new Vec3(50 * Mm, 80 * Mm, 115 * Mm), 12 * Mm);
+        (d3, _) = d3.PushPull(hole, -15 * Mm);
+        AssertSound(d3);
+        Assert.Equal(12_500 - 28 * 54 - 33 * 34 - ShownCircleArea(12), Mm2(d3, Facing(d3, front)), 1);
+    }
+
     [Fact]
     public void A_rectangle_on_the_top_becomes_a_face_and_is_pulled_into_a_block()
     {

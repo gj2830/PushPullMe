@@ -56,6 +56,11 @@ public partial class MainWindow
         return near.Count > 0 ? near[0].C : o + d * t;
     }
 
+    /// <summary>Whether a click drawing on <paramref name="onFace"/> goes onto the work plane instead: the plane is set
+    /// with ⊞ (not the ground), the mouse meets it, and the face does not lie in it.</summary>
+    private bool OnSetPlane(Point3D onFace, Point pos) =>
+        _plane != WorkPlane.Ground && GroundAt(pos) != null && Math.Abs((V(onFace) - _plane.Origin).Dot(_plane.N)) > 1e-6;
+
     private IEnumerable<Vec3> GroundCorners()
     {
         bool On(Vec3 v) => _plane.On(v);

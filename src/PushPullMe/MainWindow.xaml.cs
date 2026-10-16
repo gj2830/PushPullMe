@@ -958,6 +958,9 @@ public partial class MainWindow : Window
             // (not on a face: on the ground)
             // (beside every face: on a loose line's snap point there, else on the work plane)
             if (hit is null && LooseHit(pos) is { } lh) hit = lh;
+            // (a work plane set with ⊞ goes before the model, as DesignSpark's sketch plane, until ⊞ on empty puts it back on
+            // the ground; a face lying in it is still drawn on as a face)
+            if (hit is { } fh && OnSetPlane(fh.Point, pos)) hit = null;
             if (hit is not { } dh) { if (GroundAt(pos) != null) { handled = true; GroundClick(pos); } return handled; }
             handled = true;
             if (!IsPlanar(dh.Face)) { StatusText.Text = T("Tekenen kan (nog) alleen op platte vlakken.", "Drawing only works on flat faces (for now)."); return handled; }
@@ -5495,6 +5498,7 @@ public partial class MainWindow : Window
                 case "enter": if (_typed.Length > 0) TypedDistance(); break;
                 case "esc": Window_PreviewKeyDown(this, new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(this)!, 0, Key.Escape) { RoutedEvent = Keyboard.PreviewKeyDownEvent }); break;
                 case "shot": await RenderPng(arg); break;
+                case "paint": BuildPalette(); SetPaint(uint.Parse(arg, NumberStyles.HexNumber)); break;
                 case "camera":
                 {
                     // camera:x,y,z:dx,dy,dz (mm): where it stands and where it looks

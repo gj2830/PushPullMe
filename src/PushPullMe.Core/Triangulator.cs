@@ -52,11 +52,19 @@ public static class Triangulator
                 }
                 return false;
             }
+            // (whether m lies in the corner's inside: a point that is in the loop twice, at an earlier bridge, has two
+            // corners, and only one of them opens towards m)
+            bool Opens(int k)
+            {
+                var a = pts[poly[(k + poly.Count - 1) % poly.Count]]; var b = pts[poly[k]]; var c = pts[poly[(k + 1) % poly.Count]];
+                bool left = Cross(a, b, m) > 0, right = Cross(b, c, m) > 0;
+                return Cross(a, b, c) >= 0 ? left && right : left || right;
+            }
             int join = -1;
             foreach (int k in Enumerable.Range(0, poly.Count).OrderBy(k => Dist2(pts[poly[k]], m)))
             {
                 var p = pts[poly[k]];
-                if (Crosses(m, p, poly) || Crosses(m, p, h) || others.Any(o => Crosses(m, p, o))) continue;
+                if (!Opens(k) || Crosses(m, p, poly) || Crosses(m, p, h) || others.Any(o => Crosses(m, p, o))) continue;
                 join = k; break;
             }
             if (join < 0) join = Enumerable.Range(0, poly.Count).MinBy(k => Dist2(pts[poly[k]], m));
