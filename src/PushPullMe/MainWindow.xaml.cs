@@ -5498,6 +5498,7 @@ public partial class MainWindow : Window
                 case "enter": if (_typed.Length > 0) TypedDistance(); break;
                 case "esc": Window_PreviewKeyDown(this, new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(this)!, 0, Key.Escape) { RoutedEvent = Keyboard.PreviewKeyDownEvent }); break;
                 case "shot": await RenderPng(arg); break;
+                case "groundbutton": GroundButton_Click(GroundButton, new RoutedEventArgs()); break;
                 case "paint": BuildPalette(); SetPaint(uint.Parse(arg, NumberStyles.HexNumber)); break;
                 case "camera":
                 {

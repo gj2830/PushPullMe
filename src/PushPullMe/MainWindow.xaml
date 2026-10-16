@@ -211,6 +211,11 @@
                     <hx:GroupModel3D x:Name="HighlightHost"/>
                 </hx:Viewport3DX>
 
+                <!-- while a work plane is set: back to the ground in one click -->
+                <Button x:Name="GroundButton" Content="⊞  grond" Style="{StaticResource PillButton}" Visibility="Collapsed"
+                        HorizontalAlignment="Left" VerticalAlignment="Top" Margin="18" Click="GroundButton_Click"
+                        ToolTip="Werkvlak terug op de grond (net als ⊞ en klikken op een lege plek)"/>
+
                 <StackPanel x:Name="EmptyHint" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
                     <TextBlock Text="🧊" FontSize="64" HorizontalAlignment="Center"/>
                     <TextBlock Text="Sleep een STL, 3MF of .rsdocx hierheen" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,8,0,0"/>

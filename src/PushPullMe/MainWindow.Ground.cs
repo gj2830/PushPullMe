@@ -235,6 +235,8 @@ public partial class MainWindow
     /// as far as the model reaches seen along it (at least 100 mm round its origin).</summary>
     private void RenderGround(SketchDocument? doc)
     {
+        // (the button back to the ground: only while a work plane is set)
+        GroundButton.Visibility = _plane != WorkPlane.Ground ? Visibility.Visible : Visibility.Collapsed;
         foreach (var v in _groundVisuals) View.Children.Remove(v);
         _groundVisuals.Clear();
         if (doc == null) return;
@@ -270,6 +272,14 @@ public partial class MainWindow
 
     /// <summary>A click with ⊞: the work plane level with the flat face clicked (its origin where it was clicked), or
     /// back on the ground (an empty spot).</summary>
+    /// <summary>The ⊞ grond button: the work plane back on the ground, as ⊞ and a click on empty space.</summary>
+    private void GroundButton_Click(object sender, RoutedEventArgs e)
+    {
+        _grip = null;
+        RenderGizmo();
+        SetPlane(WorkPlane.Ground, T("⊞ Het werkvlak ligt weer op de grond.", "⊞ The work plane is back on the ground."));
+    }
+
     private void WorkPlaneClick(Point pos)
     {
         if (_doc == null) return;

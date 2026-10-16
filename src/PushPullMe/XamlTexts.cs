@@ -17,6 +17,8 @@ internal static class XamlTexts
         ["📂  openen"] = "📂  open",
         ["STL, 3MF of .rsdocx (Ctrl+O)"] = "STL, 3MF or .rsdocx (Ctrl+O)",
         ["💾  opslaan"] = "💾  save",
+        ["⊞  grond"] = "⊞  ground",
+        ["Werkvlak terug op de grond (net als ⊞ en klikken op een lege plek)"] = "Work plane back on the ground (as ⊞ and a click on empty space)",
         ["Als .rsdocx (voor je tekenpakket) of .stl (voor de printer) (Ctrl+S)"] = "As .rsdocx (for your CAD program) or .stl (for the printer) (Ctrl+S)",
         ["BASIS"] = "BASICS",
         ["Selecteren (spatie)"] = "Select (space)",
