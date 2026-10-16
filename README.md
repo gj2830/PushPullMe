@@ -9,7 +9,7 @@ geometry (planes, cylinders, cones, spheres, tori) and reads and writes DesignSp
 [StlConverter](https://github.com/gj2830/StlConverter), which comes along as a submodule. STL and 3MF can be imported
 too. The app speaks English and Dutch (the 🌐 button).
 
-![Colours from DesignSpark](docs/kleuren.png)
+![Drawing on the ground from an empty sheet: a block with a hole and a peg, beside it a loose face](docs/ground.png)
 
 ## What it can do
 
@@ -30,7 +30,9 @@ too. The app speaks English and Dutch (the 🌐 button).
 - Every tool works by dragging (press, drag, release) as well as by click, move, click; distances and angles can be
   typed.
 
-![A face turned round into a quarter ball](docs/ronddraaien.png)
+![The work plane upright against the front face, with its handle; a cylinder drawn on it beside the model](docs/workplane.png)
+
+![A DesignSpark file with its colours](docs/colours.png)
 
 ## Download
 
