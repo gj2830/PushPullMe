@@ -119,11 +119,14 @@ public static class RsDocxReader
 
         var edges = new List<BrepEdge>();
         var eIndex = new Dictionary<int, int>();
+        bool sheet = false;
         foreach (var e in XtTopology.Chain(map, body.Ptr("edge"), "next"))
         {
             // the edge's fin is its positive fin: its vertex is the edge's end; the other fin's vertex its start
             var fin = map[e.Ptr("fin")];
             int other = fin.Ptr("other");
+            // (a fin in no loop: the edge borders one face only, of a face without thickness; DesignSpark's "Oppervlak")
+            if (fin.Ptr("loop") == 0 || (other != 0 && map[other].Ptr("loop") == 0)) sheet = true;
             int end = Vx(fin.Ptr("vertex")), start = other != 0 ? Vx(map[other].Ptr("vertex")) : end;
             int ci = e.Ptr("curve");
             if (ci == 0 && fin.Has("curve")) ci = fin.Ptr("curve");
@@ -143,7 +146,7 @@ public static class RsDocxReader
                     if (seen.Add(f.Index)) faces.Add(Face(map, f, eIndex));
             }
         if (faces.Count == 0) throw new RsDocxReadException(Lang.T("Een lichaam zonder vlakken; dat kan PushPullMe niet openen.", "A body without faces; PushPullMe cannot open that."));
-        return new BrepBody { Vertices = verts, Edges = edges, Faces = faces };
+        return new BrepBody { Vertices = verts, Edges = edges, Faces = faces, Sheet = sheet };
     }
 
     private static BrepFace Face(Dictionary<int, XtNode> map, XtNode f, Dictionary<int, int> eIndex)

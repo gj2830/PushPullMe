@@ -40,7 +40,8 @@ public static class BrepTransform
                 throw new PushPullException(Lang.T("Langs één as schalen kan (nog) alleen bij rechte randen en platte vlakken; een ronding zou ovaal worden. Schaal in alle richtingen.", "Scaling along one axis only works (for now) with straight edges and flat faces; a rounding would become oval. Scale in all directions."));
             return new BrepBody
             {
-                Vertices = body.Vertices.Select(Pt).ToList(),
+                Sheet = body.Sheet,
+            Vertices = body.Vertices.Select(Pt).ToList(),
                 Edges = body.Edges,
                 Faces = body.Faces.Select(f =>
                 {
@@ -71,6 +72,7 @@ public static class BrepTransform
         };
         return new BrepBody
         {
+            Sheet = body.Sheet,
             Vertices = body.Vertices.Select(P).ToList(),
             Edges = body.Edges.Select(e => e with { Curve = C(e.Curve) }).ToList(),
             Faces = body.Faces.Select(f => f with { Surface = Sf(f.Surface) }).ToList(),
@@ -108,6 +110,7 @@ public static class BrepTransform
         };
         return new BrepBody
         {
+            Sheet = body.Sheet,
             Vertices = body.Vertices.Select(P).ToList(),
             Edges = body.Edges.Select(e => e with { Curve = C(e.Curve) }).ToList(),
             Faces = body.Faces.Select(f =>
@@ -125,6 +128,7 @@ public static class BrepTransform
     /// <summary>The body turned round an axis (see <see cref="Turn"/>).</summary>
     public static BrepBody Rotated(BrepBody body, Turn t) => new()
     {
+        Sheet = body.Sheet,
         Vertices = body.Vertices.Select(t.Point).ToList(),
         Edges = body.Edges.Select(e => e with { Curve = Curve(e.Curve, t) }).ToList(),
         Faces = body.Faces.Select(f => f with { Surface = Surface(f.Surface, t) }).ToList(),
@@ -152,6 +156,7 @@ public static class BrepTransform
 
     public static BrepBody Translated(BrepBody body, Vec3 d) => new()
     {
+        Sheet = body.Sheet,
         Vertices = body.Vertices.Select(v => v + d).ToList(),
         Edges = body.Edges.Select(e => e with { Curve = Curve(e.Curve, d) }).ToList(),
         Faces = body.Faces.Select(f => f with { Surface = Surface(f.Surface, d) }).ToList(),

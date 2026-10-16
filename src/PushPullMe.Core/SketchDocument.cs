@@ -123,7 +123,7 @@ public sealed class SketchDocument
     {
         var bodies = RsDocxReader.Read(path, out hidden, out var colors);
         // (a flat face's outer loop first, as the rest expects; a file need not have it so: boltest.rsdocx)
-        var doc = FromBodies(bodies.Select(b => new BrepBody { Vertices = b.Vertices, Edges = b.Edges, Faces = Core.PushPull.OrderLoops(b) }).ToList());
+        var doc = FromBodies(bodies.Select(b => new BrepBody { Vertices = b.Vertices, Edges = b.Edges, Faces = Core.PushPull.OrderLoops(b), Sheet = b.Sheet }).ToList());
         return new SketchDocument { Bodies = doc.Bodies, Curved = doc.Curved, Colors = colors, Lines = RsDocxSketch.Read(RsDocxPackage.Open(path)) };
     }
 
@@ -164,9 +164,17 @@ public sealed class SketchDocument
     public (SketchDocument Doc, PushPullResult Result) PushPull(FaceRef f, double distance, bool checkCrossing = true)
     {
         var body = Bodies[f.Body];
+        if (body.Sheet) return PushSheet(f, distance, checkCrossing);
         if (body.Faces[f.Face].Surface is BrepCylinder || (body.Faces[f.Face].Surface is BrepSphere or BrepTorus && Core.PushPull.IsRoundingSet(body, f.Face)))
             return PushPullCylinder(f, distance, checkCrossing);
-        var r = Core.PushPull.Apply(body, f.Face, distance);
+        PushPullResult r;
+        try { r = Core.PushPull.Apply(body, f.Face, distance); }
+        catch (TouchesItselfException) when (distance > 0 && body.Faces[f.Face].Surface is BrepPlane)
+        {
+            // the body would touch itself only along an edge: the piece pulled out a body of its own, the body as it was
+            // (as DesignSpark makes it)
+            return PullApart(f, distance, checkCrossing);
+        }
         var n = FaceGeometry.Normal(body.Faces[f.Face]);
         var origin = ((BrepPlane)body.Faces[f.Face].Surface).Origin;
         // the triangles of curved faces under their new numbers (two that became one: together)
@@ -212,6 +220,60 @@ public sealed class SketchDocument
         if (checkCrossing && r.FaceMap[f.Face] is >= 0 and var mf && doc.AgainstOpposite(new FaceRef(f.Body, mf)))
             throw new PushPullException(Lang.T("Zo komt het vlak precies tegen de andere kant aan: doorduwen tot een gat kan nog niet.", "That way the face comes exactly against the other side: pushing through to a hole is not possible yet."));
         return (doc, r);
+    }
+
+    /// <summary>
+    /// A face pulled out as a body of its own, standing on it (the face and a twin pulled, see <see cref="Sheets.Twin"/>);
+    /// the body it is on stays as it was. The face map is the body's own (nothing of it changed).
+    /// </summary>
+    private (SketchDocument Doc, PushPullResult Result) PullApart(FaceRef f, double distance, bool checkCrossing)
+    {
+        var body = Bodies[f.Body];
+        var (td, _) = FromBodies([Sheets.Twin(body, f.Face)]).PushPull(new FaceRef(0, 0), distance, checkCrossing: false);
+        var piece = td.Bodies[0];
+        // (not into any part: what the piece shares with a body must be nothing, or no more than touching)
+        if (checkCrossing)
+            foreach (var other in Bodies.Where(x => !x.Sheet))
+            {
+                List<(BrepBody Body, List<(int Body, int Face)> From)> common;
+                try { common = Booleans.Combine(other, piece, Booleans.Op.Intersect); }
+                catch (PushPullException) { continue; }
+                if (common.Any(c => FromBodies([c.Body]).Volume() > 1e-12))
+                    throw new PushPullException(Lang.T("Zo komt het vlak door een ander deel van het model heen; dat kan nog niet.", "That way the face goes through another part of the model; that is not possible yet."));
+            }
+        var doc = AddBody(piece);
+        var same = Enumerable.Range(0, body.Faces.Count).ToList();
+        return (doc, new PushPullResult(body, same, [], [], new Dictionary<int, IReadOnlyList<(Vec3 A, Vec3 B, Vec3 C)>>(), [], []));
+    }
+
+    /// <summary>
+    /// A face without thickness (of a sheet) pulled out into a solid, as in SketchUp: along its normal, or the other way
+    /// for a negative distance. The face and a twin facing the other way make a closed body without inside, whose
+    /// face (or twin) is pulled as any other (<see cref="Sheets.Twin"/>). The solid takes the sheet's place; the
+    /// sheet's other faces, if any, stay a sheet of their own (a new body). The face map gives the pulled face's new
+    /// number in the solid.
+    /// </summary>
+    private (SketchDocument Doc, PushPullResult Result) PushSheet(FaceRef f, double distance, bool checkCrossing)
+    {
+        if (Math.Abs(distance) < 1e-9) throw new PushPullException(Lang.T("Trek het vlak een eindje uit om er een blok van te maken.", "Pull the face out a little to make a block of it."));
+        var sheet = Bodies[f.Body];
+        int pulled = distance > 0 ? 0 : 1;
+        var (td, tr) = FromBodies([Sheets.Twin(sheet, f.Face)]).PushPull(new FaceRef(0, pulled), Math.Abs(distance), checkCrossing: false);
+        var rest = Sheets.Without(sheet, f.Face);
+        var map = Enumerable.Repeat(-1, sheet.Faces.Count).ToArray();
+        map[f.Face] = tr.FaceMap[pulled];
+        var bodies = Bodies.Select((b, i) => i == f.Body ? td.Bodies[0] : b).ToList();
+        var curved = Curved.Select((c, i) => i == f.Body ? td.Curved[0] : c).ToList();
+        if (rest != null)
+        {
+            bodies.Add(rest);
+            curved.Add(new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>());
+        }
+        var doc = new SketchDocument { Lines = Lines, Bodies = bodies, Curved = curved, Colors = Recolor(f.Body, map) };
+        var changed = Enumerable.Range(0, td.Bodies[0].Faces.Count).Select(g => new FaceRef(f.Body, g)).ToHashSet();
+        if (checkCrossing && Intersections.FirstCrossing(doc, changed) is not null)
+            throw new PushPullException(Lang.T("Zo komt het blok door een ander deel van het model heen; dat kan nog niet.", "That way the block goes through another part of the model; that is not possible yet."));
+        return (doc, tr with { Body = td.Bodies[0], FaceMap = map });
     }
 
     /// <summary>
@@ -347,8 +409,17 @@ public sealed class SketchDocument
     }
 
     /// <summary>SketchUp's Offset on a planar face (see <see cref="Drawing.Offset"/>); the inner face.</summary>
-    public (SketchDocument Doc, FaceRef Face) Offset(FaceRef f, double distance) =>
-        With(f.Body, Drawing.Offset(Bodies[f.Body], f.Face, distance), f.Face);
+    public (SketchDocument Doc, FaceRef Face) Offset(FaceRef f, double distance)
+    {
+        // (outward: drawn on the face round it, whose colour the new face gets)
+        int on = f.Face;
+        if (distance < 0)
+        {
+            var (corners, circle) = Drawing.OffsetOutline(Bodies[f.Body], f.Face, distance);
+            on = Drawing.OffsetTarget(Bodies[f.Body], f.Face, corners, circle);
+        }
+        return With(f.Body, Drawing.Offset(Bodies[f.Body], f.Face, distance), on);
+    }
 
     /// <summary>
     /// A whole body moved, or (<paramref name="copy"/>) a moved copy of it added as a new body (last), with its colours.
@@ -572,7 +643,147 @@ public sealed class SketchDocument
             }
             if (!done) break;
         }
+        // what closes a shape of its own outside every face there (in the air, or touching the model only at a corner
+        // or along an edge): a face without thickness, a body of its own (as SketchUp)
+        for (int guard = 0; guard < 200; guard++)
+        {
+            var body = doc.Bodies[f.Body];
+            var plane = Drawing.CoplanarFaces(body, f.Face);
+            var edges = plane.SelectMany(g => body.Faces[g].Loops.SelectMany(l => l)).Select(c => body.Edges[c.Edge]).Distinct()
+                .Where(e => e.Start >= 0 && e.Curve is BrepLine or BrepCircle)
+                .Select(e => new LoosePiece(body.Vertices[e.Start], body.Vertices[e.End], e.Curve as BrepCircle)).ToList();
+            var loose = LooseLines.Pieces(doc.Lines, n, o, edges);
+            if (loose.Count == 0) break;
+            // (the faces' edges there count too, cut where loose lines end on them: a line from the edge out and back to
+            // it closes a shape with the piece of edge between, as in SketchUp; at least one loose piece in it)
+            // (only the outer border of the faces there: an edge between two of them never bounds a shape outside them)
+            var border = plane.SelectMany(g => body.Faces[g].Loops.SelectMany(l => l)).GroupBy(c => c.Edge).Where(g => g.Count() == 1)
+                .Select(g => body.Edges[g.Key]).Where(e => e.Start >= 0 && e.Curve is BrepLine or BrepCircle)
+                .Select(e => new LoosePiece(body.Vertices[e.Start], body.Vertices[e.End], e.Curve as BrepCircle)).ToList();
+            var rims = LooseLines.Pieces(border.Select(e => e.ToLine()).ToList(), n, o, loose);
+            var pieces = loose.Concat(rims).ToList();
+            var inside = plane.Select(g => doc.TrianglesOf(new FaceRef(f.Body, g))).Where(t => t.Count > 0)
+                .Select(t => (t[0].A + t[0].B + t[0].C) * (1.0 / 3)).ToList();
+            List<int>? found = null;
+            foreach (var ring in LooseLines.Candidates(pieces, _ => false))
+                if (ring.Any(i => i < loose.Count) && OutsideFaces(body, plane, pieces, ring, n, loose.Count, inside)) { found = ring; break; }
+            if (found == null) break;
+            doc = doc.RingToSheet(pieces, found, n, o, loose.Count);
+            made.Add(new FaceRef(doc.Bodies.Count - 1, 0));
+        }
         return (doc, made);
+    }
+
+    /// <summary>
+    /// Loose lines and arcs on a plane without faces (the ground, through o with normal n): every closed shape they make
+    /// becomes a face without thickness, a body of its own; the faces made.
+    /// </summary>
+    public (SketchDocument Doc, List<FaceRef> Faces) CloseLooseLinesIn(Vec3 n, Vec3 o)
+    {
+        var doc = this; var made = new List<FaceRef>();
+        n = n.Normalized();
+        for (int guard = 0; guard < 200; guard++)
+        {
+            var pieces = LooseLines.Pieces(doc.Lines, n, o);
+            if (pieces.Count == 0) break;
+            if (LooseLines.Candidates(pieces, _ => false).FirstOrDefault() is not { } ring) break;
+            doc = doc.RingToSheet(pieces, ring, n, o);
+            made.Add(new FaceRef(doc.Bodies.Count - 1, 0));
+        }
+        return (doc, made);
+    }
+
+    /// <summary>
+    /// A closed shape (points, the last the first again, and the curve of each step) drawn on a plane where there may be
+    /// faces without thickness already (through o, normal n): where it overlaps them it divides them (the overlap a face
+    /// of its own, as other programs do), the rest becomes a face of its own; the faces made, the newest last.
+    /// </summary>
+    public (SketchDocument Doc, List<FaceRef> Faces) AddShape(IReadOnlyList<Vec3> pts, IReadOnlyList<BrepCurve> curves, Vec3 n, Vec3 o)
+    {
+        n = n.Normalized();
+        bool InPlane(BrepFace face) => face.Surface is BrepPlane pl && Math.Abs(Math.Abs(FaceGeometry.Normal(face).Dot(n)) - 1) < 1e-9 && Math.Abs((pl.Origin - o).Dot(n)) < 1e-9;
+        if (!Bodies.Any(b => b.Sheet && b.Faces.Any(InPlane)))
+        {
+            var alone = AddSheet(Sheets.Face(pts, curves, n));
+            return (alone, [new FaceRef(alone.Bodies.Count - 1, 0)]);
+        }
+        // (as loose lines: they divide the faces they cross, and close what is left with the edges)
+        var lines = Enumerable.Range(0, curves.Count).Select(i => curves[i] is BrepCircle c ? new SketchLine(pts[i], pts[i + 1], c.Centre, c.Normal) : new SketchLine(pts[i], pts[i + 1])).ToList();
+        var (doc, made) = CloseLooseLinesOnPlane(AddLines(lines), n, o);
+        return (doc, made);
+    }
+
+    /// <summary>
+    /// Loose lines on a plane (through o, normal n) closing shapes: first on the faces without thickness lying in it
+    /// (dividing them), then what is left in the air (see <see cref="CloseLooseLinesIn"/>); the faces made.
+    /// </summary>
+    public (SketchDocument Doc, List<FaceRef> Faces) CloseLooseLinesOnPlane(Vec3 n, Vec3 o) => CloseLooseLinesOnPlane(this, n, o);
+
+    private static (SketchDocument Doc, List<FaceRef> Faces) CloseLooseLinesOnPlane(SketchDocument doc, Vec3 n, Vec3 o)
+    {
+        n = n.Normalized();
+        var made = new List<FaceRef>();
+        for (int b = 0; b < doc.Bodies.Count; b++)
+        {
+            if (!doc.Bodies[b].Sheet) continue;
+            int f = Enumerable.Range(0, doc.Bodies[b].Faces.Count).FirstOrDefault(g => doc.Bodies[b].Faces[g].Surface is BrepPlane pl
+                && Math.Abs(Math.Abs(FaceGeometry.Normal(doc.Bodies[b].Faces[g]).Dot(n)) - 1) < 1e-9 && Math.Abs((pl.Origin - o).Dot(n)) < 1e-9, -1);
+            if (f < 0) continue;
+            var (d, m) = doc.CloseLooseLines(new FaceRef(b, f));
+            doc = d; made.AddRange(m);
+        }
+        var (d2, m2) = doc.CloseLooseLinesIn(n, o);
+        made.AddRange(m2);
+        return (d2, made);
+    }
+
+    /// <summary>A closed run of loose pieces (in the plane through o with normal n) made a face without thickness: a new
+    /// body; the lines of the plane left are its other pieces.</summary>
+    private SketchDocument RingToSheet(IReadOnlyList<LoosePiece> pieces, IReadOnlyList<int> ring, Vec3 n, Vec3 o, int looseCount = int.MaxValue)
+    {
+        // (the loose pieces not used stay loose; pieces of face edges, after the loose ones, are no loose lines)
+        var rest = Lines.Where(l => !LooseLines.InPlane(l, n, o)).Concat(pieces.Where((_, i) => i < looseCount && !ring.Contains(i)).Select(p => p.ToLine())).ToList();
+        var (pts, curves) = LooseLines.Path(pieces, ring);
+        return new SketchDocument { Lines = rest, Colors = Colors, Bodies = Bodies, Curved = Curved }.AddSheet(Sheets.Face(pts, curves, n));
+    }
+
+    /// <summary>A face without thickness added as a body of its own (the last one).</summary>
+    public SketchDocument AddSheet(BrepBody sheet) => new()
+    {
+        Lines = Lines, Colors = Colors, Bodies = Bodies.Append(sheet).ToList(),
+        Curved = Curved.Append(new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>()).ToList(),
+    };
+
+    /// <summary>Whether a closed run of pieces lies outside every face of the plane: none of its pieces runs over a face,
+    /// and no corner of a face lies inside it.</summary>
+    private static bool OutsideFaces(BrepBody body, List<int> plane, IReadOnlyList<LoosePiece> pieces, IReadOnlyList<int> ring, Vec3 n,
+        int looseCount, IReadOnlyList<Vec3> inside)
+    {
+        // (a loose piece running over a face; the pieces of face edges lie on its border)
+        if (ring.Any(i => i < looseCount && plane.Any(g => Drawing.Contains(body, g, pieces[i].Middle)))) return false;
+        // the run as points (arcs by points along them), laid flat in the plane
+        var (pts, curves) = LooseLines.Path(pieces, ring);
+        var poly = new List<Vec3>();
+        for (int i = 0; i + 1 < pts.Count; i++)
+            if (curves[i] is BrepCircle c) poly.AddRange(Drawing.ArcPoints(c, pts[i], pts[i + 1], 16).SkipLast(1));
+            else poly.Add(pts[i]);
+        var x = (Math.Abs(n.X) < 0.9 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0)).Cross(n).Normalized(); var y = n.Cross(x);
+        bool Inside(Vec3 q)
+        {
+            bool inside = false;
+            for (int i = 0, j = poly.Count - 1; i < poly.Count; j = i++)
+            {
+                double xi = poly[i].Dot(x), yi = poly[i].Dot(y), xj = poly[j].Dot(x), yj = poly[j].Dot(y), qx = q.Dot(x), qy = q.Dot(y);
+                if ((yi > qy) != (yj > qy) && qx < (xj - xi) * (qy - yi) / (yj - yi) + xi) inside = !inside;
+            }
+            return inside;
+        }
+        // (a corner of a face on the run itself does not count: the shape may touch the model there)
+        bool OnRun(Vec3 q) => ring.Any(i => (pieces[i].A - q).Length < 1e-7 || (pieces[i].B - q).Length < 1e-7);
+        var corners = plane.SelectMany(g => body.Faces[g].Loops.SelectMany(l => l)).Select(c => body.Edges[c.Edge])
+            .SelectMany(e => e.Start >= 0 ? new[] { body.Vertices[e.Start], body.Vertices[e.End] } : []).Distinct();
+        // (nor a face itself inside it: a run round the outside of a face along its edges)
+        return !corners.Any(q => !OnRun(q) && Inside(q)) && !inside.Any(Inside);
     }
 
     /// <summary>A path of lines and arcs drawn on a planar face (see <see cref="Drawing.Path"/>; an arc a circle running
@@ -594,7 +805,16 @@ public sealed class SketchDocument
     /// </summary>
     public (SketchDocument Doc, FaceRef Cap) Revolve(FaceRef f, Vec3 axisPoint, Vec3 axisDir, double angle, bool checkCrossing = true)
     {
+        if (Bodies[f.Body].Sheet) return RevolveSheet(f, axisPoint, axisDir, angle, checkCrossing);
         var a = Core.Revolve.OutwardAxis(Bodies[f.Body], f.Face, axisPoint, axisDir);
+        if (angle >= 2 * Math.PI - 1e-9)
+        {
+            // a whole turn: the solid it sweeps, united with the body
+            var solid = Core.Revolve.Solid(Bodies[f.Body], f.Face, axisPoint, a);
+            var both = new SketchDocument { Lines = Lines, Bodies = Bodies.Append(solid).ToList(), Curved = Curved.Append(new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>()).ToList(), Colors = Colors };
+            var (united, made) = both.Combine(f.Body, Bodies.Count, Booleans.Op.Union);
+            return (united, new FaceRef(made[0], 0));
+        }
         var r = Core.Revolve.Face(Bodies[f.Body], f.Face, axisPoint, a, angle);
         var curved = Curved[f.Body].Where(kv => kv.Key != f.Face).ToDictionary(kv => kv.Key, kv => kv.Value);
         foreach (int g in r.Sides)
@@ -647,22 +867,145 @@ public sealed class SketchDocument
     /// Two bodies made one (as Union; see <see cref="Booleans.Union"/>): the result in the place of the first, the
     /// second gone; faces keep the colour of the face they came from, flat faces in one plane next to each other merge.
     /// </summary>
-    public SketchDocument Union(int a, int b)
+    public SketchDocument Union(int a, int b) => Combine(a, b, Booleans.Op.Union).Doc;
+
+    /// <summary>
+    /// Two bodies combined (see <see cref="Booleans.Combine"/>): the result (one body or more) in the place of the
+    /// first, the second gone, unless <paramref name="keepSecond"/> (SketchUp's Trim: the cutter stays). The faces keep
+    /// the colour of the face they came from; flat faces in one plane next to each other merge. Also the bodies the
+    /// result is in.
+    /// </summary>
+    public (SketchDocument Doc, List<int> Bodies) Combine(int a, int b, Booleans.Op op, bool keepSecond = false)
     {
-        if (a == b) throw new PushPullException(Lang.T("Kies twee verschillende delen.", "Choose two different parts."));
-        var (body, from) = Booleans.Union(Bodies[a], Bodies[b]);
-        var colors = new Dictionary<int, uint>();
-        for (int f = 0; f < from.Count; f++)
-            if (ColorOf(new FaceRef(from[f].Body == 0 ? a : b, from[f].Face)) is uint c) colors[f] = c;
-        var keep = Enumerable.Range(0, Bodies.Count).Where(i => i != b).ToList();
-        var doc = new SketchDocument
+        if (a == b) throw new PushPullException(Lang.T("Kies twee verschillende delen.", "Pick two different parts."));
+        NoSheet(a); NoSheet(b);
+        return Replace(keepSecond ? [a] : [a, b], [Booleans.Combine(Bodies[a], Bodies[b], op)], a, b);
+    }
+
+    /// <summary>
+    /// Two bodies split where they meet (as SketchUp's Split): what is only in the first, what is in both and what is
+    /// only in the second, each a body (or more) of its own, in the place of the two.
+    /// </summary>
+    public (SketchDocument Doc, List<int> Bodies) Split(int a, int b)
+    {
+        if (a == b) throw new PushPullException(Lang.T("Kies twee verschillende delen.", "Pick two different parts."));
+        NoSheet(a); NoSheet(b);
+        var common = Booleans.Combine(Bodies[a], Bodies[b], Booleans.Op.Intersect);
+        List<(BrepBody, List<(int, int)>)> Less(int x, int y)
         {
-            Lines = Lines,
-            Bodies = keep.Select(i => i == a ? body : Bodies[i]).ToList(),
-            Curved = keep.Select(i => i == a ? (IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>)new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>() : Curved[i]).ToList(),
-            Colors = keep.Select(i => i == a ? (IReadOnlyDictionary<int, uint>)colors : i < Colors.Count ? Colors[i] : new Dictionary<int, uint>()).ToList(),
-        };
-        return doc.MergeFlat(keep.IndexOf(a));
+            // (nothing left of one: then none of it)
+            try { return Booleans.Combine(Bodies[x], Bodies[y], Booleans.Op.Subtract).Select(r => (r.Body, r.From.Select(f => (f.Body == 0 ? 0 : 1, f.Face)).ToList())).ToList(); }
+            catch (PushPullException) { return []; }
+        }
+        var onlyB = Less(b, a).Select(r => (r.Item1, r.Item2.Select(f => (1 - f.Item1, f.Item2)).ToList())).ToList();
+        return Replace([a, b], [Less(a, b), common, onlyB], a, b);
+    }
+
+    /// <summary>The bodies <paramref name="remove"/> taken out and the new ones put in their place (at the first's place,
+    /// on from there); a new body's faces coloured as the faces of a (0) or b (1) they came from.</summary>
+    private (SketchDocument Doc, List<int> Bodies) Replace(int[] remove, List<List<(BrepBody Body, List<(int Body, int Face)> From)>> results, int a, int b)
+    {
+        var made = results.SelectMany(r => r).ToList();
+        var bodies = new List<BrepBody>(); var curved = new List<IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>>();
+        var colors = new List<IReadOnlyDictionary<int, uint>>(); var newAt = new List<int>();
+        for (int i = 0; i < Bodies.Count; i++)
+        {
+            if (i == remove[0])
+                foreach (var (body, from) in made)
+                {
+                    var c = new Dictionary<int, uint>();
+                    for (int f = 0; f < from.Count; f++) if (ColorOf(new FaceRef(from[f].Body == 0 ? a : b, from[f].Face)) is uint col) c[f] = col;
+                    newAt.Add(bodies.Count);
+                    // (curved faces in triangles to be shown)
+                    var tris = new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>();
+                    for (int g = 0; g < body.Faces.Count; g++)
+                        if (body.Faces[g].Surface is not BrepPlane)
+                            tris[g] = FaceGeometry.CurvedTriangles(body, body.Faces[g]) ?? BrepBooleans.Triangles(body, g);
+                    bodies.Add(body); curved.Add(tris); colors.Add(c);
+                }
+            if (remove.Contains(i)) continue;
+            bodies.Add(Bodies[i]); curved.Add(Curved[i]); colors.Add(i < Colors.Count ? Colors[i] : new Dictionary<int, uint>());
+        }
+        var doc = new SketchDocument { Lines = Lines, Bodies = bodies, Curved = curved, Colors = colors };
+        foreach (int nb in newAt) doc = doc.MergeFlat(nb);
+        return (doc, newAt);
+    }
+
+    /// <summary>
+    /// SketchUp's Follow Me along a path (see <see cref="Sweep"/>): the profile face swept along the outer edge of the
+    /// path face (both of one body). Where the sweep lies in the body (a profile drawn on its side, at a corner of the
+    /// path) it is cut away, as a chamfer or a groove round it; else it is added, as a rim. The bodies the result is in.
+    /// </summary>
+    public (SketchDocument Doc, List<int> Bodies) FollowPath(FaceRef profile, FaceRef path)
+    {
+        NoSheet(path.Body);
+        // (a face without thickness may be the profile for a path on another part: it is used up)
+        bool sheet = Bodies[profile.Body].Sheet;
+        if (profile.Body != path.Body && !sheet) throw new PushPullException(Lang.T("Het profiel en het pad moeten van hetzelfde deel zijn (of het profiel een vlak zonder dikte).", "The profile and the path must be of the same part (or the profile a face without thickness)."));
+        var prisms = Sweep.Prisms(Bodies[profile.Body], profile.Face, Bodies[path.Body], path.Face);
+        var swept = prisms[0];
+        for (int i = 1; i < prisms.Count; i++) swept = Booleans.Combine(swept, prisms[i], Booleans.Op.Union).Single().Body;
+        // (a point of the first prism: in the body or not)
+        var probe = prisms[0].Vertices.Aggregate(new Vec3(0, 0, 0), (a, v) => a + v) * (1.0 / prisms[0].Vertices.Count);
+        var tris = Enumerable.Range(0, Bodies[path.Body].Faces.Count).SelectMany(g => TrianglesOf(new FaceRef(path.Body, g))).ToList();
+        var op = Inside(tris, probe) ? Booleans.Op.Subtract : Booleans.Op.Union;
+        var (start, pathBody) = sheet ? WithoutSheetFace(profile, path.Body) : (this, path.Body);
+        var both = start.AddBody(swept);
+        return both.Combine(pathBody, both.Bodies.Count - 1, op);
+    }
+
+    /// <summary>A body added as the last one (its round faces in triangles).</summary>
+    private SketchDocument AddBody(BrepBody b) => new()
+    {
+        Lines = Lines, Colors = Colors, Bodies = Bodies.Append(b).ToList(),
+        Curved = Curved.Append(FromBodies([b]).Curved[0]).ToList(),
+    };
+
+    /// <summary>The document without one face of a sheet (the sheet gone when it was its only face); where body
+    /// <paramref name="keep"/> is now.</summary>
+    private (SketchDocument Doc, int Keep) WithoutSheetFace(FaceRef f, int keep)
+    {
+        if (Sheets.Without(Bodies[f.Body], f.Face) is { } rest)
+            return (new SketchDocument
+            {
+                Lines = Lines, Bodies = Bodies.Select((b, i) => i == f.Body ? rest : b).ToList(),
+                Curved = Curved.Select((c, i) => i == f.Body ? new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>() : c).ToList(),
+                Colors = Recolor(f.Body, Enumerable.Repeat(-1, Bodies[f.Body].Faces.Count).ToArray()),
+            }, keep);
+        return (new SketchDocument
+        {
+            Lines = Lines, Bodies = Bodies.Where((_, i) => i != f.Body).ToList(), Curved = Curved.Where((_, i) => i != f.Body).ToList(),
+            Colors = Colors.Where((_, i) => i != f.Body).ToList(),
+        }, keep > f.Body ? keep - 1 : keep);
+    }
+
+    /// <summary>
+    /// A face without thickness turned round an axis: the solid it sweeps (its twin's face turned, as push/pull pulls it;
+    /// a whole turn: the solid of revolution) takes the sheet's place, its other faces stay a sheet of their own.
+    /// </summary>
+    private (SketchDocument Doc, FaceRef Cap) RevolveSheet(FaceRef f, Vec3 axisPoint, Vec3 axisDir, double angle, bool checkCrossing)
+    {
+        var sheet = Bodies[f.Body];
+        SketchDocument solid; int cap;
+        if (angle >= 2 * Math.PI - 1e-9)
+        {
+            solid = FromBodies([Core.Revolve.Solid(sheet, f.Face, axisPoint, Core.Revolve.OutwardAxis(sheet, f.Face, axisPoint, axisDir))]);
+            cap = 0;
+        }
+        else
+        {
+            var (td, tc) = FromBodies([Sheets.Twin(sheet, f.Face)]).Revolve(new FaceRef(0, 0), axisPoint, axisDir, angle, checkCrossing: false);
+            solid = td; cap = tc.Face;
+        }
+        var rest = Sheets.Without(sheet, f.Face);
+        var bodies = Bodies.Select((b, i) => i == f.Body ? solid.Bodies[0] : b).ToList();
+        var curved = Curved.Select((c, i) => i == f.Body ? solid.Curved[0] : c).ToList();
+        if (rest != null) { bodies.Add(rest); curved.Add(new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>()); }
+        var doc = new SketchDocument { Lines = Lines, Bodies = bodies, Curved = curved, Colors = Recolor(f.Body, Enumerable.Repeat(-1, sheet.Faces.Count).ToArray()) };
+        var changed = Enumerable.Range(0, solid.Bodies[0].Faces.Count).Select(g => new FaceRef(f.Body, g)).ToHashSet();
+        if (checkCrossing && Intersections.FirstCrossing(doc, changed) is not null)
+            throw new PushPullException(Lang.T("Zo komt het gedraaide vlak door een ander deel van het model heen; dat kan nog niet.", "That way the turned face goes through another part of the model; that is not possible yet."));
+        return (doc, new FaceRef(f.Body, cap));
     }
 
     /// <summary>Whether points of the face, turned along their way round the axis, come inside the body (a sweep that
@@ -715,10 +1058,21 @@ public sealed class SketchDocument
     private (SketchDocument, FaceRef) With(int b, (BrepBody Body, int Face) r, int drawnOn) => (new SketchDocument
     {
         Lines = Lines,
-        Bodies = Bodies.Select((x, i) => i == b ? r.Body : x).ToList(),
+        Bodies = Bodies.Select((x, i) => i == b ? Keep(x, r.Body) : x).ToList(),
         Curved = Curved,
         Colors = Recolor(b, null, r.Face, drawnOn),
     }, new FaceRef(b, r.Face));
+
+    /// <summary>What needs a solid refuses a face without thickness (with what to do instead).</summary>
+    private void NoSheet(int body)
+    {
+        if (Bodies[body].Sheet)
+            throw new PushPullException(Lang.T("Dit is een vlak zonder dikte; trek het eerst uit (⇕) tot een blok.", "This is a face without thickness; pull it out first (⇕) into a block."));
+    }
+
+    /// <summary>A body made anew from another (drawn on, say): a sheet stays a sheet.</summary>
+    private static BrepBody Keep(BrepBody was, BrepBody now) =>
+        was.Sheet == now.Sheet ? now : new BrepBody { Vertices = now.Vertices, Edges = now.Edges, Faces = now.Faces, Sheet = was.Sheet };
 
     /// <summary>As a binary STL (in millimetres when <paramref name="scale"/> is 1000).</summary>
     public byte[] ToStl(double scale = 1000) =>
@@ -736,5 +1090,5 @@ public sealed class SketchDocument
     }
 
     /// <summary>Volume (cubic metres) by the divergence theorem over the shown triangles.</summary>
-    public double Volume() => AllTriangles().SelectMany(x => x.Triangles).Sum(t => t.A.Dot(t.B.Cross(t.C))) / 6;
+    public double Volume() => AllTriangles().Where(x => !Bodies[x.Face.Body].Sheet).SelectMany(x => x.Triangles).Sum(t => t.A.Dot(t.B.Cross(t.C))) / 6;
 }

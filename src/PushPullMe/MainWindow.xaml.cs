@@ -7,8 +7,12 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Media3D;
 using System.Windows.Threading;
-using HelixToolkit.Wpf;
+using HelixToolkit.Wpf.SharpDX;
 using Microsoft.Win32;
+using DiffuseMaterial = HelixToolkit.Wpf.SharpDX.DiffuseMaterial;
+using DxMesh = HelixToolkit.SharpDX.MeshGeometry3D;
+using PerspectiveCamera = HelixToolkit.Wpf.SharpDX.PerspectiveCamera;
+using ProjectionCamera = HelixToolkit.Wpf.SharpDX.ProjectionCamera;
 using PushPullMe.Core;
 using RsDocx.Core.Brep;
 using RsDocx.Core.Stl;
@@ -25,7 +29,7 @@ public partial class MainWindow : Window
     private readonly List<SketchDocument> _undo = new(), _redo = new();
 
     /// <summary>Per body its shown mesh and, per triangle of it, the face it belongs to (for picking).</summary>
-    private readonly List<(MeshGeometry3D Mesh, List<int> FaceOfTriangle, int Body)> _meshes = new();
+    private readonly List<(DxMesh Mesh, List<int> FaceOfTriangle, int Body)> _meshes = new();
     private LinesVisual3D? _edges;
     private double _modelSize = 100;
 
@@ -75,15 +79,47 @@ public partial class MainWindow : Window
         InitializeComponent();
         XamlTexts.Apply(this);
         LanguageButton.Content = Lang.English ? "🌐  EN" : "🌐  NL";
-        // the highlight and the sketch sit just in front of the faces as seen from the camera: again when it moves
+        View.EffectsManager = new HelixToolkit.SharpDX.DefaultEffectsManager();
+        Closed += (_, _) => (View.EffectsManager as IDisposable)?.Dispose();
+        // the highlight and the sketch sit just in front of the faces as seen from the camera: again when it moves; the
+        // head light shines the way the camera looks
         View.CameraChanged += (_, _) =>
         {
+            _cameraChanges++;
+            // (the work plane's handle keeps its size on the screen)
+            if (WorkPlaneMode) RenderGizmo();
+            // (a camera that cannot be used, whatever set it: everything back in view; looked at once all its settings
+            // are made, as setting them one after the other can pass through such a state)
+            if (!CameraOk())
+            {
+                Dispatcher.BeginInvoke(() => { if (!CameraOk()) { Log("camera unusable: everything back in view"); ZoomAll(0); } }, DispatcherPriority.Background);
+                return;
+            }
+            if (View.Camera is ProjectionCamera hc)
+            {
+                HeadLight.Direction = hc.LookDirection;
+                // what can be seen from just in front of the eye to far behind the model, as a fixed ratio (a fine depth
+                // test: edges drawn a hair in front of their faces), scaled with how far away the camera looks
+                double near = Math.Clamp(hc.LookDirection.Length / 100, 0.01, 50);
+                if (Math.Abs(hc.NearPlaneDistance - near) > 0.2 * near) { hc.NearPlaneDistance = near; hc.FarPlaneDistance = near * 20000; }
+            }
+            // (the snap marks were put a little toward the eye as it was: away, the next mouse move brings them back)
+            ShowMarks([]);
             if (_doc == null) return;
             UpdateHighlight();
             if (_sketchShown is { } sk) ShowSketch(sk.Pts, default, sk.Closed, sk.Color);
             RenderLoose(_doc);
+            PlaceNotes();
         };
-        Loaded += async (_, _) => await TestAid();
+        // (started without a file: an empty work sheet, the ground ready to draw on)
+        Loaded += async (_, _) => { await TestAid(); if (_doc == null) NewDocument(); };
+        // a test window (the test aid plays mouse and keys itself): it takes no focus and no real mouse, so the user
+        // working beside it neither is disturbed nor disturbs it
+        if (Environment.GetEnvironmentVariable("PPM_OPEN") is { Length: > 0 } && Environment.GetEnvironmentVariable("PPM_SNAPSHOT") is { Length: > 0 })
+        {
+            ShowActivated = false;
+            ((UIElement)Content).IsHitTestVisible = false;
+        }
         // an unexpected error: written down (for finding it later), the action in progress stopped, the model kept
         Application.Current.DispatcherUnhandledException += (_, e) =>
         {
@@ -151,8 +187,8 @@ public partial class MainWindow : Window
     private void Adopt(SketchDocument doc, string path, (string Title, string Text)? note)
     {
         ClearGuides();
-        _doc = doc; _path = path;
-        _undo.Clear(); _redo.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null;
+        _doc = doc; _path = path; _plane = WorkPlane.Ground;
+        _undo.Clear(); _redo.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null;
         UpdateUndoButtons();
         Render(zoom: true);
         FileText.Text = Path.GetFileName(path);
@@ -208,6 +244,11 @@ public partial class MainWindow : Window
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         if (_doc == null) return;
+        if (_doc.Bodies.Count == 0)
+        {
+            StatusText.Text = T("💾 Er is nog niets om op te slaan: teken eerst een vlak of blok.", "💾 There is nothing to save yet: draw a face or block first.");
+            return;
+        }
         // (the name it has now, in its own folder: the user decides on another; Windows asks before overwriting)
         bool stl = _path != null && _path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase);
         var dlg = new SaveFileDialog
@@ -261,7 +302,7 @@ public partial class MainWindow : Window
     private void Undo()
     {
         if (_undo.Count == 0 || _doc == null) return;
-        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null;
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null;
         _redo.Add(_doc); _doc = _undo[^1]; _undo.RemoveAt(_undo.Count - 1);
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         Render();
@@ -273,7 +314,7 @@ public partial class MainWindow : Window
     private void Redo()
     {
         if (_redo.Count == 0 || _doc == null) return;
-        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null;
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null;
         _undo.Add(_doc); _doc = _redo[^1]; _redo.RemoveAt(_redo.Count - 1);
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         Render();
@@ -309,42 +350,53 @@ public partial class MainWindow : Window
         _shown = doc;
         if (_edges != null) { View.Children.Remove(_edges); _edges = null; }
         RenderLoose(doc);
-        if (doc == null) { ModelHost.Content = null; HighlightHost.Content = null; return; }
-        var group = new Model3DGroup();
-        var front = new DiffuseMaterial(new SolidColorBrush(FrontColor));
-        var back = new DiffuseMaterial(new SolidColorBrush(BackColor));
+        ModelHost.Children.Clear();
+        if (doc == null) { HighlightHost.Children.Clear(); return; }
+        var front = Phong(FrontColor);
+        var back = Phong(BackColor);
         double x0 = double.MaxValue, x1 = double.MinValue;
         for (int b = 0; b < doc.Bodies.Count; b++)
         {
             var body = doc.Bodies[b];
+            if (_hidden.Contains(body)) continue;
             // one mesh per colour painted on the body (null: the standard colour)
-            var byColor = new Dictionary<uint, (MeshGeometry3D Mesh, List<int> Map)>();
+            var byColor = new Dictionary<uint, (HelixToolkit.Vector3Collection Pos, HelixToolkit.Vector3Collection Nor, List<int> Map)>();
             const uint Standard = 0;
             for (int f = 0; f < body.Faces.Count; f++)
             {
                 var face = body.Faces[f];
                 uint key = doc.ColorOf(new FaceRef(b, f)) ?? Standard;
-                if (!byColor.TryGetValue(key, out var mm)) byColor[key] = mm = (new MeshGeometry3D(), new List<int>());
-                foreach (var (a, bb, c) in doc.TrianglesOf(new FaceRef(b, f)))
+                if (!byColor.TryGetValue(key, out var mm)) byColor[key] = mm = (new(), new(), new List<int>());
+                foreach (var (a, bb, c) in Clipped(doc.TrianglesOf(new FaceRef(b, f))))
                 {
                     foreach (var p in new[] { a, bb, c })
                     {
-                        mm.Mesh.Positions.Add(P(p));
-                        mm.Mesh.Normals.Add(D(NormalAt(face, p, a, bb, c)));
+                        mm.Pos.Add(F(P(p)));
+                        var n = NormalAt(face, p, a, bb, c);
+                        mm.Nor.Add(new System.Numerics.Vector3((float)n.X, (float)n.Y, (float)n.Z));
                         x0 = Math.Min(x0, Math.Min(p.X, Math.Min(p.Y, p.Z))); x1 = Math.Max(x1, Math.Max(p.X, Math.Max(p.Y, p.Z)));
                     }
                     mm.Map.Add(f);
                 }
             }
-            foreach (var (key, (mesh, map)) in byColor)
+            foreach (var (key, (pos, nor, map)) in byColor)
             {
-                mesh.Freeze();
-                var material = key == Standard ? front : new DiffuseMaterial(new SolidColorBrush(Argb(key)));
-                group.Children.Add(new GeometryModel3D(mesh, material) { BackMaterial = back });
+                if (pos.Count == 0) continue;
+                var mesh = new DxMesh { Positions = pos, Normals = nor, TriangleIndices = new HelixToolkit.IntCollection(Enumerable.Range(0, pos.Count)) };
+                ModelHost.Children.Add(new MeshGeometryModel3D { Geometry = mesh, Material = key == Standard ? front : Phong(Argb(key)), CullMode = SharpDX.Direct3D11.CullMode.Back, FrontCounterClockwise = true });
+                // the inside (seen through a hole or a cut): the back colour, the triangles turned round
+                var backIdx = new HelixToolkit.IntCollection(pos.Count);
+                for (int i = 0; i < pos.Count; i += 3) { backIdx.Add(i); backIdx.Add(i + 2); backIdx.Add(i + 1); }
+                var backNor = new HelixToolkit.Vector3Collection(nor.Count);
+                foreach (var n in nor) backNor.Add(-n);
+                ModelHost.Children.Add(new MeshGeometryModel3D
+                {
+                    Geometry = new DxMesh { Positions = pos, Normals = backNor, TriangleIndices = backIdx },
+                    Material = back, CullMode = SharpDX.Direct3D11.CullMode.Back, FrontCounterClockwise = true, IsHitTestVisible = false,
+                });
                 _meshes.Add((mesh, map, b));
             }
         }
-        ModelHost.Content = group;
         if (x1 > x0) _modelSize = (x1 - x0) * Display;
 
         // edges
@@ -352,6 +404,7 @@ public partial class MainWindow : Window
         for (int b = 0; b < doc.Bodies.Count; b++)
         {
             var body = doc.Bodies[b];
+            if (_hidden.Contains(body)) continue;
             var curvedUses = new int[body.Edges.Count];
             foreach (var face in body.Faces.Where(f => f.Surface is not BrepPlane))
                 foreach (var c in face.Loops.SelectMany(l => l)) curvedUses[c.Edge]++;
@@ -359,53 +412,57 @@ public partial class MainWindow : Window
             {
                 if (curvedUses[e] >= 2) continue;
                 var line = FaceGeometry.EdgePoints(body, body.Edges[e]);
-                for (int i = 0; i + 1 < line.Count; i++) { pts.Add(P(line[i])); pts.Add(P(line[i + 1])); }
+                for (int i = 0; i + 1 < line.Count; i++)
+                    if (ClippedSegment(line[i], line[i + 1]) is { } seg) { pts.Add(P(seg.A)); pts.Add(P(seg.B)); }
             }
         }
         _edges = new LinesVisual3D { Points = pts, Color = EdgeColor, Thickness = 1.3 };
         View.Children.Add(_edges);
+        RenderSectionCut(doc);
+        RenderGround(doc);
         UpdateHighlight();
         if (zoom)
         {
             // from the front left, a little above (as SketchUp opens a model), then everything in view
             if (View.Camera is ProjectionCamera cam) { cam.LookDirection = new Vector3D(1, 1.4, -0.9); cam.UpDirection = new Vector3D(0, 0, 1); }
-            View.ZoomExtents(0);
+            ZoomAll(0);
         }
     }
 
     /// <summary>The outward normal to shade a point of a face with: of the surface where it is round, of the plane or
     /// the triangle otherwise.</summary>
-    private static Vec3 NormalAt(BrepFace face, Vec3 p, Vec3 a, Vec3 b, Vec3 c)
+    private static Vec3 NormalAt(BrepFace face, Vec3 p, Vec3 a, Vec3 b, Vec3 c) =>
+        FaceGeometry.NormalAt(face, p) ?? (b - a).Cross(c - a).Normalized();
+
+    private static System.Numerics.Vector3 F(Point3D p) => new((float)p.X, (float)p.Y, (float)p.Z);
+    private static HelixToolkit.Maths.Color4 C4(Color c, double opacity = 1) => new(c.R / 255f, c.G / 255f, c.B / 255f, (float)(c.A / 255.0 * opacity));
+
+    /// <summary>A face colour lit as WPF lit it: diffuse, the ambient light in the same colour, no shine.</summary>
+    private static PhongMaterial Phong(Color c) => new()
     {
-        double s = face.Reversed ? -1 : 1;
-        switch (face.Surface)
-        {
-            case BrepPlane pl: return pl.Normal.Normalized() * s;
-            case BrepCylinder cy:
-            {
-                var ax = cy.Axis.Normalized(); var d = p - cy.Origin; d -= ax * d.Dot(ax);
-                return d.Normalized() * s;
-            }
-            case BrepSphere sp: return (p - sp.Centre).Normalized() * s;
-            default: return (b - a).Cross(c - a).Normalized();
-        }
-    }
+        DiffuseColor = C4(c), AmbientColor = C4(c), SpecularColor = new HelixToolkit.Maths.Color4(0, 0, 0, 1), SpecularShininess = 1,
+    };
 
     private void UpdateHighlight()
     {
-        if (_doc == null) { HighlightHost.Content = null; return; }
+        HighlightHost.Children.Clear();
+        if (_doc == null) return;
         var doc = _dragFace != null && _dragValid ? _preview ?? _doc : _doc;
-        var group = new Model3DGroup();
         void Add(FaceRef f, Color color, double opacity)
         {
             if (f.Body >= doc.Bodies.Count || f.Face < 0 || f.Face >= doc.Bodies[f.Body].Faces.Count) return;
-            var mesh = new MeshGeometry3D();
+            var pos = new HelixToolkit.Vector3Collection();
             foreach (var (a, b, c) in doc.TrianglesOf(f))
             {
-                mesh.Positions.Add(TowardEye(P(a), 1e-3)); mesh.Positions.Add(TowardEye(P(b), 1e-3)); mesh.Positions.Add(TowardEye(P(c), 1e-3));
+                pos.Add(F(TowardEye(P(a), 1e-3))); pos.Add(F(TowardEye(P(b), 1e-3))); pos.Add(F(TowardEye(P(c), 1e-3)));
             }
-            var mat = new DiffuseMaterial(new SolidColorBrush(color) { Opacity = opacity });
-            group.Children.Add(new GeometryModel3D(mesh, mat));
+            if (pos.Count == 0) return;
+            HighlightHost.Children.Add(new MeshGeometryModel3D
+            {
+                Geometry = new DxMesh { Positions = pos, TriangleIndices = new HelixToolkit.IntCollection(Enumerable.Range(0, pos.Count)) },
+                Material = new DiffuseMaterial { DiffuseColor = C4(color, opacity), EnableUnLit = true },
+                IsTransparent = true, CullMode = SharpDX.Direct3D11.CullMode.None, IsHitTestVisible = false,
+            });
         }
         if (_selected is { } s) Add(s, SelectColor, 0.35);
         if (_multi is { } mu) foreach (int mf in mu.Faces) if (_selected is not { } sel || sel != new FaceRef(mu.Body, mf)) Add(new FaceRef(mu.Body, mf), SelectColor, 0.35);
@@ -414,8 +471,7 @@ public partial class MainWindow : Window
         else if (_offsetFace is { } of) Add(of, SelectColor, 0.15);
         else if (_hover is { } h && h != _selected) Add(h, HoverColor, 0.4);
         if (_dragFace != null && _snapBase is { } sb)
-            Add(_previewMap != null && _dragValid && sb.Face < _previewMap.Count ? new FaceRef(sb.Body, _previewMap[sb.Face]) : sb, HoverColor, 0.45);
-        HighlightHost.Content = group;
+            Add(_previewMap != null && _dragValid && sb.Body == _dragFace.Value.Body && sb.Face < _previewMap.Count ? new FaceRef(sb.Body, _previewMap[sb.Face]) : sb, HoverColor, 0.45);
     }
 
     // ------------------------------------------------------------------ orbit (as in SketchUp)
@@ -424,6 +480,9 @@ public partial class MainWindow : Window
     private const double OrbitSpeed = 0.4;
 
     private Point? _orbitFrom;
+
+    /// <summary>How often the camera changed (for the test aid).</summary>
+    private int _cameraChanges;
     private Point3D _orbitPivot;
 
     /// <summary>The middle button (without Shift: that pans) starts turning the view. (The right button is kept free
@@ -431,9 +490,20 @@ public partial class MainWindow : Window
     private void View_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
-        if (e.ChangedButton != MouseButton.Middle || shift) return;
+        if (e.ChangedButton != MouseButton.Middle) return;
         if (View.Camera is not ProjectionCamera cam) return;
         var pos = e.GetPosition(View.Viewport);
+        if (shift)
+        {
+            // pan: the point of the model under the mouse (or the middle of the view) keeps under it
+            var grab = FaceAt(pos)?.Point ?? cam.Position + cam.LookDirection;
+            var look = cam.LookDirection; look.Normalize();
+            _panDepth = Vector3D.DotProduct(grab - cam.Position, look);
+            _panFrom = pos;
+            View.CaptureMouse();
+            e.Handled = true;
+            return;
+        }
         // around the point of the model under the mouse, or else the middle of the view
         _orbitPivot = FaceAt(pos)?.Point ?? cam.Position + cam.LookDirection;
         _orbitFrom = pos;
@@ -448,6 +518,14 @@ public partial class MainWindow : Window
     /// </summary>
     private void View_PreviewMouseMove(object sender, MouseEventArgs e)
     {
+        if (_panFrom is { } pf)
+        {
+            var p = e.GetPosition(View.Viewport);
+            Pan(p.X - pf.X, p.Y - pf.Y);
+            _panFrom = p;
+            e.Handled = true;
+            return;
+        }
         if (_orbitFrom is not { } from || View.Camera is not ProjectionCamera cam) return;
         var pos = e.GetPosition(View.Viewport);
         _orbitFrom = pos;
@@ -455,29 +533,93 @@ public partial class MainWindow : Window
         Orbit(pos.X - from.X, pos.Y - from.Y);
     }
 
-    /// <summary>Turns the view as the mouse moved (pixels) around the pivot.</summary>
+    /// <summary>
+    /// Turns the view as the mouse moved (pixels) around the pivot, freely all the way round (as DesignSpark): left/right
+    /// around the screen's up, up/down around its sideways direction; the camera's up turns along, so over the top the
+    /// model simply goes on turning and left/right stays left/right as seen.
+    /// </summary>
     private void Orbit(double dx, double dy)
     {
         if (View.Camera is not ProjectionCamera cam) return;
-        var up = new Vector3D(0, 0, 1);
         var position = cam.Position; var look = cam.LookDirection;
-        // around the vertical axis (camera the other way round than the model seems to turn)
-        var yaw = new RotateTransform3D(new AxisAngleRotation3D(up, -dx * OrbitSpeed), _orbitPivot);
-        position = yaw.Transform(position); look = yaw.Transform(look);
-        // tilt around the camera's right-hand direction, not past straight above or below
-        var right = Vector3D.CrossProduct(look, up);
-        if (right.Length > 1e-9)
-        {
-            var tilt = new RotateTransform3D(new AxisAngleRotation3D(right, -dy * OrbitSpeed), _orbitPivot);
-            var look2 = tilt.Transform(look);
-            double cos = Vector3D.DotProduct(look2, up) / look2.Length;
-            if (Math.Abs(cos) < Math.Cos(2 * Math.PI / 180)) { position = tilt.Transform(position); look = look2; }
-        }
+        // (the screen's up, square to the look; the sideways direction from the two)
+        var f = look; f.Normalize();
+        var up = cam.UpDirection - f * Vector3D.DotProduct(cam.UpDirection, f);
+        if (up.Length < 1e-9) return;
+        up.Normalize();
+        var right = Vector3D.CrossProduct(f, up);
+        // camera the other way round than the model seems to turn
+        var turn = new RotateTransform3D(new AxisAngleRotation3D(up, -dx * OrbitSpeed), _orbitPivot).Value;
+        var tilt = new RotateTransform3D(new AxisAngleRotation3D(right, -dy * OrbitSpeed), _orbitPivot).Value;
+        var m = turn; m.Append(tilt);
+        SetCamera(m.Transform(position), m.Transform(look), m.Transform(up));
+    }
+
+    /// <summary>The camera set, unless that would make it unusable (not a number, no direction, up along the look):
+    /// then left as it was.</summary>
+    private void SetCamera(Point3D position, Vector3D look, Vector3D up)
+    {
+        if (View.Camera is not ProjectionCamera cam) return;
+        static bool Ok(double v) => double.IsFinite(v);
+        if (!(Ok(position.X) && Ok(position.Y) && Ok(position.Z) && Ok(look.X) && Ok(look.Y) && Ok(look.Z) && Ok(up.X) && Ok(up.Y) && Ok(up.Z))) return;
+        if (look.Length < 1e-9 || up.Length < 1e-9 || Vector3D.CrossProduct(look, up).Length < 1e-6 * look.Length * up.Length) return;
         cam.Position = position; cam.LookDirection = look; cam.UpDirection = up;
+    }
+
+    /// <summary>Whether the camera can be used (a number everywhere, a direction to look in, up not along it).</summary>
+    private bool CameraOk() => View.Camera is ProjectionCamera c
+        && double.IsFinite(c.Position.X + c.Position.Y + c.Position.Z + c.LookDirection.X + c.LookDirection.Y + c.LookDirection.Z + c.UpDirection.X + c.UpDirection.Y + c.UpDirection.Z)
+        && c.LookDirection.Length > 1e-9 && Vector3D.CrossProduct(c.LookDirection, c.UpDirection).Length > 1e-6 * c.LookDirection.Length * c.UpDirection.Length;
+
+    /// <summary>The model moved along with the mouse (pixels), at the depth of the point grabbed.</summary>
+    private void Pan(double dx, double dy)
+    {
+        if (View.Camera is not ProjectionCamera cam || Viewport3DHelper.Reach(View) is not { } reach) return;
+        var f = cam.LookDirection; f.Normalize();
+        var r = Vector3D.CrossProduct(f, cam.UpDirection);
+        if (r.Length < 1e-9) return;
+        r.Normalize();
+        var u = Vector3D.CrossProduct(r, f);
+        // (a pixel at that depth, in millimetres)
+        double sx = 2 * _panDepth * reach.Tx / View.ActualWidth, sy = 2 * _panDepth * reach.Ty / View.ActualHeight;
+        SetCamera(cam.Position - r * (dx * sx) + u * (dy * sy), cam.LookDirection, cam.UpDirection);
+    }
+
+    private Point? _panFrom;
+    private double _panDepth;
+
+    /// <summary>Where the test aid has the mouse for a wheel turn (a made-up event has no position of its own).</summary>
+    private Point? _simMouse;
+
+    /// <summary>The wheel zooms toward the point under the mouse (the model there, or else a point as far as the middle
+    /// of the view): a notch a fifth of the way closer, or back.</summary>
+    private void View_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        e.Handled = true;
+        if (View.Camera is not ProjectionCamera cam) return;
+        var pos = _simMouse ?? e.GetPosition(View.Viewport);
+        Point3D target;
+        if (FaceAt(pos)?.Point is { } hit) target = hit;
+        else if (Viewport3DHelper.GetRay(View, pos) is { } ray) target = ray.Origin + ray.Direction * cam.LookDirection.Length;
+        else return;
+        double f = Math.Pow(0.8, e.Delta / 120.0);
+        SetCamera(target + (cam.Position - target) * f, cam.LookDirection * f, cam.UpDirection);
     }
 
     private void View_PreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
+        if (e.ChangedButton == MouseButton.Left && _pressAt != null)
+        {
+            if (ReleaseAt(e.GetPosition(View.Viewport))) e.Handled = true;
+            return;
+        }
+        if (_panFrom != null && e.ChangedButton == MouseButton.Middle)
+        {
+            _panFrom = null;
+            View.ReleaseMouseCapture();
+            e.Handled = true;
+            return;
+        }
         if (_orbitFrom == null) return;
         if (e.ChangedButton != MouseButton.Middle) return;
         _orbitFrom = null;
@@ -489,13 +631,63 @@ public partial class MainWindow : Window
 
     private (FaceRef Face, Point3D Point)? FaceAt(Point pos)
     {
-        foreach (var hit in View.Viewport.FindHits(pos))
-        {
-            if (hit.RayHit is not RayMeshGeometry3DHitTestResult r) continue;
-            foreach (var (mesh, map, body) in _meshes)
-                if (ReferenceEquals(mesh, r.MeshHit)) return (new FaceRef(body, map[r.VertexIndex1 / 3]), hit.Position);
-        }
+        foreach (var (mesh, map, body, tri, at) in Hits(pos))
+            if (tri < map.Count) return (new FaceRef(body, map[tri]), at);
         return null;
+    }
+
+    /// <summary>
+    /// The shown faces under a point of the screen, nearest first: its mesh, the face per triangle, the body, the
+    /// triangle hit and where. The ray through the mouse against the shown triangles, worked out here (the viewer's own
+    /// hit test lies about a pixel off: a click just inside an edge fell beside the face).
+    /// </summary>
+    private IEnumerable<(DxMesh Mesh, List<int> Map, int Body, int Triangle, Point3D At)> Hits(Point pos)
+    {
+        if (Viewport3DHelper.GetRay(View, pos) is not { } ray) return [];
+        var o = ray.Origin; var d = ray.Direction; d.Normalize();
+        var hits = new List<(double T, DxMesh Mesh, List<int> Map, int Body, int Triangle)>();
+        foreach (var (mesh, map, body) in _meshes)
+        {
+            var p = mesh.Positions;
+            if (p == null || p.Count < 3) continue;
+            // (not through its box: none of its triangles)
+            var b = mesh.Bound;
+            if (!RayHitsBox(o, d, b.Minimum, b.Maximum)) continue;
+            for (int i = 0; i + 2 < p.Count; i += 3)
+                if (RayTriangle(o, d, p[i], p[i + 1], p[i + 2]) is double t) hits.Add((t, mesh, map, body, i / 3));
+        }
+        return hits.OrderBy(h => h.T).Select(h => (h.Mesh, h.Map, h.Body, h.Triangle, o + d * h.T));
+    }
+
+    /// <summary>Where along the ray (from o along unit d) it goes through the triangle (either side), or null.</summary>
+    private static double? RayTriangle(Point3D o, Vector3D d, System.Numerics.Vector3 a3, System.Numerics.Vector3 b3, System.Numerics.Vector3 c3)
+    {
+        var a = new Point3D(a3.X, a3.Y, a3.Z);
+        Vector3D e1 = new Point3D(b3.X, b3.Y, b3.Z) - a, e2 = new Point3D(c3.X, c3.Y, c3.Z) - a;
+        var h = Vector3D.CrossProduct(d, e2); double det = Vector3D.DotProduct(e1, h);
+        if (Math.Abs(det) < 1e-12) return null;
+        var s = o - a; double u = Vector3D.DotProduct(s, h) / det;
+        if (u < 0 || u > 1) return null;
+        var q = Vector3D.CrossProduct(s, e1); double v = Vector3D.DotProduct(d, q) / det;
+        if (v < 0 || u + v > 1) return null;
+        double t = Vector3D.DotProduct(e2, q) / det;
+        return t > 0 ? t : null;
+    }
+
+    /// <summary>Whether the ray (from o along d) goes through the box (a little grown, for rounding).</summary>
+    private static bool RayHitsBox(Point3D o, Vector3D d, System.Numerics.Vector3 lo, System.Numerics.Vector3 hi)
+    {
+        double t0 = 0, t1 = double.MaxValue;
+        double[] org = [o.X, o.Y, o.Z], dir = [d.X, d.Y, d.Z], mn = [lo.X - 1e-3, lo.Y - 1e-3, lo.Z - 1e-3], mx = [hi.X + 1e-3, hi.Y + 1e-3, hi.Z + 1e-3];
+        for (int k = 0; k < 3; k++)
+        {
+            if (Math.Abs(dir[k]) < 1e-15) { if (org[k] < mn[k] || org[k] > mx[k]) return false; continue; }
+            double ta = (mn[k] - org[k]) / dir[k], tb = (mx[k] - org[k]) / dir[k];
+            if (ta > tb) (ta, tb) = (tb, ta);
+            t0 = Math.Max(t0, ta); t1 = Math.Min(t1, tb);
+            if (t0 > t1) return false;
+        }
+        return true;
     }
 
     private bool IsPlanar(FaceRef f) => _doc != null && _doc.Bodies[f.Body].Faces[f.Face].Surface is BrepPlane;
@@ -522,7 +714,24 @@ public partial class MainWindow : Window
     private bool LassoMode => LassoTool.IsChecked == true;
     private bool MirrorMode => MirrorTool.IsChecked == true;
     private bool FollowMode => FollowTool.IsChecked == true;
+    private bool FreehandMode => FreehandTool.IsChecked == true;
+    private bool ZoomMode => ZoomTool.IsChecked == true;
+    private bool ZoomWindowMode => ZoomWindowTool.IsChecked == true;
+    private bool PositionCameraMode => PositionCameraTool.IsChecked == true;
+    private bool LookAroundMode => LookAroundTool.IsChecked == true;
+    private bool WalkMode => WalkTool.IsChecked == true;
+    private bool ProtractorMode => ProtractorTool.IsChecked == true;
+    private bool SectionMode => SectionTool.IsChecked == true;
+    private bool TagMode => TagTool.IsChecked == true;
+    private bool DimensionMode => DimensionTool.IsChecked == true;
+    private bool TextMode => TextTool.IsChecked == true;
+    private bool AxesMode => AxesTool.IsChecked == true;
+    private bool Text3DMode => Text3DTool.IsChecked == true;
     private bool UnionMode => UnionTool.IsChecked == true;
+
+    /// <summary>The boolean tool chosen (∪ ∖ ∩ ✂ ⊘), or null.</summary>
+    private BoolTool? BoolMode => UnionMode ? BoolTool.Union : SubtractTool.IsChecked == true ? BoolTool.Subtract : IntersectTool.IsChecked == true ? BoolTool.Intersect
+        : TrimTool.IsChecked == true ? BoolTool.Trim : SplitTool.IsChecked == true ? BoolTool.Split : null;
     private bool PolygonMode => PolygonTool.IsChecked == true;
     private bool ArcMode => ArcTool.IsChecked == true;
     private bool Arc3Mode => Arc3Tool.IsChecked == true;
@@ -534,14 +743,14 @@ public partial class MainWindow : Window
     private bool DrawMode => RectMode || LineMode || CircleMode;
 
     /// <summary>Tools that work on planar faces only.</summary>
-    private bool PlanarMode => PushMode || DrawMode || OffsetMode || MirrorMode || PolygonMode || ArcMode || Arc3Mode || FollowMode || CentreArcMode || PieMode || RotRectMode;
+    private bool PlanarMode => PushMode || DrawMode || OffsetMode || MirrorMode || PolygonMode || ArcMode || Arc3Mode || FollowMode || FreehandMode || CentreArcMode || PieMode || RotRectMode;
 
     private void Tool_Checked(object sender, RoutedEventArgs e)
     {
         if (!IsLoaded) return;
         PaintPanel.Visibility = PaintMode ? Visibility.Visible : Visibility.Collapsed;
         if (PaintMode) BuildPalette(); else _sampleOnce = false;
-        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _unionFirst = null; HideTag(); MeasureUnit.Text = "mm";
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndFreehand(); EndView(); EndProtractor(); EndSection(); EndDimension(); EndNoteBox(false); _axStage = 0; _grip = null; _gripHover = null; _letters = null; _unionFirst = null; HideTag(); MeasureUnit.Text = "mm";
         Render();
         if (!LassoMode) EndLasso();
         StatusText.Text = MirrorMode ? T("⇋ Spiegelen: klik een plat vlak; het lichaam spiegelt erin. Ctrl+klik: een gespiegelde kopie erbij.", "⇋ Mirror: click a flat face; the body is mirrored in it. Ctrl+click: add a mirrored copy.")
@@ -557,8 +766,23 @@ public partial class MainWindow : Window
             : CentreArcMode ? T("◜ Boog vanaf het middelpunt: klik het middelpunt op een plat vlak, dan het beginpunt, en beweeg voor de hoek.", "◜ Arc from the centre: click the centre on a flat face, then the start point, and move for the angle.")
             : PieMode ? T("◔ Taartpunt: klik het middelpunt op een plat vlak, dan het beginpunt, en beweeg voor de hoek.", "◔ Pie: click the centre on a flat face, then the start point, and move for the angle.")
             : RotRectMode ? T("◇ Rechthoek onder een hoek: klik een hoek op een plat vlak, dan de tweede hoek (de eerste zijde), en beweeg voor de breedte.", "◇ Rotated rectangle: click a corner on a flat face, then the second corner (the first side), and move for the width.")
+            : Text3DMode ? T("A 3D-tekst: klik een punt op een plat vlak (links onder van de tekst). Typ eerst een letterhoogte (mm) + Enter als je die wilt kiezen.", "A 3D Text: click a point on a flat face (bottom left of the text). Type a letter height (mm) + Enter first if you want to choose it.")
+            : AxesMode ? T("✛ Assen: klik de nieuwe oorsprong (op een lege plek: de gewone assen terug).", "✛ Axes: click the new origin (on an empty spot: the usual axes back).")
+            : DimensionMode ? T("↔ Maatlijn: klik het eerste punt (of een maat om hem weg te halen).", "↔ Dimension: click the first point (or a dimension to remove it).")
+            : TextMode ? T("💬 Tekstlabel: klik een punt op het model (of een label om het weg te halen).", "💬 Text: click a point on the model (or a label to remove it).")
+            : TagMode ? T("🏷 Verbergen: klik een deel om het te verbergen; klik op een lege plek om alles weer te tonen.", "🏷 Hide: click a part to hide it; click an empty spot to show everything again.")
+            : SectionMode ? (_section != null ? T("⊟ Klik een plat vlak voor een nieuwe doorsnede, of Esc om de doorsnede weg te halen.", "⊟ Click a flat face for a new section, or Esc to remove the section.")
+                : T("⊟ Doorsnede: klik het platte vlak waar het snijvlak begint.", "⊟ Section: click the flat face where the cutting plane starts."))
+            : ProtractorMode ? T("∡ Gradenboog: klik het middelpunt op een vlak.", "∡ Protractor: click the centre on a face.")
+            : ZoomMode ? T("🔍 Zoomen: klik, en beweeg omhoog (in) of omlaag (uit); klik om te stoppen.", "🔍 Zoom: click, and move up (in) or down (out); click to stop.")
+            : ZoomWindowMode ? T("🔎 Zoomvenster: klik een hoek van het kader.", "🔎 Zoom Window: click a corner of the frame.")
+            : PositionCameraMode ? T("📷 Camera plaatsen: klik waar je wilt staan.", "📷 Position Camera: click where you want to stand.")
+            : LookAroundMode ? T("👁 Rondkijken: klik en beweeg om je hoofd te draaien.", "👁 Look Around: click and move to turn your head.")
+            : WalkMode ? T("🚶 Lopen: ↑/↓ vooruit/achteruit, ←/→ draaien, PageUp/PageDown omhoog/omlaag; klik en beweeg om rond te kijken.", "🚶 Walk: ↑/↓ forward/back, ←/→ turn, PageUp/PageDown up/down; click and move to look around.")
+            : FreehandMode ? T("✎ Uit de vrije hand: klik op een plat vlak om te beginnen.", "✎ Freehand: click on a flat face to start.")
+            : WorkPlaneMode ? "⊞" + PlaneHelp()
             : FollowMode ? T("↝ Ronddraaien: klik het platte vlak dat eruit moet draaien.", "↝ Follow Me: click the flat face that is to turn out.")
-            : UnionMode ? T("∪ Verenigen: klik het eerste deel.", "∪ Union: click the first part.")
+            : BoolMode is { } bm ? FirstAsk(bm)
             : Arc3Mode ? T("⌓ Boog door drie punten: klik het beginpunt op een plat vlak, dan een punt op de boog, dan het eindpunt.", "⌓ 3 point arc: click the start point on a flat face, then a point on the arc, then the end point.")
             : ArcMode ? T("⌒ Boog: klik het beginpunt op een plat vlak, dan het eindpunt, en beweeg voor de bolling. Van rand tot rand deelt hij het vlak.", "⌒ Arc: click the start point on a flat face, then the end point, and move for the bulge. From edge to edge it divides the face.")
             : PolygonMode ? T($"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): klik het middelpunt op een plat vlak, beweeg en klik. Of typ de straal + Enter.", $"⬡ Polygon ({_polySides} sides; ↑/↓: more/fewer): click the centre on a flat face, move and click. Or type the radius + Enter.")
@@ -581,6 +805,8 @@ public partial class MainWindow : Window
         if (_movePick != null) { MoveTo(pos); return; }
         if (_dragFace != null) { DragTo(pos); return; }
         if (_drawFace != null) { DrawTo(pos); return; }
+        if (_gKind != null) { GroundTo(pos); return; }
+        if (WorkPlaneMode) { GripMove(pos); if (_grip != null) return; }
         if (_offsetFace != null) { OffsetTo(pos); return; }
         if (_roundEdge != null) { RoundTo(pos); return; }
         if (_rotStage > 0) { RotateTo(pos); return; }
@@ -591,6 +817,11 @@ public partial class MainWindow : Window
         if (_swFace != null) { SweepTo(pos); return; }
         if (_rrFace != null) { RotRectTo(pos); return; }
         if (_fmFace != null) { FollowTo(pos); return; }
+        if (_fhFace != null) { FreehandTo(pos); return; }
+        if (_viewAnchor != null) { ViewTo(pos); return; }
+        if (_prStage > 0) { ProtractorTo(pos); return; }
+        if (_secFace != null) { SectionTo(pos); return; }
+        if (_dimStage > 0) { DimensionTo(pos); return; }
         var hit = FaceAt(pos);
         FaceRef? h = hit?.Face;
         if (h is { } hf && PlanarMode && !(PushMode ? Pushable(hf) : IsPlanar(hf))) h = null;
@@ -618,8 +849,42 @@ public partial class MainWindow : Window
 
     private void View_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (_doc != null && ClickAt(e.GetPosition(View.Viewport))) e.Handled = true;
+        if (PressAt(e.GetPosition(View.Viewport))) e.Handled = true;
     }
+
+    /// <summary>The left button down at a point of the view; whether it was used.</summary>
+    private bool PressAt(Point at)
+    {
+        // (an empty window: drawing on the ground starts a new document)
+        if (_doc == null && DrawMode && GroundAt(at) != null) NewDocument();
+        bool before = ActionBusy;
+        bool used = _doc != null && ClickAt(at);
+        // (a press that started something: let go after moving, and it is set there, as a drag; a plain click goes on as
+        // click, move, click)
+        _pressAt = !before && ActionBusy ? at : null;
+        if (_pressAt != null) View.CaptureMouse();
+        return used;
+    }
+
+    /// <summary>The left button up at a point of the view; whether it set what a press started (a drag).</summary>
+    private bool ReleaseAt(Point up)
+    {
+        if (_pressAt is not { } down) return false;
+        _pressAt = null;
+        View.ReleaseMouseCapture();
+        // (dragged far enough to mean it: the release is the click that sets it)
+        return (up - down).Length > 6 && ActionBusy && _doc != null && ClickAt(up);
+    }
+
+    /// <summary>Where the left button went down to start an action (for dragging), or null.</summary>
+    private Point? _pressAt;
+
+    /// <summary>Whether an action is in progress that a next click finishes or takes on (push/pull, drawing, moving, the
+    /// work plane's handle, …).</summary>
+    private bool ActionBusy => _dragFace != null || _drawFace != null || _gKind != null || _grip != null || _movePick != null
+        || _offsetFace != null || _roundEdge != null || _rotStage > 0 || _scStage > 0 || _polyFace != null || _arcFace != null
+        || _swFace != null || _rrFace != null || _fmFace != null || _fhFace != null || _secFace != null || _dimStage > 0
+        || _prStage > 0 || _tapeStart != null;
 
     /// <summary>A left click at a point of the view; whether it was used (not passed on to the view).</summary>
     private bool ClickAt(Point pos)
@@ -628,6 +893,8 @@ public partial class MainWindow : Window
         if (_movePick != null) { handled = true; MoveTo(pos); FinishMove(); return handled; }
         if (_dragFace != null) { handled = true; Finish(_dragDist); return handled; }
         if (_drawFace != null) { handled = true; DrawTo(pos); FinishDraw(); return handled; }
+        if (_gKind != null) { handled = true; GroundClick(pos); return handled; }
+        if (WorkPlaneMode) { handled = true; if (!GripClick(pos)) WorkPlaneClick(pos); return handled; }
         if (_offsetFace != null) { handled = true; OffsetTo(pos); FinishOffset(); return handled; }
         if (_roundEdge != null) { handled = true; RoundTo(pos); FinishRound(); return handled; }
         if (_rotStage > 0) { handled = true; RotateClick(pos); return handled; }
@@ -635,16 +902,28 @@ public partial class MainWindow : Window
         if (LassoMode) { handled = true; if (_lasso == null) StartLasso(pos); else FinishLasso(); return handled; }
         if (MirrorMode) { handled = true; MirrorAt(FaceAt(pos)); return handled; }
         if (_polyFace != null) { handled = true; PolygonTo(pos); FinishPolygon(); return handled; }
-        if (PolygonMode) { handled = true; StartPolygon(FaceAt(pos)); return handled; }
+        if (PolygonMode) { handled = true; StartPolygon(FaceOrLoose(pos)); return handled; }
         if (_arcFace != null) { handled = true; ArcClick(pos); return handled; }
-        if (ArcMode || Arc3Mode) { handled = true; StartArc(FaceAt(pos), pos); return handled; }
+        if (ArcMode || Arc3Mode) { handled = true; StartArc(FaceOrLoose(pos), pos); return handled; }
         if (_swFace != null) { handled = true; SweepClick(pos); return handled; }
-        if (CentreArcMode || PieMode) { handled = true; StartSweep(FaceAt(pos), pos); return handled; }
+        if (CentreArcMode || PieMode) { handled = true; StartSweep(FaceOrLoose(pos), pos); return handled; }
         if (_rrFace != null) { handled = true; RotRectClick(pos); return handled; }
-        if (RotRectMode) { handled = true; StartRotRect(FaceAt(pos), pos); return handled; }
+        if (RotRectMode) { handled = true; StartRotRect(FaceOrLoose(pos), pos); return handled; }
         if (_fmFace != null) { handled = true; FollowClick(pos); return handled; }
         if (FollowMode) { handled = true; StartFollow(FaceAt(pos)); return handled; }
-        if (UnionMode) { handled = true; UnionClick(FaceAt(pos)); return handled; }
+        if (_fhFace != null) { handled = true; FreehandTo(pos); FinishFreehand(pos); return handled; }
+        if (FreehandMode) { handled = true; StartFreehand(FaceOrLoose(pos), pos); return handled; }
+        if (ZoomMode || ZoomWindowMode || LookAroundMode || WalkMode) { handled = true; ViewClick(pos); return handled; }
+        if (PositionCameraMode) { handled = true; PlaceCamera(pos); return handled; }
+        if (ProtractorMode) { handled = true; ProtractorClick(pos); return handled; }
+        if (_secFace != null) { handled = true; SectionTo(pos); SetSection(_secDist); return handled; }
+        if (SectionMode) { handled = true; StartSection(FaceAt(pos)); return handled; }
+        if (TagMode) { handled = true; HideAt(FaceAt(pos)); return handled; }
+        if (DimensionMode) { handled = true; DimensionClick(pos); return handled; }
+        if (TextMode) { handled = true; TextClick(pos); return handled; }
+        if (AxesMode) { handled = true; AxesClick(pos); return handled; }
+        if (Text3DMode) { handled = true; Text3DClick(pos); return handled; }
+        if (BoolMode is { } bop) { handled = true; BoolClick(bop, FaceAt(pos)); return handled; }
         if (ScaleMode) { handled = true; StartScale(FaceAt(pos)); return handled; }
         if (RotateMode) { handled = true; StartRotate(FaceAt(pos), pos); return handled; }
         if (PushMode && SharpEdgeNear(FaceAt(pos), pos) is { } pe)
@@ -676,7 +955,10 @@ public partial class MainWindow : Window
         if (MoveMode) { handled = true; StartMove(FaceAt(pos), pos); return handled; }
         if (DrawMode)
         {
-            if (hit is not { } dh) return handled;
+            // (not on a face: on the ground)
+            // (beside every face: on a loose line's snap point there, else on the work plane)
+            if (hit is null && LooseHit(pos) is { } lh) hit = lh;
+            if (hit is not { } dh) { if (GroundAt(pos) != null) { handled = true; GroundClick(pos); } return handled; }
             handled = true;
             if (!IsPlanar(dh.Face)) { StatusText.Text = T("Tekenen kan (nog) alleen op platte vlakken.", "Drawing only works on flat faces (for now)."); return handled; }
             StartDraw(dh.Face, V(dh.Point), (Point?)pos);
@@ -761,7 +1043,7 @@ public partial class MainWindow : Window
     /// plane (as SketchUp lines rectangles up with the axes).</summary>
     private static Vec3 RectAxis(Vec3 n)
     {
-        var a = new[] { new Vec3(1, 0, 0), new Vec3(0, 1, 0), new Vec3(0, 0, 1) }.MinBy(x => Math.Abs(x.Dot(n)));
+        var a = new[] { _axisRed, _axisGreen, _axisBlue }.MinBy(x => Math.Abs(x.Dot(n)));
         return (a - n * a.Dot(n)).Normalized();
     }
 
@@ -1213,11 +1495,57 @@ public partial class MainWindow : Window
         }
         catch (PushPullException ex)
         {
+            // (sticking out over the face's edge: as loose lines in its plane, they divide the face and close the rest
+            // with its edges, a face of its own beside it; as SketchUp)
+            if (kind != DrawKind.Line && OverTheEdge(before, f, a, c, u, kind) is { } over)
+            {
+                Commit(before, over.Doc);
+                _last = null; _selected = over.Face; _lastDrawn = over.Face;
+                Render();
+                StatusText.Text = T("✅ Getekend; het steekt over de rand: het vlak is gedeeld en wat erbuiten ligt is een eigen vlak.", "✅ Drawn; it sticks out over the edge: the face is divided and what lies outside is a face of its own.");
+                Log($"{where}: over the edge, {over.Doc.Bodies.Count} bodies");
+                return;
+            }
             Render();
             ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
             Log($"{where}: {ex.Message}");
         }
+    }
+
+    /// <summary>A rectangle or circle on face f that sticks out over its edge, drawn as loose lines in the face's plane
+    /// (dividing the faces there, the rest a face of its own); null when that closes nothing.</summary>
+    private static (SketchDocument Doc, FaceRef Face)? OverTheEdge(SketchDocument before, FaceRef f, Vec3 a, Vec3 c, Vec3 u, DrawKind kind)
+    {
+        var face = before.Bodies[f.Body].Faces[f.Face];
+        if (face.Surface is not BrepPlane pl) return null;
+        var n = FaceGeometry.Normal(face);
+        List<SketchLine> lines;
+        if (kind == DrawKind.Circle)
+        {
+            double r = (c - a).Length;
+            if (r < 1e-9) return null;
+            var start = a + (c - a).Normalized() * r;
+            lines = [new SketchLine(start, start, a, n)];
+        }
+        else
+        {
+            var v = n.Cross(u); var d = c - a;
+            double du = d.Dot(u), dv = d.Dot(v);
+            if (Math.Abs(du) < 1e-9 || Math.Abs(dv) < 1e-9) return null;
+            Vec3 p1 = a + u * du, p3 = a + v * dv;
+            lines = [new SketchLine(a, p1), new SketchLine(p1, c), new SketchLine(c, p3), new SketchLine(p3, a)];
+        }
+        try
+        {
+            var (doc, made) = before.AddLines(lines).CloseLooseLines(f);
+            var (doc2, made2) = doc.CloseLooseLinesOnPlane(n, pl.Origin);
+            made.AddRange(made2);
+            // (lines left over: it did not close as meant)
+            if (made.Count == 0 || doc2.Lines.Count > before.Lines.Count) return null;
+            return (doc2, made[^1]);
+        }
+        catch (PushPullException) { return null; }
     }
 
     private void EndDraw()
@@ -1275,9 +1603,13 @@ public partial class MainWindow : Window
     // ------------------------------------------------------------------ move (as in SketchUp)
 
     private static readonly Color AxisX = Color.FromRgb(0xE1, 0x1D, 0x48), AxisY = Color.FromRgb(0x16, 0xA3, 0x4A), AxisZ = Color.FromRgb(0x25, 0x63, 0xEB);
-    private static readonly (Vec3 Dir, string Name, Color Color)[] Axes =
+    /// <summary>The drawing axes (as SketchUp's; set with ✛): red, green and blue, square to each other, through an origin.</summary>
+    private static Vec3 _axisRed = new(1, 0, 0), _axisGreen = new(0, 1, 0), _axisBlue = new(0, 0, 1), _axisOrigin;
+
+    /// <summary>The axes with their names (in the language chosen now) and colours.</summary>
+    private static (Vec3 Dir, string Name, Color Color)[] Axes =>
     [
-        (new Vec3(1, 0, 0), T("rode as", "red axis"), AxisX), (new Vec3(0, 1, 0), T("groene as", "green axis"), AxisY), (new Vec3(0, 0, 1), T("blauwe as", "blue axis"), AxisZ),
+        (_axisRed, T("rode as", "red axis"), AxisX), (_axisGreen, T("groene as", "green axis"), AxisY), (_axisBlue, T("blauwe as", "blue axis"), AxisZ),
     ];
 
     // a move in progress: what is picked up (body, selection, a word for it), where it was grabbed, the document it
@@ -1673,6 +2005,8 @@ public partial class MainWindow : Window
             if ((_drawFace ?? _arcFace ?? _swFace ?? _polyFace ?? _rrFace ?? _offsetFace) is { } af && IsPlanar(af))
                 faces.AddRange(PlaneFaces(af).Select(g => new FaceRef(af.Body, g)));
             if (FaceAt(pos) is { } hit) faces.Add(hit.Face);
+            // (a face of what is shown just before the document changed may no longer exist)
+            faces.RemoveAll(f => f.Body >= _doc.Bodies.Count || f.Face >= _doc.Bodies[f.Body].Faces.Count);
             var mat = Viewport3DHelper.GetTotalTransform(View.Viewport);
             Point Screen(Vec3 v) { var q = mat.Transform(P(v)); return new Point(q.X, q.Y); }
             double Dist(IReadOnlyList<Vec3> along, bool closed)
@@ -1973,7 +2307,42 @@ public partial class MainWindow : Window
     }
 
     /// <summary>⛶: the whole model in view.</summary>
-    private void ZoomExtentsButton_Click(object sender, RoutedEventArgs e) => View.ZoomExtents(300);
+    private void ZoomExtentsButton_Click(object sender, RoutedEventArgs e) => ZoomAll(300);
+
+    /// <summary>Everything shown in view, looking the way the camera looks: the camera put back along its look until the
+    /// corners of the box round the model just fit (90 % of the narrower side).</summary>
+    private void ZoomAll(double ms)
+    {
+        var pts = _meshes.SelectMany(m => m.Mesh.Positions).ToList();
+        if (pts.Count == 0 || View.Camera is not PerspectiveCamera cam) return;
+        var lo = new Point3D(pts.Min(p => p.X), pts.Min(p => p.Y), pts.Min(p => p.Z));
+        var hi = new Point3D(pts.Max(p => p.X), pts.Max(p => p.Y), pts.Max(p => p.Z));
+        var centre = lo + (hi - lo) * 0.5;
+        var corners = new[] { lo.X, hi.X }.SelectMany(x => new[] { lo.Y, hi.Y }.SelectMany(y => new[] { lo.Z, hi.Z }.Select(z => new Point3D(x, y, z)))).ToList();
+        // (the way the camera looks; from the front left, a little above, when it has none that can be used)
+        var f = CameraOk() ? cam.LookDirection : new Vector3D(1, 1.4, -0.9); f.Normalize();
+        var r = Vector3D.CrossProduct(f, new Vector3D(0, 0, 1)); if (r.Length < 1e-9) r = new Vector3D(1, 0, 0); r.Normalize();
+        var u = Vector3D.CrossProduct(r, f);
+        double w = View.ActualWidth > 0 ? View.ActualWidth : 1000, h = View.ActualHeight > 0 ? View.ActualHeight : 700;
+        double t = Math.Tan(cam.FieldOfView * Math.PI / 360);
+        var (tx, ty) = Viewport3DHelper.Reach(View) ?? (t * w / h, t);
+        // (how far out of the middle the furthest corner lands, as a part of the half view)
+        double Reach(double d)
+        {
+            var eye = centre - f * d; double m = 0;
+            foreach (var c in corners)
+            {
+                var v = c - eye; double z = Vector3D.DotProduct(v, f);
+                if (z <= 1e-9) return double.MaxValue;
+                m = Math.Max(m, Math.Max(Math.Abs(Vector3D.DotProduct(v, r) / (z * tx)), Math.Abs(Vector3D.DotProduct(v, u) / (z * ty))));
+            }
+            return m;
+        }
+        double near = 1e-3, far = Math.Max((hi - lo).Length, 1e-3) * 100;
+        for (int i = 0; i < 60; i++) { double mid = (near + far) / 2; if (Reach(mid) > 0.9) near = mid; else far = mid; }
+        // (up the z axis, unless looking straight down or up)
+        cam.Position = centre - f * far; cam.LookDirection = f * far; cam.UpDirection = Math.Abs(f.Z) > 0.999 ? u : new Vector3D(0, 0, 1);
+    }
 
     /// <summary>A click with the bucket: the face painted (Ctrl the whole body, Shift every face of the same colour in the
     /// body), or with Alt its colour taken up.</summary>
@@ -2214,21 +2583,22 @@ public partial class MainWindow : Window
         int moving = map != null ? map[f.Face] : f.Face;
         // (the face can be gone in the preview: merged away)
         if (f.Body >= _shown.Bodies.Count || moving < 0 || moving >= _shown.Bodies[f.Body].Faces.Count) return null;
-        foreach (var hit in View.Viewport.FindHits(pos))
+        foreach (var m in Hits(pos))
         {
-            if (hit.RayHit is not RayMeshGeometry3DHitTestResult r) continue;
-            var m = _meshes.FirstOrDefault(x => ReferenceEquals(x.Mesh, r.MeshHit));
-            if (m.Mesh == null || r.VertexIndex1 / 3 >= m.FaceOfTriangle.Count) continue;
-            int shownFace = m.FaceOfTriangle[r.VertexIndex1 / 3];
-            // only what is in front counts: the face being moved (or a side face it made) hides what is behind it
-            if (m.Body != f.Body || shownFace == moving || (map != null && _previewNew.Contains(shownFace))) return null;
+            if (m.Triangle >= m.Map.Count) continue;
+            int shownFace = m.Map[m.Triangle];
+            // only what is in front counts: the face being moved (or a side face it made) hides what is behind it; a face
+            // of another part counts as well (blocks made apart, side by side)
+            bool own = m.Body == f.Body;
+            if (own && (shownFace == moving || (map != null && _previewNew.Contains(shownFace)))) return null;
+            if (m.Body >= _shown.Bodies.Count) return null;
             var body = _shown.Bodies[m.Body];
             if (shownFace >= body.Faces.Count) return null;
             var face = body.Faces[shownFace];
-            int baseIndex = map == null ? shownFace : IndexOf(map, shownFace);
+            int baseIndex = !own || map == null ? shownFace : IndexOf(map, shownFace);
             if (baseIndex < 0) return null;
             // a corner of it close to the mouse (not one that moves along)
-            var movingVerts = map == null ? [] : body.Faces[moving].Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End }).ToHashSet();
+            var movingVerts = !own || map == null ? [] : body.Faces[moving].Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End }).ToHashSet();
             var corners = face.Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End })
                 .Distinct().Where(v => !movingVerts.Contains(v)).Select(v => body.Vertices[v]).ToList();
             var near = corners.Select(v => (V: v, Px: (Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v)) - pos).Length)).Where(x => x.Px < 12).OrderBy(x => x.Px).ToList();
@@ -2353,7 +2723,13 @@ public partial class MainWindow : Window
                 ? T($"✅ {(dist > 0 ? "Getrokken" : "Geduwd")}: {Math.Abs(dist) * Display:0.##} mm, nu {CylinderText(doc, f)}. Typ een andere afstand + Enter om het aan te passen.", $"✅ {(dist > 0 ? "Pulled" : "Pushed")}: {Math.Abs(dist) * Display:0.##} mm, now {CylinderText(doc, f)}. Type another distance + Enter to change it.")
                 : r.Punched ? T($"✅ Doorgeduwd: er gaat nu een gat doorheen ({Math.Abs(dist) * Display:0.##} mm).", $"✅ Pushed through: there is a hole through it now ({Math.Abs(dist) * Display:0.##} mm).")
                 : T($"✅ {(dist > 0 ? "Getrokken" : "Geduwd")}: {Math.Abs(dist) * Display:0.##} mm. Typ een andere afstand + Enter om het aan te passen.", $"✅ {(dist > 0 ? "Pulled" : "Pushed")}: {Math.Abs(dist) * Display:0.##} mm. Type another distance + Enter to change it.");
-            Log($"pushpull face {f.Face} {dist * Display:0.###} mm: ok, {doc.Bodies[f.Body].Faces.Count} faces");
+            // (a piece of its own: the body would have touched itself only along an edge, as DesignSpark makes it)
+            if (doc.Bodies.Count > before.Bodies.Count && !before.Bodies[f.Body].Sheet)
+            {
+                StatusText.Text = T($"✅ Getrokken als apart deel ({Math.Abs(dist) * Display:0.##} mm): als deel van het blok zou het dat alleen langs een rand raken, en dat kan een massief blok niet zijn.", $"✅ Pulled as a part of its own ({Math.Abs(dist) * Display:0.##} mm): as part of the block it would touch it only along an edge, which a solid block cannot do.");
+                _selected = null;
+            }
+            Log($"pushpull face {f.Face} {dist * Display:0.###} mm: ok, {doc.Bodies[f.Body].Faces.Count} faces, {doc.Bodies.Count} bodies");
         }
         catch (PushPullException ex)
         {
@@ -2482,38 +2858,916 @@ public partial class MainWindow : Window
         }
     }
 
-    // ------------------------------------------------------------------ union: two bodies made one
+    // ------------------------------------------------------------------ booleans: union, subtract, intersect, trim, split
 
-    /// <summary>The first body picked to unite (by the face clicked on it).</summary>
+    private enum BoolTool { Union, Subtract, Intersect, Trim, Split }
+
+    /// <summary>Outer Shell: every two parts that can be united, united, until none can.</summary>
+    private void OuterShell_Click(object sender, RoutedEventArgs e) => OuterShell();
+
+    private void OuterShell()
+    {
+        if (_doc is not { } before) return;
+        var doc = before; int unions = 0;
+        for (bool again = true; again;)
+        {
+            again = false;
+            for (int i = 0; i < doc.Bodies.Count && !again; i++)
+                for (int j = i + 1; j < doc.Bodies.Count && !again; j++)
+                {
+                    try { doc = doc.Combine(i, j, Booleans.Op.Union).Doc; unions++; again = true; }
+                    catch (PushPullException) { }
+                }
+        }
+        if (unions == 0)
+        {
+            StatusText.Text = T("◫ Er waren geen delen die samen konden (ze moeten overlappen of met een vlak raken).", "◫ There were no parts that could go together (they must overlap or touch with a face).");
+            return;
+        }
+        Commit(before, doc);
+        _last = null; _lastMove = null; _selected = null; _hover = null;
+        Render();
+        StatusText.Text = T($"✅ Buitenschil: {before.Bodies.Count} delen werden {doc.Bodies.Count}.", $"✅ Outer shell: {before.Bodies.Count} parts became {doc.Bodies.Count}.");
+        Log($"outer shell: {before.Bodies.Count} bodies -> {doc.Bodies.Count}");
+    }
+
+    private static string Icon(BoolTool t) => t switch { BoolTool.Union => "∪", BoolTool.Subtract => "∖", BoolTool.Intersect => "∩", BoolTool.Trim => "✂", _ => "⊘" };
+
+    /// <summary>What the tool asks for its first click.</summary>
+    private static string FirstAsk(BoolTool t) => t switch
+    {
+        BoolTool.Union => T("∪ Verenigen: klik het eerste deel.", "∪ Union: click the first part."),
+        BoolTool.Subtract => T("∖ Aftrekken: klik het deel waar iets af moet.", "∖ Subtract: click the part to take something from."),
+        BoolTool.Intersect => T("∩ Doorsnede: klik het eerste deel.", "∩ Intersect: click the first part."),
+        BoolTool.Trim => T("✂ Wegsnijden: klik het deel dat bijgesneden wordt.", "✂ Trim: click the part to be trimmed."),
+        _ => T("⊘ Splitsen: klik het eerste deel.", "⊘ Split: click the first part."),
+    };
+
+    /// <summary>The first body picked (by the face clicked on it).</summary>
     private FaceRef? _unionFirst;
 
-    private void UnionClick((FaceRef Face, Point3D Point)? hit)
+    private void BoolClick(BoolTool tool, (FaceRef Face, Point3D Point)? hit)
     {
         if (hit is not { } h || _doc is not { } before) return;
+        string icon = Icon(tool);
+        // (a face without thickness takes no part: said at once, not after the second click)
+        if (before.Bodies[h.Face.Body].Sheet)
+        {
+            string why = T("Dit is een vlak zonder dikte; trek het eerst uit (⇕) tot een blok.", "This is a face without thickness; pull it out first (⇕) into a block.");
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), why);
+            StatusText.Text = icon + " ⛔ " + why;
+            return;
+        }
         if (_unionFirst is not { } first)
         {
             _unionFirst = h.Face; _selected = h.Face; UpdateHighlight();
-            StatusText.Text = T("∪ Klik het tweede deel (dat het eerste overlapt of met een vlak raakt). Esc breekt af.", "∪ Click the second part (one that overlaps the first or touches it with a face). Esc cancels.");
+            StatusText.Text = icon + " " + tool switch
+            {
+                BoolTool.Subtract => T("Klik het deel dat eraf gaat. Esc breekt af.", "Click the part that goes. Esc cancels."),
+                BoolTool.Trim => T("Klik het deel dat snijdt (het blijft staan). Esc breekt af.", "Click the part that cuts (it stays). Esc cancels."),
+                _ => T("Klik het tweede deel (dat het eerste overlapt of met een vlak raakt). Esc breekt af.", "Click the second part (one that overlaps the first or touches it with a face). Esc cancels."),
+            };
             return;
         }
-        if (h.Face.Body == first.Body) { StatusText.Text = T("∪ Dat is hetzelfde deel; klik een ander deel.", "∪ That is the same part; click another part."); return; }
+        if (h.Face.Body == first.Body) { StatusText.Text = icon + " " + T("Dat is hetzelfde deel; klik een ander deel.", "That is the same part; click another part."); return; }
         _unionFirst = null;
         try
         {
-            var doc = before.Union(first.Body, h.Face.Body);
+            var (doc, made) = tool switch
+            {
+                BoolTool.Union => before.Combine(first.Body, h.Face.Body, Booleans.Op.Union),
+                BoolTool.Subtract => before.Combine(first.Body, h.Face.Body, Booleans.Op.Subtract),
+                BoolTool.Intersect => before.Combine(first.Body, h.Face.Body, Booleans.Op.Intersect),
+                BoolTool.Trim => before.Combine(first.Body, h.Face.Body, Booleans.Op.Subtract, keepSecond: true),
+                _ => before.Split(first.Body, h.Face.Body),
+            };
             Commit(before, doc);
             _last = null; _lastMove = null; _selected = null; _hover = null;
             Render();
-            int body = first.Body > h.Face.Body ? first.Body - 1 : first.Body;
-            StatusText.Text = T($"✅ Verenigd: één deel met {doc.Bodies[body].Faces.Count} vlakken.", $"✅ United: one part with {doc.Bodies[body].Faces.Count} faces.");
-            Log(string.Create(CultureInfo.InvariantCulture, $"union of bodies {first.Body} and {h.Face.Body}: ok, {doc.Bodies[body].Faces.Count} faces, volume {doc.Volume() * 1e9:0.###} mm³"));
+            int faces = made.Sum(b => doc.Bodies[b].Faces.Count);
+            StatusText.Text = "✅ " + (made.Count == 1
+                ? T($"Klaar: één deel met {faces} vlakken.", $"Done: one part with {faces} faces.")
+                : T($"Klaar: {made.Count} delen.", $"Done: {made.Count} parts."));
+            Log(string.Create(CultureInfo.InvariantCulture, $"{tool} of bodies {first.Body} and {h.Face.Body}: ok, {made.Count} part(s), {faces} faces, volume {doc.Volume() * 1e9:0.###} mm³"));
         }
         catch (PushPullException ex)
         {
             _selected = null; UpdateHighlight();
             ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
             StatusText.Text = "⛔ " + ex.Message;
-            Log($"union of bodies {first.Body} and {h.Face.Body}: {ex.Message}");
+            Log($"{tool} of bodies {first.Body} and {h.Face.Body}: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------------ looking: zoom, zoom window, position camera, look around, walk
+
+    /// <summary>Where a zoom, zoom window or look around started (on screen), and the camera then.</summary>
+    private Point? _viewAnchor;
+    private Point3D _viewPos; private Vector3D _viewLook, _viewUp;
+
+    /// <summary>Where the camera was put to stand (the eye above it), and the eye height (scene units, mm).</summary>
+    private Point3D? _camStand;
+    private double _eyeHeight;
+
+    private void EndView()
+    {
+        _viewAnchor = null;
+        LassoLine.Visibility = Visibility.Collapsed; LassoLine.Points = new PointCollection();
+    }
+
+    private void ViewClick(Point pos)
+    {
+        if (View.Camera is not ProjectionCamera cam) return;
+        if (_viewAnchor is { } start)
+        {
+            if (ZoomWindowMode)
+            {
+                var r = new Rect(start, pos);
+                EndView();
+                if (r.Width > 4 && r.Height > 4) View.ZoomToRectangle(r);
+                StatusText.Text = T("🔎 Ingezoomd. Klik weer een hoek voor een volgend kader.", "🔎 Zoomed in. Click a corner again for another frame.");
+                return;
+            }
+            EndView();
+            StatusText.Text = T("Gestopt. Klik om verder te gaan.", "Stopped. Click to go on.");
+            return;
+        }
+        _viewAnchor = pos; _viewPos = cam.Position; _viewLook = cam.LookDirection; _viewUp = cam.UpDirection;
+        if (ZoomWindowMode)
+        {
+            LassoLine.Points = new PointCollection(Enumerable.Repeat(View.Viewport.TranslatePoint(pos, TagLayer), 5));
+            LassoLine.Visibility = Visibility.Visible;
+            StatusText.Text = T("🔎 Klik de andere hoek van het kader. Esc breekt af.", "🔎 Click the other corner of the frame. Esc cancels.");
+        }
+        else StatusText.Text = ZoomMode ? T("🔍 Beweeg omhoog (in) of omlaag (uit); klik om te stoppen.", "🔍 Move up (in) or down (out); click to stop.")
+            : T("👁 Beweeg om rond te kijken; klik om te stoppen.", "👁 Move to look around; click to stop.");
+    }
+
+    private void ViewTo(Point pos)
+    {
+        if (_viewAnchor is not { } start || View.Camera is not ProjectionCamera cam) return;
+        if (ZoomWindowMode)
+        {
+            Point a = View.Viewport.TranslatePoint(start, TagLayer), b = View.Viewport.TranslatePoint(pos, TagLayer);
+            LassoLine.Points = new PointCollection { a, new Point(b.X, a.Y), b, new Point(a.X, b.Y), a };
+            return;
+        }
+        if (ZoomMode)
+        {
+            // up: closer to the point looked at; down: further
+            double f = Math.Exp((pos.Y - start.Y) / 200);
+            var target = _viewPos + _viewLook;
+            cam.LookDirection = _viewLook * f; cam.Position = target - _viewLook * f;
+            return;
+        }
+        // look around (and walk): turn the head round the vertical and round the sideways axis, standing still
+        var up = new Vector3D(0, 0, 1);
+        var yaw = new AxisAngleRotation3D(up, -(pos.X - start.X) * 0.3);
+        var side = Vector3D.CrossProduct(_viewLook, up); side.Normalize();
+        var pitch = new AxisAngleRotation3D(side, -(pos.Y - start.Y) * 0.3);
+        var m = new RotateTransform3D(yaw).Value; m.Append(new RotateTransform3D(pitch).Value);
+        var look = m.Transform(_viewLook);
+        // (not straight up or down)
+        var flat = new Vector3D(look.X, look.Y, 0);
+        if (flat.Length < 0.05 * look.Length) return;
+        cam.Position = _viewPos; cam.LookDirection = look; cam.UpDirection = up;
+    }
+
+    /// <summary>The camera put where the mouse is (on a face, else on the ground), the eye at eye height above it, looking
+    /// level the way it looked; then on to looking around.</summary>
+    private void PlaceCamera(Point pos)
+    {
+        Point3D? at = FaceAt(pos)?.Point;
+        if (at == null && Viewport3DHelper.GetRay(View.Viewport, pos) is { } ray && Math.Abs(ray.Direction.Z) > 1e-9)
+        {
+            double t = -ray.Origin.Z / ray.Direction.Z;
+            if (t > 0) at = ray.Origin + ray.Direction * t;
+        }
+        if (at is not { } p) return;
+        if (_eyeHeight <= 0) _eyeHeight = Math.Max(_modelSize, 10) / 5;
+        StandAt(p);
+    }
+
+    private void StandAt(Point3D p)
+    {
+        if (View.Camera is not ProjectionCamera cam) return;
+        _camStand = p;
+        // level, toward the middle of the model (else the way it looked)
+        var look = cam.LookDirection;
+        if (_doc is { Bodies.Count: > 0 } d)
+        {
+            var vs = d.Bodies.SelectMany(b => b.Vertices).Select(P).ToList();
+            if (vs.Count > 0)
+            {
+                var mid = new Point3D((vs.Min(v => v.X) + vs.Max(v => v.X)) / 2, (vs.Min(v => v.Y) + vs.Max(v => v.Y)) / 2, 0);
+                var to = mid - p; to.Z = 0;
+                if (to.Length > Math.Max(_modelSize, 10) / 20) look = to;
+            }
+        }
+        look.Z = 0;
+        if (look.Length < 1e-9) look = new Vector3D(0, 1, 0);
+        look.Normalize();
+        cam.Position = p + new Vector3D(0, 0, _eyeHeight);
+        cam.LookDirection = look * Math.Max(_modelSize, 10) / 2;
+        cam.UpDirection = new Vector3D(0, 0, 1);
+        MeasureLabel.Text = T("Ooghoogte", "Eye height"); MeasureBox.Text = _eyeHeight.ToString("0.#", CultureInfo.CurrentCulture);
+        StatusText.Text = T($"📷 Je staat hier, ogen op {_eyeHeight.ToString("0.#", CultureInfo.CurrentCulture)} mm. Typ een andere ooghoogte + Enter, of kies 👁 om rond te kijken of 🚶 om te lopen.",
+            $"📷 You stand here, eyes at {_eyeHeight.ToString("0.#", CultureInfo.CurrentCulture)} mm. Type another eye height + Enter, or pick 👁 to look around or 🚶 to walk.");
+        Log(string.Create(CultureInfo.InvariantCulture, $"camera placed at ({p.X:0.###},{p.Y:0.###},{p.Z:0.###}) eye {_eyeHeight:0.###}"));
+    }
+
+    /// <summary>Walking: a step forward or back (level), a turn, up or down.</summary>
+    private bool WalkKey(Key key)
+    {
+        if (View.Camera is not ProjectionCamera cam) return false;
+        double step = Math.Max(_modelSize, 10) / 40;
+        var flat = new Vector3D(cam.LookDirection.X, cam.LookDirection.Y, 0);
+        if (flat.Length < 1e-9) flat = new Vector3D(0, 1, 0);
+        flat.Normalize();
+        switch (key)
+        {
+            case Key.Up: cam.Position += flat * step; break;
+            case Key.Down: cam.Position -= flat * step; break;
+            case Key.PageUp: cam.Position += new Vector3D(0, 0, step); break;
+            case Key.PageDown: cam.Position -= new Vector3D(0, 0, step); break;
+            case Key.Left or Key.Right:
+                var m = new RotateTransform3D(new AxisAngleRotation3D(new Vector3D(0, 0, 1), key == Key.Left ? 5 : -5)).Value;
+                cam.LookDirection = m.Transform(cam.LookDirection);
+                break;
+            default: return false;
+        }
+        cam.UpDirection = new Vector3D(0, 0, 1);
+        return true;
+    }
+
+    // ------------------------------------------------------------------ protractor (as in SketchUp): a guide line at an angle
+
+    /// <summary>The protractor: stage 1 (centre placed: the base line next), 2 (the angle); the base direction and the
+    /// angle now (radians, counter-clockwise round the face's normal). Its centre and plane are kept in the rotate
+    /// tool's fields, whose protractor it shows.</summary>
+    private int _prStage;
+    private Vec3 _prRef;
+    private double _prAngle;
+
+    private void EndProtractor()
+    {
+        if (_prStage == 0) return;
+        _prStage = 0;
+        ShowSketch([]);
+    }
+
+    private void ProtractorClick(Point pos)
+    {
+        if (_doc == null) return;
+        if (_prStage == 0)
+        {
+            if (FaceAt(pos) is not { } h) return;
+            if (!IsPlanar(h.Face)) { StatusText.Text = T("∡ Zet de gradenboog op een plat vlak.", "∡ Put the protractor on a flat face."); return; }
+            var p = V(h.Point);
+            _rotCentre = EdgeSnap(h.Face, p, pos) is { } s ? s.Point : p;
+            _rotAxis = NormalOf(h.Face);
+            _prStage = 1; _typed = "";
+            ShowProtractor(null, null);
+            StatusText.Text = T("∡ Klik een punt voor de beginlijn (0°). Esc breekt af.", "∡ Click a point for the base line (0°). Esc cancels.");
+            return;
+        }
+        if (_prStage == 1)
+        {
+            if (OnRotatePlane(pos) is not { } q) return;
+            var v = q - _rotCentre; v -= _rotAxis * v.Dot(_rotAxis);
+            if (v.Length < 1e-9) return;
+            _prRef = v.Normalized(); _prStage = 2; _prAngle = 0;
+            MeasureLabel.Text = T("Hoek", "Angle"); MeasureUnit.Text = "°"; MeasureBox.Text = "";
+            StatusText.Text = T("∡ Beweeg voor de hoek (stappen van 15°) en klik, of typ de hoek + Enter. Esc breekt af.", "∡ Move for the angle (steps of 15°) and click, or type the angle + Enter. Esc cancels.");
+            return;
+        }
+        ProtractorTo(pos);
+        AddProtractorGuide(_prAngle);
+    }
+
+    private void ProtractorTo(Point pos)
+    {
+        if (_prStage == 0 || _typed.Length > 0 || OnRotatePlane(pos) is not { } q) return;
+        var v = q - _rotCentre; v -= _rotAxis * v.Dot(_rotAxis);
+        if (v.Length < 1e-9) return;
+        v = v.Normalized();
+        if (_prStage == 1) { ShowProtractor(v, null); return; }
+        double deg = Math.Atan2(_prRef.Cross(v).Dot(_rotAxis), _prRef.Dot(v)) * 180 / Math.PI;
+        double snapped = Math.Round(deg / 15) * 15;
+        deg = Math.Abs(deg - snapped) < 2.5 ? snapped : Math.Round(deg * 2) / 2;
+        _prAngle = deg * Math.PI / 180;
+        MeasureBox.Text = deg.ToString("0.#", CultureInfo.CurrentCulture);
+        ShowProtractor(_prRef, new BrepTransform.Turn(new Vec3(0, 0, 0), _rotAxis, _prAngle).Dir(_prRef));
+        StatusText.Text = T($"∡ {deg.ToString("0.#", CultureInfo.CurrentCulture)}° · klik voor de hulplijn, of typ de hoek + Enter.", $"∡ {deg.ToString("0.#", CultureInfo.CurrentCulture)}° · click for the guide line, or type the angle + Enter.");
+    }
+
+    private void AddProtractorGuide(double angle)
+    {
+        var dir = new BrepTransform.Turn(new Vec3(0, 0, 0), _rotAxis, angle).Dir(_prRef).Normalized();
+        _guides.Add(new Guide(_rotCentre, dir));
+        RenderGuides();
+        EndProtractor();
+        double deg = angle * 180 / Math.PI;
+        StatusText.Text = T($"✅ Hulplijn onder {deg.ToString("0.#", CultureInfo.CurrentCulture)}°. Klik een nieuw middelpunt voor de volgende.", $"✅ Guide line at {deg.ToString("0.#", CultureInfo.CurrentCulture)}°. Click a new centre for the next one.");
+        Log(string.Create(CultureInfo.InvariantCulture, $"protractor guide at {deg:0.#}° through ({_rotCentre.X * Display:0.###},{_rotCentre.Y * Display:0.###},{_rotCentre.Z * Display:0.###})"));
+    }
+
+    // ------------------------------------------------------------------ notes: text labels and dimensions (only in the view)
+
+    /// <summary>A text label at a point; a dimension between two points, its line set off by an offset.</summary>
+    private sealed record Note(Vec3 At, string Text);
+    private sealed record Dimension(Vec3 A, Vec3 B, Vec3 Off);
+
+    private readonly List<Note> _notes = new();
+    private readonly List<Dimension> _dims = new();
+    private LinesVisual3D? _dimLines;
+    private readonly List<FrameworkElement> _noteViews = new();
+
+    /// <summary>A dimension being placed: stage 1 (the first point set), 2 (both: the offset now).</summary>
+    private int _dimStage;
+    private Vec3 _dimA, _dimB, _dimOff;
+
+    /// <summary>The box a label is typed in, and where it goes (or, for 3D text, on which face).</summary>
+    private TextBox? _noteBox;
+    private Vec3 _noteAt;
+    private FaceRef? _noteFace3D;
+
+    private Point Screen2(Vec3 v) => View.Viewport.TranslatePoint(Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v)), TagLayer);
+
+    /// <summary>The labels and the dimensions' texts where their points are on screen now; the dimension lines.</summary>
+    private void PlaceNotes()
+    {
+        foreach (var v in _noteViews) TagLayer.Children.Remove(v);
+        _noteViews.Clear();
+        if (_dimLines != null) { View.Children.Remove(_dimLines); _dimLines = null; }
+        Border Label(string text, bool dim) => new()
+        {
+            Background = new SolidColorBrush(Color.FromArgb(235, 255, 255, 255)), BorderBrush = dim ? new SolidColorBrush(EdgeColor) : (Brush)FindResource("Accent"),
+            BorderThickness = new Thickness(1.2), CornerRadius = new CornerRadius(6), Padding = new Thickness(6, 2, 6, 2),
+            Child = new TextBlock { Text = text, FontSize = 12.5, FontWeight = FontWeights.SemiBold, Foreground = dim ? new SolidColorBrush(EdgeColor) : (Brush)FindResource("Accent") },
+        };
+        foreach (var n in _notes)
+        {
+            var at = Screen2(n.At);
+            var leader = new System.Windows.Shapes.Line { X1 = at.X, Y1 = at.Y, X2 = at.X + 28, Y2 = at.Y - 28, Stroke = (Brush)FindResource("Accent"), StrokeThickness = 1.2 };
+            var label = Label(n.Text, false);
+            Canvas.SetLeft(label, at.X + 28); Canvas.SetTop(label, at.Y - 40);
+            TagLayer.Children.Add(leader); TagLayer.Children.Add(label);
+            _noteViews.Add(leader); _noteViews.Add(label);
+        }
+        var pts = new Point3DCollection();
+        void Dim(Vec3 a, Vec3 b, Vec3 off, bool final)
+        {
+            // the extension lines, the dimension line and small ticks at its ends
+            foreach (var (p, q) in new[] { (a, a + off * 1.08), (b, b + off * 1.08), (a + off, b + off) }) { pts.Add(TowardEye(P(p), 2e-3)); pts.Add(TowardEye(P(q), 2e-3)); }
+            var along = (b - a).Normalized(); var tick = (along + off.Normalized()) * ((b - a).Length * 0.03);
+            foreach (var e in new[] { a + off, b + off }) { pts.Add(TowardEye(P(e - tick), 2e-3)); pts.Add(TowardEye(P(e + tick), 2e-3)); }
+            var mid = Screen2((a + b) * 0.5 + off);
+            var label = Label(Mm((b - a).Length) + " mm", true);
+            label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            Canvas.SetLeft(label, mid.X - label.DesiredSize.Width / 2); Canvas.SetTop(label, mid.Y - label.DesiredSize.Height / 2);
+            label.Opacity = final ? 1 : 0.8;
+            TagLayer.Children.Add(label); _noteViews.Add(label);
+        }
+        foreach (var d in _dims) Dim(d.A, d.B, d.Off, true);
+        if (_dimStage == 2) Dim(_dimA, _dimB, _dimOff, false);
+        if (pts.Count > 0) View.Children.Add(_dimLines = new LinesVisual3D { Points = pts, Color = EdgeColor, Thickness = 1.3 });
+    }
+
+    private void EndDimension()
+    {
+        if (_dimStage == 0) return;
+        _dimStage = 0;
+        ShowSketch([]);
+        PlaceNotes();
+    }
+
+    /// <summary>A point for a dimension: a corner or an edge close by, else where the mouse hits the model.</summary>
+    private Vec3? DimPoint(Point pos)
+    {
+        var hit = FaceAt(pos);
+        if (hit is { } h && IsPlanar(h.Face) && EdgeSnap(h.Face, V(h.Point), pos) is { } s) return s.Point;
+        return TapePoint(hit, pos)?.Point;
+    }
+
+    private void DimensionClick(Point pos)
+    {
+        if (_doc == null) return;
+        if (_dimStage == 0)
+        {
+            // a dimension's text clicked: away with it
+            int near = _dims.FindIndex(d => (Screen2((d.A + d.B) * 0.5 + d.Off) - View.Viewport.TranslatePoint(pos, TagLayer)).Length < 14);
+            if (near >= 0) { _dims.RemoveAt(near); PlaceNotes(); StatusText.Text = T("↔ Maat weggehaald.", "↔ Dimension removed."); return; }
+            if (DimPoint(pos) is not { } a) return;
+            _dimA = a; _dimStage = 1;
+            ShowSketch([a]);
+            StatusText.Text = T("↔ Klik het tweede punt. Esc breekt af.", "↔ Click the second point. Esc cancels.");
+            return;
+        }
+        if (_dimStage == 1)
+        {
+            if (DimPoint(pos) is not { } b || (b - _dimA).Length < 1e-7) return;
+            _dimB = b; _dimStage = 2; _dimOff = default;
+            StatusText.Text = T($"↔ {Mm((b - _dimA).Length)} mm · beweeg om de maatlijn ervan af te zetten en klik.", $"↔ {Mm((b - _dimA).Length)} mm · move to set the dimension line off and click.");
+            return;
+        }
+        DimensionTo(pos);
+        _dims.Add(new Dimension(_dimA, _dimB, _dimOff));
+        Log(string.Create(CultureInfo.InvariantCulture, $"dimension {(_dimB - _dimA).Length * Display:0.###} mm"));
+        StatusText.Text = T($"✅ Maat {Mm((_dimB - _dimA).Length)} mm. Klik het eerste punt van de volgende.", $"✅ Dimension {Mm((_dimB - _dimA).Length)} mm. Click the first point of the next one.");
+        EndDimension();
+    }
+
+    private void DimensionTo(Point pos)
+    {
+        if (_dimStage == 1) { if (DimPoint(pos) is { } b) ShowSketch([_dimA, b]); return; }
+        if (_dimStage != 2 || View.Camera is not ProjectionCamera cam) return;
+        // the offset: along an axis square to A–B (as SketchUp), in the plane through A–B that faces the camera most;
+        // as far as the mouse is on that plane
+        var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
+        if (ray == null) return;
+        var look = new Vec3(cam.LookDirection.X, cam.LookDirection.Y, cam.LookDirection.Z).Normalized();
+        var org = V(ray.Origin); var dir = new Vec3(ray.Direction.X, ray.Direction.Y, ray.Direction.Z).Normalized();
+        var ab = (_dimB - _dimA).Normalized();
+        // (the axis whose direction on screen lies most along the way the mouse is from the line A–B)
+        Point S(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        var mid = (_dimA + _dimB) * 0.5; var sm = S(mid);
+        var sab = S(_dimB) - S(_dimA); if (sab.Length > 1e-9) sab.Normalize();
+        var m = pos - sm; m -= sab * Vector.Multiply(m, sab);
+        var cands = Axes.Select(x => x.Dir - ab * x.Dir.Dot(ab)).Where(u => u.Length > 0.3).Select(u => u.Normalized()).ToList();
+        var best = m.Length < 3 ? cands.MaxBy(u => Math.Abs(ab.Cross(u).Normalized().Dot(look)))
+            : cands.MaxBy(u => { var su = S(mid + u * (_dimB - _dimA).Length) - sm; return su.Length < 1e-9 ? 0 : Math.Abs(Vector.Multiply(su, m)) / su.Length; });
+        var n = ab.Cross(best).Normalized();
+        double den = dir.Dot(n);
+        if (Math.Abs(den) < 1e-9) return;
+        var q = org + dir * ((_dimA - org).Dot(n) / den);
+        _dimOff = best * (q - _dimA).Dot(best);
+        ShowSketch([]);
+        PlaceNotes();
+    }
+
+    private void TextClick(Point pos)
+    {
+        if (_doc == null) return;
+        var here = View.Viewport.TranslatePoint(pos, TagLayer);
+        int near = _notes.FindIndex(n => { var a = Screen2(n.At); return (new Point(a.X + 40, a.Y - 30) - here).Length < 30 || (a - here).Length < 10; });
+        if (near >= 0) { _notes.RemoveAt(near); PlaceNotes(); StatusText.Text = T("💬 Label weggehaald.", "💬 Label removed."); return; }
+        var hit = FaceAt(pos);
+        if (TapePoint(hit, pos) is not { } p) return;
+        EndNoteBox(false);
+        _noteAt = p.Point;
+        var at = Screen2(_noteAt);
+        _noteBox = new TextBox { MinWidth = 140, FontSize = 12.5, Padding = new Thickness(4, 2, 4, 2) };
+        Canvas.SetLeft(_noteBox, at.X + 28); Canvas.SetTop(_noteBox, at.Y - 40);
+        _noteBox.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter) { EndNoteBox(true); e.Handled = true; }
+            else if (e.Key == Key.Escape) { EndNoteBox(false); e.Handled = true; }
+        };
+        TagLayer.Children.Add(_noteBox);
+        _noteBox.Focus(); Keyboard.Focus(_noteBox);
+        StatusText.Text = T("💬 Typ de tekst en druk op Enter (Esc: laat maar).", "💬 Type the text and press Enter (Esc: never mind).");
+    }
+
+    /// <summary>The label box closed: its text a label (when <paramref name="keep"/> and not empty), or nothing.</summary>
+    private void EndNoteBox(bool keep)
+    {
+        if (_noteBox is not { } box) return;
+        _noteBox = null;
+        TagLayer.Children.Remove(box);
+        if (_noteFace3D is { } f3)
+        {
+            _noteFace3D = null;
+            if (keep && box.Text.Trim() is { Length: > 0 } t3) Make3DText(f3, _noteAt, t3);
+            Keyboard.Focus(this);
+            return;
+        }
+        if (keep && box.Text.Trim() is { Length: > 0 } text)
+        {
+            _notes.Add(new Note(_noteAt, text));
+            StatusText.Text = T("✅ Label geplaatst. Klik een punt voor het volgende.", "✅ Label placed. Click a point for the next one.");
+            Log($"text label \"{text}\"");
+        }
+        PlaceNotes();
+        Keyboard.Focus(this);
+    }
+
+    /// <summary>For the test aid: a label typed.</summary>
+    private void TypeNote(string text)
+    {
+        if (_noteBox == null) return;
+        _noteBox.Text = text;
+        EndNoteBox(true);
+    }
+
+    // ------------------------------------------------------------------ 3D text (as SketchUp's): letters as faces
+
+    /// <summary>The letter height (metres; 0: a fifth of the face), and the letter faces just made (to pull out).</summary>
+    private double _letterHeight;
+    private List<FaceRef>? _letters;
+
+    private void Text3DClick(Point pos)
+    {
+        if (_doc == null || FaceAt(pos) is not { } h) return;
+        if (!IsPlanar(h.Face)) { StatusText.Text = T("A 3D-tekst kan alleen op een plat vlak.", "A 3D text only works on a flat face."); return; }
+        var p = V(h.Point);
+        TextClickBox(EdgeSnap(h.Face, p, pos) is { } s ? s.Point : p, h.Face);
+    }
+
+    private void TextClickBox(Vec3 at, FaceRef f)
+    {
+        EndNoteBox(false);
+        _noteAt = at; _noteFace3D = f; _letters = null;
+        var sp = Screen2(at);
+        _noteBox = new TextBox { MinWidth = 160, FontSize = 12.5, Padding = new Thickness(4, 2, 4, 2) };
+        Canvas.SetLeft(_noteBox, sp.X + 10); Canvas.SetTop(_noteBox, sp.Y - 34);
+        _noteBox.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter) { EndNoteBox(true); e.Handled = true; }
+            else if (e.Key == Key.Escape) { EndNoteBox(false); e.Handled = true; }
+        };
+        TagLayer.Children.Add(_noteBox);
+        _noteBox.Focus(); Keyboard.Focus(_noteBox);
+        StatusText.Text = T("A Typ de tekst en druk op Enter (Esc: laat maar).", "A Type the text and press Enter (Esc: never mind).");
+    }
+
+    /// <summary>The outlines of the text's letters (font units scaled to <paramref name="height"/>, y up), each letter
+    /// part's outer outline with the holes in it.</summary>
+    private static List<(List<(double X, double Y)> Outer, List<List<(double X, double Y)>> Holes)> LetterOutlines(string text, double height)
+    {
+        var typeface = new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
+        var ft = new FormattedText(text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight, typeface, 100, Brushes.Black, 1.0);
+        var geo = ft.BuildGeometry(new Point(0, 0)).GetFlattenedPathGeometry(0.15, ToleranceType.Absolute);
+        // (the height asked is that of a capital)
+        double caps = typeface.TryGetGlyphTypeface(out var gt) ? gt.CapsHeight : 0.7;
+        double baseline = ft.Baseline, k = height / (caps * 100);
+        double Area(List<(double X, double Y)> l) { double a = 0; for (int i = 0; i < l.Count; i++) { var (x0, y0) = l[i]; var (x1, y1) = l[(i + 1) % l.Count]; a += x0 * y1 - x1 * y0; } return a / 2; }
+        bool In(List<(double X, double Y)> l, (double X, double Y) q)
+        {
+            bool inside = false;
+            for (int i = 0, j = l.Count - 1; i < l.Count; j = i++)
+                if ((l[i].Y > q.Y) != (l[j].Y > q.Y) && q.X < (l[j].X - l[i].X) * (q.Y - l[i].Y) / (l[j].Y - l[i].Y) + l[i].X) inside = !inside;
+            return inside;
+        }
+        var loops = new List<List<(double X, double Y)>>();
+        foreach (var fig in geo.Figures)
+        {
+            var l = new List<(double X, double Y)> { (fig.StartPoint.X * k, (baseline - fig.StartPoint.Y) * k) };
+            foreach (var seg in fig.Segments)
+                if (seg is PolyLineSegment pl) foreach (var q in pl.Points) l.Add((q.X * k, (baseline - q.Y) * k));
+                else if (seg is System.Windows.Media.LineSegment ls) l.Add((ls.Point.X * k, (baseline - ls.Point.Y) * k));
+            var clean = new List<(double X, double Y)>();
+            foreach (var q in l) if (clean.Count == 0 || Math.Abs(clean[^1].X - q.X) + Math.Abs(clean[^1].Y - q.Y) > 1e-9) clean.Add(q);
+            if (clean.Count > 1 && Math.Abs(clean[0].X - clean[^1].X) + Math.Abs(clean[0].Y - clean[^1].Y) < 1e-9) clean.RemoveAt(clean.Count - 1);
+            if (clean.Count >= 3 && Math.Abs(Area(clean)) > 1e-12) loops.Add(clean);
+        }
+        // an outline inside an odd number of others is a hole (of the smallest one round it); the rest are letter parts.
+        // (Each turned counter-clockwise, holes clockwise, whichever way the font runs them.)
+        List<(double X, double Y)> Turned(List<(double X, double Y)> l, bool ccw) => (Area(l) > 0) == ccw ? l : Enumerable.Reverse(l).ToList();
+        int Depth(List<(double X, double Y)> l) => loops.Count(o => !ReferenceEquals(o, l) && Math.Abs(Area(o)) > Math.Abs(Area(l)) && In(o, l[0]));
+        var outers = loops.Where(l => Depth(l) % 2 == 0).OrderBy(l => Math.Abs(Area(l)))
+            .Select(l => (Outer: Turned(l, true), Holes: new List<List<(double X, double Y)>>(), Raw: l)).ToList();
+        foreach (var hole in loops.Where(l => Depth(l) % 2 == 1))
+            if (outers.FirstOrDefault(o => Math.Abs(Area(o.Raw)) > Math.Abs(Area(hole)) && In(o.Raw, hole[0])) is { Outer: not null } o) o.Holes.Add(Turned(hole, false));
+        return outers.Select(o => (o.Outer, o.Holes)).ToList();
+    }
+
+    private void Make3DText(FaceRef f, Vec3 at, string text)
+    {
+        if (_doc is not { } before) return;
+        var n = NormalOf(f); var x = RectAxis(n); var y = n.Cross(x);
+        double height = _letterHeight > 0 ? _letterHeight : Math.Max(FaceSize(before, f) / 5, 1e-3);
+        double tol = height / 300;
+        var doc = before; var letters = new List<FaceRef>(); int failed = 0;
+        var outlines = LetterOutlines(text, height);
+        Log(string.Create(CultureInfo.InvariantCulture, $"3D text outlines: {outlines.Count} parts, {outlines.Sum(o => o.Holes.Count)} holes, x {outlines.Min(o => o.Outer.Min(q => q.X)) * Display:0.##}..{outlines.Max(o => o.Outer.Max(q => q.X)) * Display:0.##} y {outlines.Min(o => o.Outer.Min(q => q.Y)) * Display:0.##}..{outlines.Max(o => o.Outer.Max(q => q.Y)) * Display:0.##} mm, points {outlines.Sum(o => o.Outer.Count)}"));
+        foreach (var (outer, holes) in outlines)
+        {
+            Vec3 P3((double X, double Y) q) => at + x * q.X + y * q.Y;
+            var o = PushPullMe.Core.Drawing.Simplify(outer.Append(outer[0]).Select(P3).ToList(), tol);
+            try
+            {
+                var (d1, letter) = doc.DrawPath(f, o.Take(o.Count - 1).Append(o[0]).ToList());
+                foreach (var h in holes)
+                {
+                    var hp = PushPullMe.Core.Drawing.Simplify(h.Append(h[0]).Select(P3).ToList(), tol);
+                    (d1, _) = d1.DrawPath(letter, hp.Take(hp.Count - 1).Append(hp[0]).ToList());
+                }
+                doc = d1; letters.Add(letter);
+            }
+            catch (PushPullException) { failed++; }
+        }
+        if (letters.Count == 0)
+        {
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), T("De tekst past niet op dit vlak (of raakt een rand).", "The text does not fit on this face (or touches an edge)."));
+            return;
+        }
+        Commit(before, doc);
+        _last = null; _selected = null; _letters = letters;
+        Render();
+        MeasureLabel.Text = T("Dikte", "Thickness"); MeasureBox.Text = "";
+        StatusText.Text = T($"✅ Tekst als {letters.Count} vlakken{(failed > 0 ? $" ({failed} letterdelen pasten niet)" : "")}. Typ een dikte (mm) + Enter om ze eruit te trekken (min: erin).",
+            $"✅ Text as {letters.Count} faces{(failed > 0 ? $" ({failed} letter parts did not fit)" : "")}. Type a thickness (mm) + Enter to pull them out (minus: in).");
+        Log($"3D text \"{text}\" on face {f.Face}: {letters.Count} faces, {failed} failed");
+    }
+
+    /// <summary>Roughly how big a face is (the longest side of the box round it).</summary>
+    private static double FaceSize(SketchDocument doc, FaceRef f)
+    {
+        var pts = doc.TrianglesOf(f).SelectMany(t => new[] { t.A, t.B, t.C }).ToList();
+        if (pts.Count == 0) return 0.01;
+        return Math.Max(pts.Max(p => p.X) - pts.Min(p => p.X), Math.Max(pts.Max(p => p.Y) - pts.Min(p => p.Y), pts.Max(p => p.Z) - pts.Min(p => p.Z)));
+    }
+
+    /// <summary>The letters just made, all pulled out (or pushed in) by the same distance.</summary>
+    private void ExtrudeLetters(double distance)
+    {
+        if (_doc is not { } before || _letters is not { } letters) return;
+        var doc = before; int done = 0;
+        var faces = letters.ToList();
+        for (int i = 0; i < faces.Count; i++)
+        {
+            try
+            {
+                var (d, r) = doc.PushPull(faces[i], distance);
+                doc = d; done++;
+                // (the other letters under their numbers now)
+                for (int j = i + 1; j < faces.Count; j++)
+                    if (faces[j].Body == faces[i].Body && faces[j].Face < r.FaceMap.Count) faces[j] = new FaceRef(faces[j].Body, r.FaceMap[faces[j].Face]);
+            }
+            catch (PushPullException) { }
+        }
+        if (done == 0) { StatusText.Text = T("⛔ De letters konden niet zo ver.", "⛔ The letters could not go that far."); return; }
+        Commit(before, doc);
+        _letters = null; _last = null;
+        Render();
+        StatusText.Text = T($"✅ {done} letterdelen {Mm(Math.Abs(distance))} mm {(distance > 0 ? "eruit getrokken" : "ingeduwd")}.", $"✅ {done} letter parts {(distance > 0 ? "pulled out" : "pushed in")} {Mm(Math.Abs(distance))} mm.");
+        Log(string.Create(CultureInfo.InvariantCulture, $"3D text extruded {distance * Display:0.###} mm: {done} of {letters.Count}"));
+    }
+
+    // ------------------------------------------------------------------ axes (as SketchUp's): the drawing axes moved and turned
+
+    /// <summary>Setting the axes: stage 1 (origin set: the red direction next), 2 (the green); the new red direction.</summary>
+    private int _axStage;
+    private Vec3 _axNewOrigin, _axNewRed;
+    private readonly List<LinesVisual3D> _axesVisual = new();
+
+    private void AxesClick(Point pos)
+    {
+        var at = DimPoint(pos);
+        if (_axStage == 0)
+        {
+            if (at is not { } o)
+            {
+                (_axisRed, _axisGreen, _axisBlue, _axisOrigin) = (new Vec3(1, 0, 0), new Vec3(0, 1, 0), new Vec3(0, 0, 1), default);
+                RenderAxes();
+                StatusText.Text = T("✛ De gewone assen zijn terug.", "✛ The usual axes are back.");
+                return;
+            }
+            _axNewOrigin = o; _axStage = 1;
+            ShowSketch([o]);
+            StatusText.Text = T("✛ Klik een punt in de richting van de rode as. Esc breekt af.", "✛ Click a point in the direction of the red axis. Esc cancels.");
+            return;
+        }
+        if (at is not { } p || (p - _axNewOrigin).Length < 1e-7) return;
+        if (_axStage == 1)
+        {
+            _axNewRed = (p - _axNewOrigin).Normalized(); _axStage = 2;
+            ShowSketch([_axNewOrigin, p], default, color: AxisX);
+            StatusText.Text = T("✛ Klik een punt aan de kant van de groene as. Esc breekt af.", "✛ Click a point on the side of the green axis. Esc cancels.");
+            return;
+        }
+        var g = p - _axNewOrigin; g -= _axNewRed * g.Dot(_axNewRed);
+        if (g.Length < 1e-7) return;
+        _axisRed = _axNewRed; _axisGreen = g.Normalized(); _axisBlue = _axisRed.Cross(_axisGreen).Normalized(); _axisOrigin = _axNewOrigin;
+        _axStage = 0;
+        ShowSketch([]);
+        RenderAxes();
+        StatusText.Text = T("✅ Nieuwe assen. Vastklikken, rechthoeken en de pijltjes volgen ze; klik met ✛ op een lege plek voor de gewone assen.", "✅ New axes. Snapping, rectangles and the arrow keys follow them; click an empty spot with ✛ for the usual axes.");
+        Log(string.Create(CultureInfo.InvariantCulture, $"axes: red ({_axisRed.X:0.###},{_axisRed.Y:0.###},{_axisRed.Z:0.###}) green ({_axisGreen.X:0.###},{_axisGreen.Y:0.###},{_axisGreen.Z:0.###})"));
+    }
+
+    /// <summary>The axes drawn (only when they are not the usual ones): coloured lines through their origin.</summary>
+    private void RenderAxes()
+    {
+        foreach (var v in _axesVisual) View.Children.Remove(v);
+        _axesVisual.Clear();
+        if ((_axisRed - new Vec3(1, 0, 0)).Length < 1e-12 && (_axisGreen - new Vec3(0, 1, 0)).Length < 1e-12 && _axisOrigin.Length < 1e-12) return;
+        double len = Math.Max(_modelSize, 10) * 0.6 / Display;
+        foreach (var (dir, _, color) in Axes)
+        {
+            var v = new LinesVisual3D { Points = new Point3DCollection { P(_axisOrigin), P(_axisOrigin + dir * len) }, Color = color, Thickness = 2 };
+            View.Children.Add(v); _axesVisual.Add(v);
+        }
+    }
+
+    // ------------------------------------------------------------------ hiding parts (a simple Tag)
+
+    /// <summary>Bodies not shown (as they are: one that changes is shown again).</summary>
+    private readonly HashSet<BrepBody> _hidden = new(ReferenceEqualityComparer.Instance);
+
+    private void HideAt((FaceRef Face, Point3D Point)? hit)
+    {
+        if (_doc == null) return;
+        if (hit is not { } h)
+        {
+            int n = _hidden.Count;
+            _hidden.Clear();
+            Render();
+            StatusText.Text = n == 0 ? T("🏷 Er was niets verborgen.", "🏷 Nothing was hidden.") : T($"🏷 Alles weer zichtbaar ({n} {(n == 1 ? "deel" : "delen")}).", $"🏷 Everything shown again ({n} {(n == 1 ? "part" : "parts")}).");
+            return;
+        }
+        _hidden.Add(_doc.Bodies[h.Face.Body]);
+        _selected = null; _hover = null;
+        Render();
+        StatusText.Text = T($"🏷 Verborgen ({_hidden.Count} in totaal). Klik op een lege plek om alles weer te tonen.", $"🏷 Hidden ({_hidden.Count} in all). Click an empty spot to show everything again.");
+        Log($"hide body {h.Face.Body}");
+    }
+
+    // ------------------------------------------------------------------ section plane (shown only): the model cut open
+
+    /// <summary>The section: a plane through P; what lies on the side its normal N points to is left out.</summary>
+    private (Vec3 P, Vec3 N)? _section;
+    private LinesVisual3D? _sectionCut;
+
+    /// <summary>Placing a section: on this face, from this point (scene) along its normal, the depth now (metres).</summary>
+    private FaceRef? _secFace;
+    private Vec3 _secOrigin, _secNormal;
+    private double _secDist;
+
+    private void StartSection((FaceRef Face, Point3D Point)? hit)
+    {
+        if (hit is not { } h) return;
+        if (!IsPlanar(h.Face)) { StatusText.Text = T("⊟ Zet het snijvlak op een plat vlak.", "⊟ Put the cutting plane on a flat face."); return; }
+        _secFace = h.Face; _secOrigin = V(h.Point); _secNormal = NormalOf(h.Face); _secDist = 0; _typed = "";
+        // (for DistanceAt: along the face's normal from the point clicked)
+        _dragStart = h.Point; _dragNormal = new Vector3D(_secNormal.X, _secNormal.Y, _secNormal.Z);
+        MeasureLabel.Text = T("Diepte", "Depth"); MeasureBox.Text = "0";
+        StatusText.Text = T("⊟ Beweeg om het snijvlak het model in te schuiven; klik, of typ de diepte + Enter. Esc breekt af.", "⊟ Move to slide the cutting plane into the model; click, or type the depth + Enter. Esc cancels.");
+    }
+
+    private void EndSection()
+    {
+        _secFace = null;
+    }
+
+    private void SectionTo(Point pos)
+    {
+        if (_secFace == null || _typed.Length > 0 || DistanceAt(pos) is not double m) return;
+        // into the model: against the normal, in steps of 0.1 mm
+        double depth = Math.Max(0, Math.Round(-m * 10) / 10) / Display;
+        _secDist = depth;
+        _section = (_secOrigin - _secNormal * depth, _secNormal);
+        MeasureBox.Text = Mm(depth);
+        Render();
+    }
+
+    private void SetSection(double depth)
+    {
+        if (_secFace == null) return;
+        _section = (_secOrigin - _secNormal * depth, _secNormal);
+        EndSection();
+        Render();
+        StatusText.Text = T($"✅ Doorsnede op {Mm(depth)} mm diep. Klik een ander vlak voor een nieuwe, of Esc om hem weg te halen.", $"✅ Section {Mm(depth)} mm deep. Click another face for a new one, or Esc to remove it.");
+        Log(string.Create(CultureInfo.InvariantCulture, $"section at depth {depth * Display:0.###} mm"));
+    }
+
+    /// <summary>The triangles as far as they lie behind the section (cut at it), or all of them.</summary>
+    private IEnumerable<(Vec3 A, Vec3 B, Vec3 C)> Clipped(IEnumerable<(Vec3 A, Vec3 B, Vec3 C)> tris)
+    {
+        if (_section is not { } s) { foreach (var t in tris) yield return t; yield break; }
+        foreach (var (a, b, c) in tris)
+        {
+            var poly = new List<Vec3>();
+            var pts = new[] { a, b, c };
+            for (int i = 0; i < 3; i++)
+            {
+                Vec3 p = pts[i], q = pts[(i + 1) % 3];
+                double dp = (p - s.P).Dot(s.N), dq = (q - s.P).Dot(s.N);
+                if (dp <= 0) poly.Add(p);
+                if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0)) poly.Add(p + (q - p) * (dp / (dp - dq)));
+            }
+            for (int i = 1; i + 1 < poly.Count; i++) yield return (poly[0], poly[i], poly[i + 1]);
+        }
+    }
+
+    /// <summary>The part of a segment behind the section (or all of it), or null.</summary>
+    private (Vec3 A, Vec3 B)? ClippedSegment(Vec3 a, Vec3 b)
+    {
+        if (_section is not { } s) return (a, b);
+        double da = (a - s.P).Dot(s.N), db = (b - s.P).Dot(s.N);
+        if (da > 0 && db > 0) return null;
+        if (da <= 0 && db <= 0) return (a, b);
+        var x = a + (b - a) * (da / (da - db));
+        return da <= 0 ? (a, x) : (x, b);
+    }
+
+    /// <summary>Where the section cuts the model: thick lines.</summary>
+    private void RenderSectionCut(SketchDocument doc)
+    {
+        if (_sectionCut != null) { View.Children.Remove(_sectionCut); _sectionCut = null; }
+        if (_section is not { } s) return;
+        var pts = new Point3DCollection();
+        for (int b = 0; b < doc.Bodies.Count; b++)
+            for (int f = 0; f < doc.Bodies[b].Faces.Count; f++)
+                foreach (var (A, B, C) in doc.TrianglesOf(new FaceRef(b, f)))
+                {
+                    var tp = new[] { A, B, C }; var cut = new List<Vec3>();
+                    for (int i = 0; i < 3; i++)
+                    {
+                        Vec3 p = tp[i], q = tp[(i + 1) % 3];
+                        double dp = (p - s.P).Dot(s.N), dq = (q - s.P).Dot(s.N);
+                        if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0)) cut.Add(p + (q - p) * (dp / (dp - dq)));
+                    }
+                    if (cut.Count == 2) { pts.Add(TowardEye(P(cut[0]), 2e-3)); pts.Add(TowardEye(P(cut[1]), 2e-3)); }
+                }
+        if (pts.Count == 0) return;
+        _sectionCut = new LinesVisual3D { Points = pts, Color = EdgeColor, Thickness = 3.5 };
+        View.Children.Add(_sectionCut);
+    }
+
+    // ------------------------------------------------------------------ freehand (as in SketchUp)
+
+    /// <summary>A freehand track being drawn: on this face's plane, its points so far.</summary>
+    private FaceRef? _fhFace;
+    private readonly List<Vec3> _fhPts = new();
+
+    private void StartFreehand((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        if (hit is not { } h || _doc == null) return;
+        if (!IsPlanar(h.Face)) { StatusText.Text = T("✎ Uit de vrije hand tekenen kan alleen op een plat vlak.", "✎ Freehand drawing only works on a flat face."); return; }
+        _fhFace = h.Face; _fhPts.Clear();
+        _fhPts.Add(EdgeSnap(h.Face, V(h.Point), pos) is { } s ? s.Point : V(h.Point));
+        _selected = null; _hover = null; UpdateHighlight();
+        StatusText.Text = T("✎ Beweeg om te tekenen; klik om te eindigen (terug bij het begin: een vlak). Esc breekt af.", "✎ Move to draw; click to finish (back at the start: a face). Esc cancels.");
+    }
+
+    private void EndFreehand()
+    {
+        if (_fhFace == null) return;
+        _fhFace = null; _fhPts.Clear();
+        ShowSketch([]);
+    }
+
+    /// <summary>The track follows the mouse: a point added once it is a few pixels from the last.</summary>
+    private void FreehandTo(Point pos)
+    {
+        if (_fhFace is not { } f || OnPlane(f, pos) is not { } p) return;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        if ((Screen(_fhPts[^1]) - pos).Length >= 4) _fhPts.Add(p);
+        bool back = _fhPts.Count >= 4 && (Screen(_fhPts[0]) - pos).Length < 12;
+        ShowSketch(back ? _fhPts.Append(_fhPts[0]).ToList() : _fhPts.Append(p).ToList(), NormalOf(f));
+        StatusText.Text = back ? T("✎ Terug bij het begin: klik voor een vlak.", "✎ Back at the start: click for a face.")
+            : T("✎ Beweeg om te tekenen; klik om te eindigen (terug bij het begin: een vlak). Esc breekt af.", "✎ Move to draw; click to finish (back at the start: a face). Esc cancels.");
+    }
+
+    private void FinishFreehand(Point pos)
+    {
+        if (_fhFace is not { } f || _doc is not { } before) return;
+        Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
+        var pts = _fhPts.ToList();
+        // (the end on an edge or corner close by, as the start)
+        if (OnPlane(f, pos) is { } end && EdgeSnap(f, end, pos) is { } es) pts.Add(es.Point);
+        EndFreehand();
+        // fewer points where the track is nearly straight (within a pixel and a half)
+        double pxPerM = (Screen(pts[0] + RectAxis(NormalOf(f)) * 0.001) - Screen(pts[0])).Length * 1000;
+        pts = PushPullMe.Core.Drawing.Simplify(pts, pxPerM > 0 ? 1.5 / pxPerM : 1e-4);
+        if (pts.Count < 2) return;
+        bool closed = pts.Count >= 4 && (Screen(pts[^1]) - Screen(pts[0])).Length < 12;
+        try
+        {
+            if (closed)
+            {
+                pts[^1] = pts[0];
+                try
+                {
+                    var (doc, nf) = before.DrawPath(f, pts);
+                    Commit(before, doc);
+                    _last = null; _selected = nf; _lastDrawn = nf;
+                    Render();
+                    StatusText.Text = T($"✅ Vlak getekend uit de vrije hand ({pts.Count - 1} hoeken). Kies ⇕ (P) om het eruit te trekken of in te duwen.", $"✅ Freehand face drawn ({pts.Count - 1} corners). Pick ⇕ (P) to pull it out or push it in.");
+                    Log($"freehand on face {f.Face}: closed, {pts.Count - 1} corners, new face {nf.Face}");
+                    return;
+                }
+                catch (PushPullException) { }
+            }
+            // loose lines (they may close a face with what is there)
+            var lines = Enumerable.Range(0, pts.Count - 1).Select(i => new SketchLine(pts[i], pts[i + 1])).ToList();
+            var (d2, made) = before.AddLines(lines).CloseLooseLines(f);
+            Commit(before, d2);
+            _last = null;
+            if (made.Count > 0) { _selected = made[^1]; _lastDrawn = made[^1]; }
+            Render();
+            StatusText.Text = made.Count > 0
+                ? T($"✅ Uit de vrije hand getekend; {(made.Count == 1 ? "een vlak" : $"{made.Count} vlakken")} gesloten.", $"✅ Drawn freehand; {(made.Count == 1 ? "a face" : $"{made.Count} faces")} closed.")
+                : T($"✅ Uit de vrije hand getekend: {lines.Count} losse lijnen.", $"✅ Drawn freehand: {lines.Count} loose lines.");
+            Log($"freehand on face {f.Face}: {lines.Count} loose lines, {made.Count} face(s) closed");
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
         }
     }
 
@@ -2534,7 +3788,7 @@ public partial class MainWindow : Window
         if (!IsPlanar(h.Face)) { StatusText.Text = T("↝ Ronddraaien kan alleen met een plat vlak.", "↝ Follow Me only works with a flat face."); return; }
         _fmFace = h.Face; _fmStage = 1; _fmBase = _doc; _typed = "";
         _selected = h.Face; _hover = null; UpdateHighlight();
-        StatusText.Text = T("↝ Klik de as: een rechte rand, losse lijn of hulplijn in het vlak van dit vlak. Esc breekt af.", "↝ Click the axis: a straight edge, loose line or guide line in the plane of this face. Esc cancels.");
+        StatusText.Text = T("↝ Klik de as (een rechte rand, losse lijn of hulplijn in het vlak van dit vlak), of een vlak waarvan de rand het pad is. Esc breekt af.", "↝ Click the axis (a straight edge, loose line or guide line in the plane of this face), or a face whose edge is the path. Esc cancels.");
     }
 
     private void EndFollow()
@@ -2588,7 +3842,7 @@ public partial class MainWindow : Window
         if (_fmStage == 1)
         {
             if (AxisAt(f, pos) is { } ax) { ShowSketch([ax.A, ax.B], default, color: AxisZ); StatusText.Text = T("↝ Klik om deze lijn als as te nemen.", "↝ Click to take this line as the axis."); }
-            else { ShowSketch([]); StatusText.Text = T("↝ Klik de as: een rechte rand, losse lijn of hulplijn in het vlak van dit vlak. Esc breekt af.", "↝ Click the axis: a straight edge, loose line or guide line in the plane of this face. Esc cancels."); }
+            else { ShowSketch([]); StatusText.Text = T("↝ Klik de as (een rechte rand, losse lijn of hulplijn in het vlak van dit vlak), of een vlak waarvan de rand het pad is. Esc breekt af.", "↝ Click the axis (a straight edge, loose line or guide line in the plane of this face), or a face whose edge is the path. Esc cancels."); }
             return;
         }
         if (_typed.Length > 0) return;
@@ -2609,7 +3863,9 @@ public partial class MainWindow : Window
         if (deg < 0) deg += 360;
         double snapped = Math.Round(deg / 15) * 15;
         deg = Math.Abs(deg - snapped) < 2.5 ? snapped : Math.Round(deg * 2) / 2;
-        if (deg <= 0 || deg >= 360) { Render(baseDoc); _fmOk = false; return; }
+        // (close to a whole turn: that)
+        if (deg > 352.5) deg = 360;
+        if (deg <= 0) { Render(baseDoc); _fmOk = false; return; }
         _fmAngle = deg * Math.PI / 180;
         MeasureBox.Text = deg.ToString("0.#", CultureInfo.CurrentCulture);
         try
@@ -2627,7 +3883,12 @@ public partial class MainWindow : Window
         if (_fmFace is not { } f || _fmBase is not { } baseDoc) return;
         if (_fmStage == 1)
         {
-            if (AxisAt(f, pos) is not { } ax) return;
+            if (AxisAt(f, pos) is not { } ax)
+            {
+                // no axis there: a face, whose edge is the path to sweep the profile along
+                if (FaceAt(pos) is { } h && h.Face != f && IsPlanar(h.Face)) { EndFollow(); ApplyFollowPath(baseDoc, f, h.Face); }
+                return;
+            }
             try
             {
                 var a = PushPullMe.Core.Revolve.OutwardAxis(baseDoc.Bodies[f.Body], f.Face, ax.A, ax.B - ax.A);
@@ -2648,6 +3909,29 @@ public partial class MainWindow : Window
         var (p, dir, ang) = (_fmAxisP, _fmAxisDir, _fmAngle);
         EndFollow();
         ApplyFollow(baseDoc, f, p, dir, ang);
+    }
+
+    /// <summary>The profile swept along the edge of the path face (cut away where it lies in the body).</summary>
+    private void ApplyFollowPath(SketchDocument before, FaceRef profile, FaceRef path)
+    {
+        try
+        {
+            var (doc, made) = before.FollowPath(profile, path);
+            Commit(before, doc);
+            _last = null; _selected = null; _hover = null;
+            Render();
+            bool cut = doc.Volume() < before.Volume();
+            StatusText.Text = cut ? T("✅ Langs de rand gevolgd en weggesneden (een afschuining of groef rondom).", "✅ Followed along the edge and cut away (a chamfer or groove all round).")
+                : T("✅ Langs de rand gevolgd (een lijst rondom).", "✅ Followed along the edge (a rim all round).");
+            Log(string.Create(CultureInfo.InvariantCulture, $"follow me: profile face {profile.Face} along face {path.Face}: ok, {(cut ? "cut" : "added")}, volume {doc.Volume() * 1e9:0.###} mm³"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log($"follow me along face {path.Face}: {ex.Message}");
+        }
     }
 
     private void ApplyFollow(SketchDocument before, FaceRef f, Vec3 p, Vec3 dir, double angle)
@@ -3629,7 +4913,8 @@ public partial class MainWindow : Window
         var body = _doc.Bodies[f.Body];
         var face = body.Faces[f.Face];
         _offsetOk = false;
-        if (!PushPullMe.Core.Drawing.Contains(body, f.Face, p)) { ShowSketch([]); MeasureBox.Text = "0"; StatusText.Text = T("▣ Beweeg de muis naar binnen, op het vlak.", "▣ Move the mouse inwards, on the face."); return; }
+        // (outside the face: outward, onto the face round it)
+        bool outward = !PushPullMe.Core.Drawing.Contains(body, f.Face, p);
         var outline = FaceGeometry.LoopPoints(body, face.Loops[0]);
         double d = double.MaxValue;
         for (int i = 0; i < outline.Count; i++)
@@ -3638,16 +4923,19 @@ public partial class MainWindow : Window
             double t = ab.Dot(ab) < 1e-24 ? 0 : Math.Clamp((p - a).Dot(ab) / ab.Dot(ab), 0, 1);
             d = Math.Min(d, (a + ab * t - p).Length);
         }
-        _offsetDist = Math.Round(d * Display * 10) / 10 / Display;
+        _offsetDist = Math.Round(d * Display * 10) / 10 / Display * (outward ? -1 : 1);
         MeasureBox.Text = Mm(_offsetDist);
         try
         {
             var (corners, circle) = PushPullMe.Core.Drawing.OffsetOutline(body, f.Face, _offsetDist);
+            if (outward) PushPullMe.Core.Drawing.OffsetTarget(body, f.Face, corners, circle);
             var n = NormalOf(f);
             var pts = corners ?? Enumerable.Range(0, 60).Select(i => circle!.Centre + (circle.XAxis * Math.Cos(i * Math.PI / 30) + circle.Normal.Cross(circle.XAxis) * Math.Sin(i * Math.PI / 30)) * circle.Radius).ToList();
             ShowSketch(pts, n, closed: true);
             _offsetOk = true;
-            StatusText.Text = T($"▣ {Mm(_offsetDist)} mm naar binnen · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", $"▣ {Mm(_offsetDist)} mm inwards · click to set it, or type the distance + Enter. Esc cancels.");
+            StatusText.Text = outward
+                ? T($"▣ {Mm(-_offsetDist)} mm naar buiten · klik om vast te zetten, of typ de afstand (min) + Enter. Esc breekt af.", $"▣ {Mm(-_offsetDist)} mm outwards · click to set it, or type the distance (minus) + Enter. Esc cancels.")
+                : T($"▣ {Mm(_offsetDist)} mm naar binnen · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", $"▣ {Mm(_offsetDist)} mm inwards · click to set it, or type the distance + Enter. Esc cancels.");
         }
         catch (PushPullException ex)
         {
@@ -3693,6 +4981,7 @@ public partial class MainWindow : Window
 
     private void Window_TextInput(object sender, TextCompositionEventArgs e)
     {
+        if (_noteBox is { IsKeyboardFocused: true }) return;
         if (e.Text.Length == 1 && TypeChar(e.Text[0])) e.Handled = true;
     }
 
@@ -3701,10 +4990,17 @@ public partial class MainWindow : Window
     {
         if (_doc == null) return false;
         // drawing: before the first click (over a face) or after it
-        bool drawing = DrawMode && (_drawFace != null || _drawHover != null);
+        bool drawing = DrawMode && (_drawFace != null || _drawHover != null || _gKind != null);
+        // (the work plane: a shift along its normal, either way, or x;y within it)
+        if (WorkPlaneMode && (char.IsDigit(ch) || ch is ',' or '.' || (ch == '-' && (_typed.Length == 0 || _typed.EndsWith(';'))) || (ch == ';' && !_typed.Contains(';'))))
+        {
+            _typed += ch;
+            MeasureBox.Text = _typed;
+            return true;
+        }
         if (char.IsDigit(ch) || ch == ',' || ch == '.' || (ch == '-' && _typed.Length == 0 && !drawing) || (ch == ';' && drawing && RectMode && !_typed.Contains(';')))
         {
-            if (_dragFace == null && _last == null && _movePick == null && _lastMove == null && _tapeEdge == null && _offsetFace == null && _lastOffset == null && _roundEdge == null && _roundSel == null && _lastRound == null && _rotStage == 0 && _lastRotate == null && _scStage == 0 && _lastScale == null && _polyFace == null && !(_arcStage == 2 && !_arc3) && _swFace == null && _rrStage != 2 && _fmStage != 2 && !drawing) return false;
+            if (_dragFace == null && _last == null && _movePick == null && _lastMove == null && _tapeEdge == null && _offsetFace == null && _lastOffset == null && _roundEdge == null && _roundSel == null && _lastRound == null && _rotStage == 0 && _lastRotate == null && _scStage == 0 && _lastScale == null && _polyFace == null && !(_arcStage == 2 && !_arc3) && _swFace == null && _rrStage != 2 && _fmStage != 2 && _prStage != 2 && _secFace == null && !Text3DMode && !(PositionCameraMode && _camStand != null) && !drawing) return false;
             _typed += ch;
             MeasureBox.Text = _typed;
             return true;
@@ -3719,11 +5015,22 @@ public partial class MainWindow : Window
         if (ctrl && e.Key == Key.Y) { Redo(); e.Handled = true; return; }
         if (ctrl && e.Key == Key.O) { _ = OpenDialog(); e.Handled = true; return; }
         if (ctrl && e.Key == Key.S) { Save_Click(this, new RoutedEventArgs()); e.Handled = true; return; }
+        // (typing a label: the keys are the label's)
+        if (_noteBox is { IsKeyboardFocused: true }) return;
         if (ctrl) return;
+        if (WalkMode && WalkKey(e.Key)) { e.Handled = true; return; }
+        if (WorkPlaneMode && WorkPlaneKey(e.Key)) { e.Handled = true; return; }
         switch (e.Key)
         {
             case Key.Escape:
-                if (_dragFace != null) { EndDrag(); _typed = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                if (WorkPlaneMode && GripCancel()) { _typed = ""; MeasureBox.Text = ""; }
+                else if (_gKind != null)
+                {
+                    bool line = _gKind == GroundKind.Line && _gPts.Count > 1;
+                    EndGround(); _typed = ""; MeasureBox.Text = "";
+                    StatusText.Text = line ? T("Klaar met de lijn op de grond.", "Done with the line on the ground.") : T("Afgebroken.", "Cancelled.");
+                }
+                else if (_dragFace != null) { EndDrag(); _typed = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_movePick != null) { EndMove(); _typed = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_tapeStart != null) { EndTape(); _typed = ""; MeasureBox.Text = ""; StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_offsetFace != null) { EndOffset(); _typed = ""; MeasureBox.Text = ""; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
@@ -3742,6 +5049,13 @@ public partial class MainWindow : Window
                 }
                 else if (_lasso != null) { EndLasso(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_fmFace != null) { EndFollow(); _typed = ""; MeasureBox.Text = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_fhFace != null) { EndFreehand(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_viewAnchor != null) { EndView(); StatusText.Text = T("Gestopt.", "Stopped."); }
+                else if (_prStage > 0) { EndProtractor(); _typed = ""; MeasureBox.Text = ""; StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_dimStage > 0) { EndDimension(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_axStage > 0) { _axStage = 0; ShowSketch([]); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_secFace != null) { EndSection(); _section = null; _typed = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (SectionMode && _section != null) { _section = null; Render(); StatusText.Text = T("⊟ Doorsnede weggehaald.", "⊟ Section removed."); }
                 else if (_unionFirst != null) { _unionFirst = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_typed.Length > 0) { _typed = ""; MeasureBox.Text = ""; }
                 else if (_multi != null) { _multi = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Keuze leeg.", "Selection cleared."); }
@@ -3843,6 +5157,8 @@ public partial class MainWindow : Window
     /// one.</summary>
     private void TypedDistance()
     {
+        if (_gKind != null) { string gt = _typed; _typed = ""; GroundTyped(gt); return; }
+        if (WorkPlaneMode) { string wt = _typed; _typed = ""; if (!GripTyped(wt)) WorkPlaneTyped(wt); return; }
         if (DrawMode && (_drawFace != null || _drawHover != null))
         {
             string typed = _typed;
@@ -3870,6 +5186,30 @@ public partial class MainWindow : Window
             var (sc, ss, pie) = (_swCentre, _swStart, PieMode);
             EndSweep();
             ApplySweep(sdoc, sface, sc, ss, ang, pie);
+            return;
+        }
+        if (_secFace != null)
+        {
+            SetSection(Math.Abs(mm) / Display);
+            return;
+        }
+        if (Text3DMode)
+        {
+            // after the letters: their thickness (pulled out); before: the letter height
+            if (_letters != null) ExtrudeLetters(mm / Display);
+            else { _letterHeight = Math.Abs(mm) / Display; StatusText.Text = T($"A Letterhoogte {Mm(_letterHeight)} mm. Klik een punt op een plat vlak.", $"A Letter height {Mm(_letterHeight)} mm. Click a point on a flat face."); }
+            return;
+        }
+        if (_prStage == 2)
+        {
+            double sign = _prAngle < 0 ? -1 : 1;
+            AddProtractorGuide(Math.Abs(mm) * Math.PI / 180 * sign * (mm < 0 ? -1 : 1));
+            return;
+        }
+        if (PositionCameraMode && _camStand is { } stand)
+        {
+            _eyeHeight = Math.Abs(mm);
+            StandAt(stand);
             return;
         }
         if (_fmFace is { } fface && _fmStage == 2 && _fmBase is { } fdoc)
@@ -4035,6 +5375,7 @@ public partial class MainWindow : Window
                 await Open(open);
                 report.AppendLine($"converter: {StatusText.Text}");
             }
+            else if (open == "new") NewDocument();
             else await Load(open);
             report.AppendLine($"open: {StatusText.Text}");
             if (Environment.GetEnvironmentVariable("PPM_DRAW") is { Length: > 0 } draws && _doc != null)
@@ -4130,11 +5471,26 @@ public partial class MainWindow : Window
             Point Screen() { var c = arg.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray(); return Viewport3DHelper.Point3DtoPoint2D(View.Viewport, new Point3D(c[0], c[1], c[2])); }
             switch (what)
             {
-                case "tool": (arg switch { "P" => PushTool, "R" => RectTool, "L" => LineTool, "C" => CircleTool, "E" => EraserTool, "M" => MoveTool, "T" => TapeTool, "B" => PaintTool, "F" => OffsetTool, "K" => RoundTool, "Q" => RotateTool, "S" => ScaleTool, "LASSO" => LassoTool, "G" => PolygonTool, "A" => ArcTool, "CARC" => CentreArcTool, "PIE" => PieTool, "RRECT" => RotRectTool, "ARC3" => Arc3Tool, "FOLLOW" => FollowTool, "UNION" => UnionTool, "MIRROR" => MirrorTool, _ => SelectTool }).IsChecked = true; break;
+                case "shell": OuterShell(); break;
+                case "note": TypeNote(arg); break;
+                case "tool": (arg switch { "P" => PushTool, "R" => RectTool, "L" => LineTool, "C" => CircleTool, "E" => EraserTool, "M" => MoveTool, "T" => TapeTool, "B" => PaintTool, "F" => OffsetTool, "K" => RoundTool, "Q" => RotateTool, "S" => ScaleTool, "LASSO" => LassoTool, "G" => PolygonTool, "A" => ArcTool, "CARC" => CentreArcTool, "PIE" => PieTool, "RRECT" => RotRectTool, "ARC3" => Arc3Tool, "FOLLOW" => FollowTool, "FREEHAND" => FreehandTool, "ZOOM" => ZoomTool, "ZOOMWIN" => ZoomWindowTool, "CAMERA" => PositionCameraTool, "LOOK" => LookAroundTool, "WALK" => WalkTool, "PROTRACTOR" => ProtractorTool, "SECTION" => SectionTool, "TAG" => TagTool, "DIM" => DimensionTool, "TEXT" => TextTool, "AXES" => AxesTool, "TEXT3D" => Text3DTool, "UNION" => UnionTool, "SUBTRACT" => SubtractTool, "INTERSECT" => IntersectTool, "TRIM" => TrimTool, "SPLIT" => SplitTool, "MIRROR" => MirrorTool, "PLANE" => WorkPlaneTool, _ => SelectTool }).IsChecked = true; break;
                 case "key": Window_PreviewKeyDown(this, new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(this)!, 0, Enum.Parse<Key>(arg)) { RoutedEvent = Keyboard.PreviewKeyDownEvent }); break;
                 case "move": MouseMoveAt(Screen()); break;
                 case "mods": _simMods = arg switch { "ctrl" => ModifierKeys.Control, "shift" => ModifierKeys.Shift, "ctrl+shift" => ModifierKeys.Control | ModifierKeys.Shift, _ => null }; break;
                 case "click": ClickAt(Screen()); break;
+                case "down": PressAt(Screen()); break;
+                case "up": ReleaseAt(Screen()); break;
+                case "probe":
+                {
+                    // where a click on that point lands: the face and the point hit (mm)
+                    var sp = Screen(); var h = FaceAt(sp);
+                    var cs = arg.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                    var viaMatrix = View.GetScreenViewProjectionMatrix3D().Transform(new Point3D(cs[0], cs[1], cs[2]));
+                    var back = Viewport3DHelper.GetRay(View, sp);
+                    report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  matrix ({viaMatrix.X:0.##},{viaMatrix.Y:0.##}) size {View.ActualWidth:0}x{View.ActualHeight:0} ray {back?.Origin} → {back?.Direction}"));
+                    report.AppendLine(h is { } ph ? string.Create(CultureInfo.InvariantCulture, $"  probe {arg} → screen ({sp.X:0.##},{sp.Y:0.##}) face {ph.Face.Body}/{ph.Face.Face} at ({ph.Point.X:0.###},{ph.Point.Y:0.###},{ph.Point.Z:0.###})") : $"  probe {arg} → screen {sp}: nothing");
+                    break;
+                }
                 case "type": foreach (char ch in arg) TypeChar(ch); break;
                 case "enter": if (_typed.Length > 0) TypedDistance(); break;
                 case "esc": Window_PreviewKeyDown(this, new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(this)!, 0, Key.Escape) { RoutedEvent = Keyboard.PreviewKeyDownEvent }); break;
@@ -4158,13 +5514,60 @@ public partial class MainWindow : Window
                     Apply(_doc!, new FaceRef(0, int.Parse(parts[0])), double.Parse(parts[1], CultureInfo.InvariantCulture) / Display, replaceLast: false);
                     break;
                 }
+                case "grip":
+                {
+                    // a click on the middle of a grip of the work plane's handle (ShiftX … TurnN, Ball)
+                    var shape = GripShapes()[Enum.Parse<Grip>(arg)];
+                    ClickAt(Viewport3DHelper.Point3DtoPoint2D(View, P(shape[shape.Count / 2])));
+                    report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  plane origin ({_plane.Origin.X * Display:0.##},{_plane.Origin.Y * Display:0.##},{_plane.Origin.Z * Display:0.##}) normal ({_plane.N.X:0.###},{_plane.N.Y:0.###},{_plane.N.Z:0.###})"));
+                    break;
+                }
+                case "topview":
+                    // as the view cube's top: straight down, up along y
+                    if (View.Camera is ProjectionCamera tc) { tc.Position = new Point3D(0, 0, 400); tc.LookDirection = new Vector3D(0, 0, -400); tc.UpDirection = new Vector3D(0, 1, 0); }
+                    break;
+                case "zoomall": ZoomAll(0); break;
+                case "camera?":
+                    if (View.Camera is ProjectionCamera qc)
+                        report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  camera ok {CameraOk()}: at ({qc.Position.X:0.#},{qc.Position.Y:0.#},{qc.Position.Z:0.#}) look ({qc.LookDirection.X:0.###},{qc.LookDirection.Y:0.###},{qc.LookDirection.Z:0.###}) up ({qc.UpDirection.X:0.###},{qc.UpDirection.Y:0.###},{qc.UpDirection.Z:0.###})"));
+                    break;
+                case "pan":
+                {
+                    // dx,dy pixels, at the depth of the middle of the view
+                    var d = arg.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                    if (View.Camera is ProjectionCamera pcam) _panDepth = pcam.LookDirection.Length;
+                    // (the point the camera looks at: at the depth panned, so it should move exactly as far as the mouse)
+                    var mid = ((ProjectionCamera)View.Camera).Position + ((ProjectionCamera)View.Camera).LookDirection;
+                    var before = Viewport3DHelper.Point3DtoPoint2D(View, mid);
+                    Pan(d[0], d[1]);
+                    var moved = Viewport3DHelper.Point3DtoPoint2D(View, mid) - before;
+                    report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  pan: the middle moved ({moved.X:0.#},{moved.Y:0.#}) px"));
+                    break;
+                }
+                case "wheel":
+                {
+                    // x,y,z:delta — the wheel turned with the mouse over that point (mm)
+                    var parts = arg.Split(':');
+                    var c = parts[0].Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                    var at = Viewport3DHelper.Point3DtoPoint2D(View, new Point3D(c[0], c[1], c[2]));
+                    var ev = new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, int.Parse(parts[1], CultureInfo.InvariantCulture)) { RoutedEvent = UIElement.PreviewMouseWheelEvent };
+                    // (the handler reads the mouse from the event: put it where the point is)
+                    _simMouse = at;
+                    View_PreviewMouseWheel(View, ev);
+                    _simMouse = null;
+                    var after = Viewport3DHelper.Point3DtoPoint2D(View, new Point3D(c[0], c[1], c[2]));
+                    report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  wheel: the point stayed at ({at.X:0.#},{at.Y:0.#}) → ({after.X:0.#},{after.Y:0.#}); look length {((ProjectionCamera)View.Camera).LookDirection.Length:0.#}"));
+                    break;
+                }
                 case "orbit":
                 {
                     // dx,dy pixels, in steps of 5 as a mouse would, around the middle of the view
                     var d = arg.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray();
                     if (View.Camera is ProjectionCamera oc) _orbitPivot = oc.Position + oc.LookDirection;
                     int steps = (int)Math.Ceiling(Math.Max(Math.Abs(d[0]), Math.Abs(d[1])) / 5);
+                    int changes = _cameraChanges; var watch = Stopwatch.StartNew();
                     for (int i = 0; i < steps; i++) Orbit(d[0] / steps, d[1] / steps);
+                    report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  orbit: {steps} steps, {watch.Elapsed.TotalMilliseconds / Math.Max(1, steps):0.0} ms per step, {_cameraChanges - changes} camera changes"));
                     if (View.Camera is ProjectionCamera c2) report.AppendLine($"  camera look {c2.LookDirection.X:0.00},{c2.LookDirection.Y:0.00},{c2.LookDirection.Z:0.00} up {c2.UpDirection}");
                     break;
                 }
@@ -4172,6 +5575,29 @@ public partial class MainWindow : Window
             await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
             report.AppendLine($"{step} → [{MeasureLabel.Text} {MeasureBox.Text}] {StatusText.Text}");
         }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hwnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int w, int h);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
+
+    /// <summary>What the screen shows where an element of this (test) window is: a copy of those pixels.</summary>
+    private static System.Windows.Media.Imaging.BitmapSource ScreenShot(FrameworkElement e)
+    {
+        var tl = e.PointToScreen(new Point(0, 0)); var br = e.PointToScreen(new Point(e.ActualWidth, e.ActualHeight));
+        int x = (int)tl.X, y = (int)tl.Y, w = Math.Max(1, (int)(br.X - tl.X)), h = Math.Max(1, (int)(br.Y - tl.Y));
+        IntPtr screen = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(screen), bmp = CreateCompatibleBitmap(screen, w, h);
+        var old = SelectObject(mem, bmp);
+        BitBlt(mem, 0, 0, w, h, screen, x, y, 0x00CC0020);
+        SelectObject(mem, old);
+        var src = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(bmp, IntPtr.Zero, Int32Rect.Empty, System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+        DeleteObject(bmp); DeleteDC(mem); ReleaseDC(IntPtr.Zero, screen);
+        return src;
     }
 
     private async Task RenderPng(string path)
@@ -4185,6 +5611,12 @@ public partial class MainWindow : Window
         using (var dc = bg.RenderOpen()) dc.DrawRectangle(Background, null, new Rect(0, 0, w, h));
         bmp.Render(bg);
         bmp.Render(root);
+        // (the 3D view is drawn by DirectX, which a WPF render does not see: what is on the screen there, copied from it)
+        var shot = ScreenShot(View);
+        var at = View.TranslatePoint(new Point(0, 0), root);
+        var over = new DrawingVisual();
+        using (var dc = over.RenderOpen()) dc.DrawImage(shot, new Rect(at.X + root.Margin.Left, at.Y + root.Margin.Top, View.ActualWidth, View.ActualHeight));
+        bmp.Render(over);
         var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
         enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bmp));
         using (var f = File.Create(path)) enc.Save(f);

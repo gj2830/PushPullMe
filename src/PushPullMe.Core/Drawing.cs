@@ -131,14 +131,15 @@ public static class Drawing
     }
 
     /// <summary>
-    /// The outer edge of a planar face moved inward by <paramref name="distance"/> (as SketchUp's Offset): the corners of
-    /// the new outline (when the edge is straight all round), or the smaller circle (a face round one circle). Throws when
-    /// it cannot be done (arcs among straight edges, or so far in that the shape turns over).
+    /// The outer edge of a planar face moved inward by <paramref name="distance"/> (as SketchUp's Offset; less than 0:
+    /// outward): the corners of the new outline (when the edge is straight all round), or the smaller (larger) circle (a
+    /// face round one circle). Throws when it cannot be done (arcs among straight edges, or so far in that the shape turns
+    /// over).
     /// </summary>
     public static (List<Vec3>? Corners, BrepCircle? Circle) OffsetOutline(BrepBody body, int face, double distance)
     {
         var F = Planar(body, face, out var n);
-        if (distance < SnapTol) throw new PushPullException(Lang.T("Offset gaat naar binnen: de afstand moet groter dan 0 zijn.", "Offset goes inwards: the distance must be more than 0."));
+        if (Math.Abs(distance) < SnapTol) throw new PushPullException(Lang.T("De afstand moet meer dan 0 zijn.", "The distance must be more than 0."));
         var outer = F.Loops[0];
         if (outer.Count == 1 && body.Edges[outer[0].Edge].Curve is BrepCircle c)
         {
@@ -182,7 +183,21 @@ public static class Drawing
     public static (BrepBody Body, int Face) Offset(BrepBody body, int face, double distance)
     {
         var (corners, circle) = OffsetOutline(body, face, distance);
-        return circle is { } c ? Circle(body, face, c.Centre, c.Radius) : Polygon(body, face, corners!, Shape.NewEdge);
+        int on = distance > 0 ? face : OffsetTarget(body, face, corners, circle);
+        return circle is { } c ? Circle(body, on, c.Centre, c.Radius) : Polygon(body, on, corners!, Shape.NewEdge);
+    }
+
+    /// <summary>
+    /// Outward, the new edge goes on the face round it in the same plane (the face is a hole in it, or a part of it):
+    /// that face; throws when there is none or the new edge does not fit on it.
+    /// </summary>
+    public static int OffsetTarget(BrepBody body, int face, List<Vec3>? corners, BrepCircle? circle)
+    {
+        var pts = corners ?? Enumerable.Range(0, 24).Select(i => circle!.Centre + (circle.XAxis * Math.Cos(i * Math.PI / 12) + circle.Normal.Cross(circle.XAxis) * Math.Sin(i * Math.PI / 12)) * circle.Radius).ToList();
+        foreach (int g in CoplanarFaces(body, face).Where(g => g != face))
+            if (pts.All(q => Contains(body, g, q)) && Enumerable.Range(0, pts.Count).All(i => Contains(body, g, (pts[i] + pts[(i + 1) % pts.Count]) * 0.5)))
+                return g;
+        throw new PushPullException(Lang.T("Naar buiten moet de nieuwe rand op een vlak eromheen passen (in hetzelfde vlak).", "Outwards the new edge must fit on a face round it (in the same plane)."));
     }
 
     /// <summary>
@@ -491,6 +506,30 @@ public static class Drawing
         var outFaces = faces.Select((loops, i) => new BrepFace(i < body.Faces.Count ? body.Faces[i].Surface : F.Surface, i < body.Faces.Count ? body.Faces[i].Reversed : F.Reversed,
             loops.Select(l => (IReadOnlyList<BrepCoedge>)l).ToList())).ToList();
         return (new BrepBody { Vertices = verts, Edges = edges, Faces = outFaces }, outFaces.Count - 1);
+    }
+
+    /// <summary>A track of points with the ones left out that lie within <paramref name="tolerance"/> of the line between
+    /// their neighbours that stay (Douglas–Peucker); the ends stay.</summary>
+    public static List<Vec3> Simplify(IReadOnlyList<Vec3> pts, double tolerance)
+    {
+        if (pts.Count <= 2) return pts.ToList();
+        var keep = new bool[pts.Count]; keep[0] = keep[^1] = true;
+        var stack = new Stack<(int, int)>(); stack.Push((0, pts.Count - 1));
+        while (stack.Count > 0)
+        {
+            var (a, b) = stack.Pop();
+            Vec3 pa = pts[a], ab = pts[b] - pa; double l2 = ab.Dot(ab);
+            int far = -1; double fd = tolerance;
+            for (int i = a + 1; i < b; i++)
+            {
+                double t = l2 == 0 ? 0 : Math.Clamp((pts[i] - pa).Dot(ab) / l2, 0, 1);
+                double d = (pa + ab * t - pts[i]).Length;
+                if (d > fd) { fd = d; far = i; }
+            }
+            if (far < 0) continue;
+            keep[far] = true; stack.Push((a, far)); stack.Push((far, b));
+        }
+        return pts.Where((_, i) => keep[i]).ToList();
     }
 
     /// <summary>Whether p lies on the edge of a hole of one of the faces.</summary>

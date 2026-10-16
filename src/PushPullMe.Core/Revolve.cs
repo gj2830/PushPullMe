@@ -105,6 +105,64 @@ public static class Revolve
         return new Result(new BrepBody { Vertices = verts, Edges = edges, Faces = faces }, face, sides);
     }
 
+    /// <summary>
+    /// The solid the face sweeps in a whole turn round the axis, as a body of its own (to be united with the body it is
+    /// on): every edge of the face (not on the axis) a whole surface of revolution, every corner (not on the axis) a ring
+    /// edge between two of them. A corner on the axis must be where a flat end (a disc) meets the axis: a cone's tip or a
+    /// sphere's pole there is not possible yet.
+    /// </summary>
+    public static BrepBody Solid(BrepBody body, int face, Vec3 p, Vec3 axis)
+    {
+        var F = body.Faces[face];
+        var a = axis.Normalized();
+        Vec3 Foot(Vec3 q) => p + a * (q - p).Dot(a);
+        bool OnAxis(Vec3 q) => (q - Foot(q)).Length < 1e-7;
+        var n = FaceGeometry.Normal(F);
+        var edges = new List<BrepEdge>(); var ring = new Dictionary<int, int>();
+        int Ring(int v)
+        {
+            if (ring.TryGetValue(v, out int e)) return e;
+            var q = body.Vertices[v]; var foot = Foot(q);
+            e = edges.Count; edges.Add(new BrepEdge(-1, -1, new BrepCircle(foot, a, (q - foot).Normalized(), (q - foot).Length)));
+            ring[v] = e;
+            return e;
+        }
+        var faces = new List<BrepFace>();
+        foreach (var loop in F.Loops)
+            foreach (var c in loop)
+            {
+                var E = body.Edges[c.Edge];
+                if (E.Start < 0) throw new PushPullException(Lang.T("Een hele slag met een rond gat in het vlak kan nog niet.", "A whole turn with a round hole in the face is not possible yet."));
+                if (E.Curve is not (BrepLine or BrepCircle)) throw new PushPullException(Lang.T("Ronddraaien kan (nog) alleen met rechte randen en bogen.", "Revolving only works (for now) with straight edges and arcs."));
+                int from = c.Forward ? E.Start : E.End, to = c.Forward ? E.End : E.Start;
+                Vec3 qf = body.Vertices[from], qt = body.Vertices[to];
+                if (E.Curve is BrepLine && OnAxis(qf) && OnAxis(qt)) continue;
+                var (surface, mid, inward) = Swept(body, E, c.Forward, n, p, a);
+                if ((OnAxis(qf) || OnAxis(qt)) && surface is not BrepPlane)
+                    throw new PushPullException(Lang.T("Een hele slag met een punt of bol op de as kan nog niet (alleen een plat einde op de as).", "A whole turn with a tip or ball on the axis is not possible yet (only a flat end on the axis)."));
+                bool reversed = NaturalNormal(surface, mid).Dot(inward) > 0;
+                var normal = NaturalNormal(surface, mid) * (reversed ? -1 : 1);
+                var loops = new List<IReadOnlyList<BrepCoedge>>();
+                // a ring at each end off the axis, run so the face is on its left (counter-clockwise round the face normal)
+                foreach (var (v, other) in new[] { (from, to), (to, from) })
+                {
+                    var q = body.Vertices[v];
+                    if (OnAxis(q)) continue;
+                    var foot = Foot(q);
+                    var tangent = a.Cross(q - foot).Normalized();
+                    // (into the face from the ring: along the edge toward its other end)
+                    var pts = FaceGeometry.EdgePoints(body, E);
+                    if (pts.Count >= 2 && (pts[0] - q).Length > (pts[^1] - q).Length) pts.Reverse();
+                    var into = (pts[1] - pts[0]).Normalized();
+                    var nAt = NaturalNormal(surface, q) * (reversed ? -1 : 1);
+                    bool forward = nAt.Cross(tangent).Dot(into) > 0;
+                    loops.Add([new BrepCoedge(Ring(v), forward)]);
+                }
+                faces.Add(new BrepFace(surface, reversed, loops));
+            }
+        return new BrepBody { Vertices = [], Edges = edges, Faces = faces };
+    }
+
     /// <summary>The surface an edge of the face sweeps round the axis; and a point in the middle of the edge with the
     /// direction into the face there.</summary>
     private static (BrepSurface Surface, Vec3 Mid, Vec3 Inward) Swept(BrepBody body, BrepEdge e, bool forward, Vec3 n, Vec3 p, Vec3 a)
