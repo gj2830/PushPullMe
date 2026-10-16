@@ -7,7 +7,7 @@
 A playful 3D modelling app in the spirit of SketchUp, with the habits of DesignSpark Mechanical. It works with exact
 geometry (planes, cylinders, cones, spheres, tori) and reads and writes DesignSpark files (`.rsdocx`) through
 [StlConverter](https://github.com/gj2830/StlConverter), which comes along as a submodule. STL and 3MF can be imported
-too. The app speaks English and Dutch (the 🌐 button).
+too. The interface is in English or Dutch; switch with the 🌐 button.
 
 ![A simple birdhouse, drawn from an empty sheet with push/pull, a work plane and paint, saved as .rsdocx and opened again](docs/birdhouse.png)
 
