@@ -131,6 +131,45 @@ public static class FaceGeometry
     public static Vec3 Normal(BrepFace f) => f.Surface is BrepPlane p ? (f.Reversed ? p.Normal * -1 : p.Normal).Normalized()
         : throw new ArgumentException("not a planar face");
 
+    /// <summary>
+    /// The outward normal of a face at a point on it, from its exact surface (so a round face can be shaded smooth);
+    /// null for a free-form surface.
+    /// </summary>
+    public static Vec3? NormalAt(BrepFace f, Vec3 p)
+    {
+        double s = f.Reversed ? -1 : 1;
+        switch (f.Surface)
+        {
+            case BrepPlane pl: return pl.Normal.Normalized() * s;
+            case BrepCylinder cy:
+            {
+                var ax = cy.Axis.Normalized(); var d = p - cy.Origin; d -= ax * d.Dot(ax);
+                return d.Length < 1e-15 ? null : d.Normalized() * s;
+            }
+            case BrepCone co:
+            {
+                // away from the axis and back along it, square to the cone's sloping line
+                var ax = co.Axis.Normalized(); var d = p - co.Origin; d -= ax * d.Dot(ax);
+                if (d.Length < 1e-15) return null;
+                return (d.Normalized() * Math.Cos(co.HalfAngle) - ax * Math.Sin(co.HalfAngle)).Normalized() * s;
+            }
+            case BrepSphere sp:
+            {
+                var d = p - sp.Centre;
+                return d.Length < 1e-15 ? null : d.Normalized() * s;
+            }
+            case BrepTorus to:
+            {
+                // away from the circle through the middle of the tube
+                var ax = to.Axis.Normalized(); var q = p - to.Centre; var radial = q - ax * q.Dot(ax);
+                if (radial.Length < 1e-15) return null;
+                var d = p - (to.Centre + radial.Normalized() * to.MajorRadius);
+                return d.Length < 1e-15 ? null : d.Normalized() * s;
+            }
+            default: return null;
+        }
+    }
+
     /// <summary>Signed area of a loop around a normal (positive: counter-clockwise).</summary>
     public static double Area(IReadOnlyList<Vec3> pts, Vec3 n)
     {
@@ -324,6 +363,14 @@ public static class FaceGeometry
                             p => Math.Acos(Math.Clamp((p - sp.Centre).Dot(ax) / sp.Radius, -1, 1)),
                             st => (sp.Radius * Math.Sin(st), sp.Radius * Math.Cos(st)), Outward) is { } rev) return rev;
                 }
+                // (a piece turned round its axis, such as a revolved arc: in longitude and latitude)
+                var sAx = sp.Axis.Normalized(); var sx = (sp.XAxis - sAx * sp.XAxis.Dot(sAx)).Normalized(); var sy = sAx.Cross(sx);
+                // (not with a point on a pole: there the longitude means nothing)
+                bool pole = f.Loops.Any(l => LoopPoints(body, l).Any(p => Math.Abs((p - sp.Centre).Normalized().Dot(sAx)) > 1 - 1e-9));
+                if (!pole && InAngles(body, f, Outward, false,
+                        p => { var q = (p - sp.Centre).Normalized(); return (Math.Atan2(q.Dot(sy), q.Dot(sx)), Math.Asin(Math.Clamp(q.Dot(sAx), -1, 1))); },
+                        (u, v) => sp.Centre + ((sx * Math.Cos(u) + sy * Math.Sin(u)) * Math.Cos(v) + sAx * Math.Sin(v)) * sp.Radius,
+                        sp.Radius, sp.Radius) is { } piece) return piece;
                 return Projected(body, f, p => sp.Centre + (p - sp.Centre).Normalized() * sp.Radius, Outward, () => UvSphere(sp.Centre, sp.Radius, s));
             }
             case BrepTorus to:
@@ -334,6 +381,12 @@ public static class FaceGeometry
                 if (Revolved(body, f, to.Centre, ax, to.XAxis, true,
                         p => { var q = p - to.Centre; double h = q.Dot(ax); return Math.Atan2(h, (q - ax * h).Length - to.MajorRadius); },
                         st => (to.MajorRadius + to.MinorRadius * Math.Cos(st), to.MinorRadius * Math.Sin(st)), Outward) is { } rev) return rev;
+                // (a piece turned round its axis, such as a revolved arc: in the angle round the axis and round the tube)
+                var tx = (to.XAxis - ax * to.XAxis.Dot(ax)).Normalized(); var ty = ax.Cross(tx);
+                if (InAngles(body, f, Outward, true,
+                        p => { var q = p - to.Centre; double h = q.Dot(ax); var w = q - ax * h; return (Math.Atan2(w.Dot(ty), w.Dot(tx)), Math.Atan2(h, w.Length - to.MajorRadius)); },
+                        (u, v) => to.Centre + (tx * Math.Cos(u) + ty * Math.Sin(u)) * (to.MajorRadius + to.MinorRadius * Math.Cos(v)) + ax * (to.MinorRadius * Math.Sin(v)),
+                        to.MajorRadius, to.MinorRadius) is { } piece) return piece;
                 return Projected(body, f, p => Tube(p) + (p - Tube(p)).Normalized() * to.MinorRadius, Outward, null);
             }
             default:
@@ -422,6 +475,139 @@ public static class FaceGeometry
             if (advanceA) { tris.Add((a[ia % a.Count].P, b[ib % b.Count].P, a[(ia + 1) % a.Count].P)); ia++; }
             else { tris.Add((a[ia % a.Count].P, b[ib % b.Count].P, b[(ib + 1) % b.Count].P)); ib++; }
         }
+    }
+
+    /// <summary>
+    /// A face on a surface with two angles (u round its axis, v along its profile; v periodic for a torus) laid out in
+    /// those angles (scaled by <paramref name="su"/> and <paramref name="sv"/> to lengths), each cut where the face is not
+    /// (the middle of the widest gap between its edge points), triangulated there, every triangle cut in 4 three times
+    /// with the new points exactly on the surface; wound along <paramref name="outward"/>. Unlike laying it flat this
+    /// holds for a face going more than half way round. Null when the face goes all the way round in an angle.
+    /// </summary>
+    private static List<(Vec3 A, Vec3 B, Vec3 C)>? InAngles(BrepBody body, BrepFace f, Func<Vec3, Vec3> outward, bool periodicV,
+        Func<Vec3, (double U, double V)> angles, Func<double, double, Vec3> at, double su, double sv)
+    {
+        var loops = f.Loops.Select(l => LoopPoints(body, l)).Where(l => l.Count >= 3).ToList();
+        if (loops.Count == 0) return null;
+        var raw = loops.Select(l => l.Select(angles).ToList()).ToList();
+        static double? Cut(IEnumerable<double> values)
+        {
+            var s = values.Select(a => a < 0 ? a + 2 * Math.PI : a).Order().ToList();
+            double gap = s[0] + 2 * Math.PI - s[^1], mid = (s[^1] + s[0] + 2 * Math.PI) / 2;
+            for (int i = 0; i + 1 < s.Count; i++)
+                if (s[i + 1] - s[i] > gap) { gap = s[i + 1] - s[i]; mid = (s[i] + s[i + 1]) / 2; }
+            return gap > 3 * ArcStep ? mid : null;
+        }
+        static double From(double a, double cut) { double t = (a - cut) % (2 * Math.PI); return t < 0 ? t + 2 * Math.PI : t; }
+        if (Cut(raw.SelectMany(l => l.Select(q => q.U))) is not double cu) return null;
+        double cv = 0;
+        if (periodicV)
+        {
+            if (Cut(raw.SelectMany(l => l.Select(q => q.V))) is double c) cv = c;
+            // all the way round the tube (a disc turned round an axis): a band between two rings, round in v
+            else return Band(raw.Select(l => l.Select(q => From(q.U, cu)).ToList()).ToList(), (u, v) => at(u + cu, v), outward);
+        }
+        var uv = raw.Select(l => l.Select(q => (U: From(q.U, cu), V: periodicV ? From(q.V, cv) : q.V)).ToList()).ToList();
+        if (uv.Count == 1 && Grid(uv[0], loops[0], (u, v) => at(u + cu, periodicV ? v + cv : v), outward) is { } grid) return grid;
+        // the outer loop: the largest in the angles
+        double Area(List<(double U, double V)> l) { double s = 0; for (int i = 0; i < l.Count; i++) s += l[i].U * l[(i + 1) % l.Count].V - l[(i + 1) % l.Count].U * l[i].V; return Math.Abs(s); }
+        int outer = Enumerable.Range(0, uv.Count).MaxBy(i => Area(uv[i]));
+        var ordered = new[] { uv[outer] }.Concat(uv.Where((_, i) => i != outer)).ToList();
+        var flat = ordered.SelectMany(l => l).ToList();
+        var pts3 = new[] { loops[outer] }.Concat(loops.Where((_, i) => i != outer)).SelectMany(l => l).ToList();
+        var idx = Triangulator.Triangulate(ordered.Select(l => (IReadOnlyList<(double, double)>)l.Select(q => (q.U * su, q.V * sv)).ToList()).ToList());
+        if (idx.Count == 0) return null;
+        // (the corners keep their own points; new ones are made from the angles)
+        var tris = idx.Select(t => ((flat[t.A], pts3[t.A]), (flat[t.B], pts3[t.B]), (flat[t.C], pts3[t.C]))).ToList();
+        ((double U, double V), Vec3) Mid(((double U, double V) A, Vec3) a, ((double U, double V) A, Vec3) b)
+        {
+            double u = (a.A.U + b.A.U) / 2, v = (a.A.V + b.A.V) / 2;
+            return ((u, v), at(u + cu, periodicV ? v + cv : v));
+        }
+        for (int level = 0; level < 3; level++)
+        {
+            var next = new List<(((double, double), Vec3), ((double, double), Vec3), ((double, double), Vec3))>(tris.Count * 4);
+            foreach (var (a, b, c) in tris)
+            {
+                var ab = Mid(a, b); var bc = Mid(b, c); var ca = Mid(c, a);
+                next.Add((a, ab, ca)); next.Add((ab, b, bc)); next.Add((ca, bc, c)); next.Add((ab, bc, ca));
+            }
+            tris = next;
+        }
+        return tris.Select(t =>
+        {
+            Vec3 a = t.Item1.Item2, b = t.Item2.Item2, c = t.Item3.Item2;
+            return (b - a).Cross(c - a).Dot(outward((a + b + c) * (1.0 / 3))) >= 0 ? (a, b, c) : (a, c, b);
+        }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
+    }
+
+    /// <summary>A band all the way round the tube of a torus between two rings at fixed u (the ends of a disc turned
+    /// part of the way round an axis): a grid over u (steps of at most ArcStep) and all the way round v; null when its
+    /// loops are not two such rings.</summary>
+    private static List<(Vec3 A, Vec3 B, Vec3 C)>? Band(List<List<double>> loopU, Func<double, double, Vec3> at, Func<Vec3, Vec3> outward)
+    {
+        if (loopU.Count != 2 || loopU.Any(l => l.Max() - l.Min() > 1e-6)) return null;
+        double u0 = Math.Min(loopU[0].Average(), loopU[1].Average()), u1 = Math.Max(loopU[0].Average(), loopU[1].Average());
+        if (u1 - u0 < 1e-9) return null;
+        int nu = Math.Max(1, (int)Math.Ceiling((u1 - u0) / ArcStep)), nv = (int)Math.Round(2 * Math.PI / ArcStep);
+        var g = new Vec3[nu + 1, nv];
+        for (int i = 0; i <= nu; i++) for (int j = 0; j < nv; j++) g[i, j] = at(u0 + (u1 - u0) * i / nu, 2 * Math.PI * j / nv);
+        var tris = new List<(Vec3, Vec3, Vec3)>();
+        for (int i = 0; i < nu; i++)
+            for (int j = 0; j < nv; j++)
+            {
+                int k = (j + 1) % nv;
+                tris.Add((g[i, j], g[i + 1, j], g[i + 1, k]));
+                tris.Add((g[i, j], g[i + 1, k], g[i, k]));
+            }
+        return tris.Select(t =>
+        {
+            var (a, b, c) = t;
+            return (b - a).Cross(c - a).Dot(outward((a + b + c) * (1.0 / 3))) >= 0 ? (a, b, c) : (a, c, b);
+        }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
+    }
+
+    /// <summary>A face that is a rectangle in its two angles (an arc or line turned round an axis, its edges the curves
+    /// at the ends): a grid through the angles of its own edge points, so the triangles are neat and meet the edges;
+    /// null when the face is not like that.</summary>
+    private static List<(Vec3 A, Vec3 B, Vec3 C)>? Grid(List<(double U, double V)> uv, List<Vec3> pts, Func<double, double, Vec3> at, Func<Vec3, Vec3> outward)
+    {
+        const double eps = 1e-7;
+        double u0 = uv.Min(q => q.U), u1 = uv.Max(q => q.U), v0 = uv.Min(q => q.V), v1 = uv.Max(q => q.V);
+        if (u1 - u0 < eps || v1 - v0 < eps) return null;
+        bool OnU(double u, double x) => Math.Abs(u - x) < eps;
+        if (!uv.All(q => OnU(q.U, u0) || OnU(q.U, u1) || OnU(q.V, v0) || OnU(q.V, v1))) return null;
+        // the steps: the angles of the edge points along the sides (plus the corners)
+        static List<double> Steps(IEnumerable<double> xs, double lo, double hi)
+        {
+            var r = new List<double>();
+            foreach (var x in xs.Append(lo).Append(hi).Where(x => x >= lo - eps && x <= hi + eps).Order())
+                if (r.Count == 0 || x - r[^1] > eps) r.Add(x);
+            r[0] = lo; r[^1] = hi;
+            return r;
+        }
+        var us = Steps(uv.Where(q => OnU(q.V, v0) || OnU(q.V, v1)).Select(q => q.U), u0, u1);
+        var vs = Steps(uv.Where(q => OnU(q.U, u0) || OnU(q.U, u1)).Select(q => q.V), v0, v1);
+        // (the face's own points where it has them: exactly the edges)
+        Vec3 P(double u, double v)
+        {
+            for (int i = 0; i < uv.Count; i++) if (OnU(uv[i].U, u) && OnU(uv[i].V, v)) return pts[i];
+            return at(u, v);
+        }
+        var g = new Vec3[us.Count, vs.Count];
+        for (int i = 0; i < us.Count; i++) for (int j = 0; j < vs.Count; j++) g[i, j] = P(us[i], vs[j]);
+        var tris = new List<(Vec3, Vec3, Vec3)>();
+        for (int i = 0; i + 1 < us.Count; i++)
+            for (int j = 0; j + 1 < vs.Count; j++)
+            {
+                tris.Add((g[i, j], g[i + 1, j], g[i + 1, j + 1]));
+                tris.Add((g[i, j], g[i + 1, j + 1], g[i, j + 1]));
+            }
+        return tris.Select(t =>
+        {
+            var (a, b, c) = t;
+            return (b - a).Cross(c - a).Dot(outward((a + b + c) * (1.0 / 3))) >= 0 ? (a, b, c) : (a, c, b);
+        }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
     }
 
     /// <summary>A face laid flat (along the normal of its outer loop), triangulated, every triangle cut in 4 three times

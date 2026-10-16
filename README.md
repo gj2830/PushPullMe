@@ -1,28 +1,45 @@
 # PushPullMe
 
-[![Bouwen en testen](https://github.com/gj2830/PushPullMe/actions/workflows/build.yml/badge.svg)](https://github.com/gj2830/PushPullMe/actions/workflows/build.yml)
+[![Build and test](https://github.com/gj2830/PushPullMe/actions/workflows/build.yml/badge.svg)](https://github.com/gj2830/PushPullMe/actions/workflows/build.yml)
 
-Een speels tekenprogramma voor 3D-vormen in de stijl van SketchUp, met de gewoontes van DesignSpark Mechanical. Het
-werkt met exacte vormen (vlakken, cilinders, kegels, bollen, ringen) en leest en schrijft DesignSpark-bestanden
-(`.rsdocx`) via [StlConverter](https://github.com/gj2830/StlConverter), dat als submodule meekomt. Ook STL en 3MF
-kunnen worden ingelezen.
+*[Nederlands hieronder](#nederlands)*
 
-![Kleuren uit DesignSpark](docs/kleuren.png)
+A playful 3D modelling app in the spirit of SketchUp, with the habits of DesignSpark Mechanical. It works with exact
+geometry (planes, cylinders, cones, spheres, tori) and reads and writes DesignSpark files (`.rsdocx`) through
+[StlConverter](https://github.com/gj2830/StlConverter), which comes along as a submodule. STL and 3MF can be imported
+too. The app speaks English and Dutch (the 🌐 button).
 
-Wat er kan: duwen/trekken (ook cilinders en afrondingen), lijnen, rechthoeken, cirkels, veelhoeken, bogen, taartpunten,
-losse lijnen, offset, afronden, verplaatsen, draaien, schalen, spiegelen, ronddraaien (Follow Me), verenigen (platte
-vlakken), meetlint en hulplijnen, verf, lasso en gum. Het programma is in het Nederlands en het Engels (🌐-knop).
+![Colours from DesignSpark](docs/kleuren.png)
 
-![Een vlak rondgedraaid tot een kwart bol](docs/ronddraaien.png)
+## What it can do
 
-## Downloaden
+- **Start drawing right away** on an empty work sheet: rectangles, circles and lines on the ground (or on any face)
+  become faces; push/pull turns them into blocks and cylinders. Overlapping shapes divide each other, as in other
+  modellers.
+- **Work plane** (⊞): put it level with a face, or move and turn it with its handle (arrows, arcs, a ball), and draw
+  beside the model on it.
+- **Push/pull**, also cylinders, roundings and faces without thickness; "level with this face" while dragging.
+- **Draw**: lines, rectangles (also rotated), circles, polygons, arcs (2-point, 3-point, from the centre), pies,
+  freehand, 3D text, loose lines that close into faces.
+- **Edit**: offset, round edges, move, rotate, scale, mirror, Follow Me (round an axis, also a whole turn, or along a
+  path), union / subtract / intersect / trim / split (also with round faces), outer shell.
+- **Measure and annotate**: tape measure and guides, protractor, dimensions, text labels, axes, section plane, hiding
+  parts, paint and the colour picker.
+- **Look around**: orbit freely all the way round, pan, zoom to the mouse, zoom window, position camera, look around,
+  walk. Drawn with DirectX 11 (HelixToolkit.Wpf.SharpDX).
+- Every tool works by dragging (press, drag, release) as well as by click, move, click; distances and angles can be
+  typed.
 
-Onder [Releases](https://github.com/gj2830/PushPullMe/releases) staat een zip voor Windows (64-bit). Uitpakken en
-`PushPullMe.exe` starten; .NET hoeft niet apart geïnstalleerd te zijn.
+![A face turned round into a quarter ball](docs/ronddraaien.png)
 
-## Zelf bouwen
+## Download
 
-Nodig: Windows en de .NET 10 SDK.
+[Releases](https://github.com/gj2830/PushPullMe/releases) has a zip for Windows (64-bit). Unpack it and start
+`PushPullMe.exe`; .NET does not need to be installed separately.
+
+## Build it yourself
+
+You need Windows and the .NET 10 SDK.
 
 ```
 git clone --recursive https://github.com/gj2830/PushPullMe.git
@@ -30,19 +47,29 @@ cd PushPullMe
 dotnet build src/PushPullMe -c Release
 ```
 
-De app staat daarna in `src/PushPullMe/bin/Release/net10.0-windows/PushPullMe.exe`. Al zonder `--recursive`
-gekloond? Haal de converter dan op met `git submodule update --init`.
+The app is then in `src/PushPullMe/bin/Release/net10.0-windows/PushPullMe.exe`. Cloned without `--recursive`? Fetch
+the converter with `git submodule update --init`.
 
-Testen: `dotnet test tests/PushPullMe.Tests`.
+Tests: `dotnet test tests/PushPullMe.Tests`.
 
-## In English
+## Nederlands
 
-PushPullMe is a playful 3D modelling app in the spirit of SketchUp, with the habits of DesignSpark Mechanical. It
-works with exact geometry (planes, cylinders, cones, spheres, tori) and reads and writes DesignSpark files (`.rsdocx`)
-through [StlConverter](https://github.com/gj2830/StlConverter); STL and 3MF can be imported too. The app speaks Dutch and English (the 🌐
-button). Download a ready-to-run Windows build from [Releases](https://github.com/gj2830/PushPullMe/releases), or
-build it yourself with the .NET 10 SDK as shown above.
+Een speels tekenprogramma voor 3D-vormen in de stijl van SketchUp, met de gewoontes van DesignSpark Mechanical. Het
+werkt met exacte vormen (vlakken, cilinders, kegels, bollen, ringen) en leest en schrijft DesignSpark-bestanden
+(`.rsdocx`) via [StlConverter](https://github.com/gj2830/StlConverter), dat als submodule meekomt. Ook STL en 3MF
+kunnen worden ingelezen. Het programma is in het Engels en het Nederlands (🌐-knop).
 
-## Licentie / License
+Wat er kan: meteen tekenen op een leeg werkblad (rechthoeken, cirkels en lijnen op de grond worden vlakken, ⇕ maakt er
+blokken van; overlappende vormen delen elkaar), een werkvlak (⊞) dat je gelijk legt met een vlak of verschuift en draait
+met de greep, duwen/trekken (ook cilinders, afrondingen en vlakken zonder dikte), alle tekengereedschappen van
+SketchUp, offset, afronden, verplaatsen, draaien, schalen, spiegelen, Follow Me (rond een as of langs een pad),
+verenigen/aftrekken/doorsnede/wegsnijden/splitsen (ook met ronde vlakken), meten, maatlijnen, tekst, doorsnedevlak,
+verbergen, verven, vrij draaien, zoomen naar de muis en lopen. Alles werkt met slepen en met klik-beweeg-klik; maten en
+hoeken kun je typen.
 
-MIT, zie [LICENSE](LICENSE).
+**Downloaden:** onder [Releases](https://github.com/gj2830/PushPullMe/releases) staat een zip voor Windows (64-bit);
+uitpakken en `PushPullMe.exe` starten. **Zelf bouwen:** Windows en de .NET 10 SDK, zie hierboven.
+
+## License / Licentie
+
+MIT, see [LICENSE](LICENSE).

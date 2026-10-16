@@ -2532,7 +2532,7 @@ public class SketchLineTests
 }
 
 /// <summary>Turning a face out of its body round an axis (Follow Me, DesignSpark's revolve).</summary>
-public class RevolveTests
+public class RevolveTests(ITestOutputHelper output)
 {
     private const double Mm = 1e-3;
     private static SketchDocument Cube() => SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm))]);
@@ -2583,11 +2583,102 @@ public class RevolveTests
     }
 
     [Fact]
-    public void A_face_across_the_axis_or_a_full_turn_is_refused()
+    public void A_half_disc_turned_more_than_half_way_round_an_edge_makes_an_arch()
+    {
+        // a half disc r 2 round (0, 4) on the top, from the left edge; turned round the right top edge (x 10) 210°: an
+        // arch outside the cube (Pappus: area · way of its centre, 10 − 4r/3π from the axis)
+        var doc = Cube();
+        var (d0, half) = doc.DrawArc(Face(doc, new Vec3(0, 0, 1)), P(0, 2, 10), P(0, 6, 10), P(2, 4, 10));
+        var piece = new[] { half, Face(d0, new Vec3(0, 0, 1)) }.First(f => d0.Bodies[0].Faces[f.Face].Loops[0].Count == 2);
+        double angle = 210 * Math.PI / 180;
+        var (d, _) = d0.Revolve(piece, P(10, 0, 10), new Vec3(0, 1, 0), angle);
+        AssertSound(d);
+        Assert.Equal(1000 + Math.PI * 4 / 2 * (10 - 8 / (3 * Math.PI)) * angle, Mm3(d), 1.0);
+        // its ring face in neat triangles: none reaching across the arch (as when it was laid flat, which folds past 180°)
+        var ring = Enumerable.Range(0, d.Bodies[0].Faces.Count).Single(f => d.Bodies[0].Faces[f].Surface is BrepTorus);
+        var longest = d.TrianglesOf(new FaceRef(0, ring)).Max(t => Math.Max((t.B - t.A).Length, Math.Max((t.C - t.B).Length, (t.A - t.C).Length)));
+        Assert.True(longest < 2 * Mm, $"longest edge {longest / Mm} mm");
+    }
+
+    [Fact]
+    public void A_disc_turned_half_way_round_a_line_beside_it_makes_half_a_ring()
+    {
+        // a disc r 2 at (5, 3) on the top of the cube, turned 180° round the line y 8 across the top: half a ring tube,
+        // R 5 (Pappus: π r² · π R)
+        var doc = Cube();
+        var (d0, disc) = doc.DrawCircle(Face(doc, new Vec3(0, 0, 1)), P(5, 3, 10), 2 * Mm);
+        var (d, _) = d0.Revolve(disc, P(0, 8, 10), new Vec3(-1, 0, 0), Math.PI);
+        AssertSound(d);
+        Assert.Equal(1000 + Math.PI * 4 * Math.PI * 5, Mm3(d), 1.5);
+        var ring = Enumerable.Range(0, d.Bodies[0].Faces.Count).Single(f => d.Bodies[0].Faces[f].Surface is BrepTorus);
+        var longest = d.TrianglesOf(new FaceRef(0, ring)).Max(t => Math.Max((t.B - t.A).Length, Math.Max((t.C - t.B).Length, (t.A - t.C).Length)));
+        Assert.True(longest < 2 * Mm, $"longest edge {longest / Mm} mm");
+    }
+
+    [Fact]
+    public void Round_faces_have_smooth_normals_pointing_out()
+    {
+        // a ring piece (the arch above) and a cone (a corner triangle of the top turned round the front edge)
+        var doc = Cube();
+        var (d0, half) = doc.DrawArc(Face(doc, new Vec3(0, 0, 1)), P(0, 2, 10), P(0, 6, 10), P(2, 4, 10));
+        var piece = new[] { half, Face(d0, new Vec3(0, 0, 1)) }.First(f => d0.Bodies[0].Faces[f.Face].Loops[0].Count == 2);
+        var (arch, _) = d0.Revolve(piece, P(10, 0, 10), new Vec3(0, 1, 0), 210 * Math.PI / 180);
+        var (d1, tri) = doc.DrawPath(Face(doc, new Vec3(0, 0, 1)), [P(0, 4, 10), P(4, 0, 10)]);
+        var corner = new[] { tri, Face(d1, new Vec3(0, 0, 1)) }.First(f => d1.Bodies[0].Faces[f.Face].Loops[0].Count == 3);
+        var (cone, _) = d1.Revolve(corner, P(0, 0, 10), new Vec3(1, 0, 0), Math.PI / 2);
+        foreach (var (d, kind) in new[] { (arch, typeof(BrepTorus)), (cone, typeof(BrepCone)) })
+        {
+            var body = d.Bodies[0];
+            int f = Enumerable.Range(0, body.Faces.Count).Single(i => body.Faces[i].Surface.GetType() == kind);
+            foreach (var (a, b, c) in d.TrianglesOf(new FaceRef(0, f)))
+            {
+                var flat = (b - a).Cross(c - a).Normalized();
+                foreach (var p in new[] { a, b, c })
+                {
+                    var n = FaceGeometry.NormalAt(body.Faces[f], p);
+                    // (none at the cone's tip, on the axis)
+                    if (n == null && kind == typeof(BrepCone) && Math.Abs(p.Y) + Math.Abs(p.Z - 10 * Mm) < 1e-9) continue;
+                    Assert.NotNull(n);
+                    // (the triangles follow the surface closely: their own normal nearly the exact one)
+                    Assert.True(n!.Value.Dot(flat) > 0.9, $"{kind.Name}: {n.Value.Dot(flat)}");
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void A_whole_turn_round_an_edge_of_the_face_makes_a_cylinder_round_it()
+    {
+        // the right side of the cube (x 10) round its vertical edge at y 0: a cylinder r 10, h 10 round that edge, a
+        // quarter of which the cube fills already
+        var doc = Cube();
+        var (d, _) = doc.Revolve(Face(doc, new Vec3(1, 0, 0)), P(10, 0, 0), new Vec3(0, 0, 1), 2 * Math.PI);
+        foreach (var b in d.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        Assert.Single(d.Bodies);
+        Assert.Equal(1000 + 0.75 * Math.PI * 100 * 10, d.Volume() / (Mm * Mm * Mm), 5.0);
+        d.ToRsDocx();
+    }
+
+    [Fact]
+    public void A_whole_turn_round_an_axis_beside_the_face_makes_a_ring_through_the_cube()
+    {
+        // the top round a line along y at x 12 on its plane: a ring (radius 2 to 12, 10 wide) through the cube
+        var doc = Cube();
+        var (d, _) = doc.Revolve(Face(doc, new Vec3(0, 0, 1)), P(12, 0, 10), new Vec3(0, 1, 0), 2 * Math.PI);
+        foreach (var b in d.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        Assert.Single(d.Bodies);
+        // the ring, and the part of the cube more than 12 from the axis (by counting)
+        double ring = Math.PI * (144 - 4) * 10, outside = 0;
+        for (int i = 0; i < 400; i++) for (int k = 0; k < 400; k++) { double x = (i + 0.5) / 40, z = (k + 0.5) / 40; if ((x - 12) * (x - 12) + (z - 10) * (z - 10) > 144) outside += 10.0 / 1600; }
+        Assert.Equal(ring + outside, d.Volume() / (Mm * Mm * Mm), 10.0);
+        d.ToRsDocx();
+    }
+
+    [Fact]
+    public void A_face_across_the_axis_or_a_tip_on_the_axis_is_refused()
     {
         var doc = Cube();
         Assert.Throws<PushPullException>(() => doc.Revolve(Face(doc, new Vec3(0, 0, 1)), P(5, 0, 10), new Vec3(0, 1, 0), 1));
-        Assert.Throws<PushPullException>(() => doc.Revolve(Face(doc, new Vec3(1, 0, 0)), P(10, 0, 0), new Vec3(0, 1, 0), 2 * Math.PI));
         // turned on round into the body: it crosses
         Assert.Throws<PushPullException>(() => doc.Revolve(Face(doc, new Vec3(1, 0, 0)), P(10, 0, 0), new Vec3(0, 1, 0), Math.PI * 1.9));
     }
@@ -2665,5 +2756,443 @@ public class UnionTests
     {
         Assert.Throws<PushPullException>(() => SketchDocument.FromBodies([Box(0, 0, 0, 10, 10, 10), Box(20, 0, 0, 30, 10, 10)]).Union(0, 1));
         Assert.Throws<PushPullException>(() => SketchDocument.FromBodies([Box(0, 0, 0, 10, 10, 10), Box(10, 10, 0, 20, 20, 10)]).Union(0, 1));
+    }
+}
+
+/// <summary>Subtract, Intersect, Trim and Split, exact, for flat faces.</summary>
+public class BooleanTests
+{
+    private const double Mm = 1e-3;
+    private static BrepBody Box(double x0, double y0, double z0, double x1, double y1, double z1) =>
+        BrepShapes.FromPolyhedron(Polyhedron.Box(x0 * Mm, y0 * Mm, z0 * Mm, x1 * Mm, y1 * Mm, z1 * Mm));
+    private static double Mm3(SketchDocument d, int b) => SketchDocument.FromBodies([d.Bodies[b]]).Volume() / (Mm * Mm * Mm);
+    private static void AssertSound(SketchDocument d) { foreach (var b in d.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b)); d.ToRsDocx(); }
+    private static SketchDocument Two(BrepBody a, BrepBody b) => SketchDocument.FromBodies([a, b]);
+
+    [Fact]
+    public void Subtract_makes_a_notch_a_tunnel_or_two_parts()
+    {
+        var (n, nb) = Two(Box(0, 0, 0, 10, 10, 10), Box(2, 2, 5, 8, 8, 15)).Combine(0, 1, Booleans.Op.Subtract);
+        AssertSound(n);
+        Assert.Single(n.Bodies);
+        Assert.Equal(1000 - 6 * 6 * 5, Mm3(n, nb[0]), 6);
+        Assert.Equal(11, n.Bodies[0].Faces.Count);
+        var (t, tb) = Two(Box(0, 0, 0, 10, 10, 10), Box(-5, 3, 3, 15, 7, 7)).Combine(0, 1, Booleans.Op.Subtract);
+        AssertSound(t);
+        Assert.Equal(1000 - 4 * 4 * 10, Mm3(t, tb[0]), 6);
+        var (s, sb) = Two(Box(0, 0, 0, 10, 10, 10), Box(-1, -1, 4, 11, 11, 6)).Combine(0, 1, Booleans.Op.Subtract);
+        AssertSound(s);
+        Assert.Equal(2, s.Bodies.Count);
+        Assert.All(sb, b => Assert.Equal(400, Mm3(s, b), 6));
+        // a small block wholly inside: a hollow (not yet); and nothing left
+        Assert.Throws<PushPullException>(() => Two(Box(0, 0, 0, 10, 10, 10), Box(2, 2, 2, 8, 8, 8)).Combine(0, 1, Booleans.Op.Subtract));
+        Assert.Throws<PushPullException>(() => Two(Box(2, 2, 2, 8, 8, 8), Box(0, 0, 0, 10, 10, 10)).Combine(0, 1, Booleans.Op.Subtract));
+    }
+
+    [Fact]
+    public void Intersect_trim_and_split()
+    {
+        var (i, ib) = Two(Box(0, 0, 0, 10, 10, 10), Box(5, 5, 5, 15, 15, 15)).Combine(0, 1, Booleans.Op.Intersect);
+        AssertSound(i);
+        Assert.Single(i.Bodies);
+        Assert.Equal(125, Mm3(i, ib[0]), 6);
+        Assert.Equal(6, i.Bodies[0].Faces.Count);
+        // trim: the cutter stays
+        var (t, tb) = Two(Box(0, 0, 0, 10, 10, 10), Box(5, 5, 5, 15, 15, 15)).Combine(0, 1, Booleans.Op.Subtract, keepSecond: true);
+        AssertSound(t);
+        Assert.Equal(2, t.Bodies.Count);
+        Assert.Equal(875, Mm3(t, tb[0]), 6);
+        Assert.Equal(1000, Mm3(t, 1 - tb[0]), 6);
+        // split: only the first, both, only the second
+        var (s, sb) = Two(Box(0, 0, 0, 10, 10, 10), Box(5, 5, 5, 15, 15, 15)).Split(0, 1);
+        AssertSound(s);
+        Assert.Equal(3, s.Bodies.Count);
+        Assert.Equal(new[] { 125.0, 875, 875 }, sb.Select(b => Math.Round(Mm3(s, b), 6)).OrderBy(v => v));
+    }
+}
+
+public class SimplifyTests
+{
+    [Fact]
+    public void A_track_keeps_its_corners_and_drops_points_on_straight_stretches()
+    {
+        // an L of many points, wobbling a little
+        var pts = Enumerable.Range(0, 11).Select(i => new Vec3(i * 1e-3, (i % 2) * 1e-6, 0))
+            .Concat(Enumerable.Range(1, 10).Select(i => new Vec3(0.01 + (i % 2) * 1e-6, i * 1e-3, 0))).ToList();
+        var s = Drawing.Simplify(pts, 1e-5);
+        Assert.Equal(3, s.Count);
+        Assert.Equal(pts[0], s[0]); Assert.Equal(pts[10], s[1]); Assert.Equal(pts[^1], s[2]);
+    }
+}
+
+public class OffsetOutwardTests
+{
+    private const double Mm = 1e-3;
+
+    [Fact]
+    public void A_rectangle_offset_outwards_gets_a_frame_on_the_face_round_it()
+    {
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm))]);
+        var top = new FaceRef(0, Enumerable.Range(0, 6).First(f => FaceGeometry.Normal(doc.Bodies[0].Faces[f]).Z > 0.999));
+        var (d1, rect) = doc.DrawRectangle(top, new Vec3(4 * Mm, 4 * Mm, 10 * Mm), new Vec3(6 * Mm, 6 * Mm, 10 * Mm), new Vec3(1, 0, 0));
+        var (d2, frame) = d1.Offset(rect, -1 * Mm);
+        foreach (var b in d2.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        // the new face: 4 × 4 with the 2 × 2 in it as a hole (a frame of 12 mm²)
+        double area = d2.TrianglesOf(frame).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length / 2) / (Mm * Mm);
+        Assert.Equal(12, area, 6);
+        // too far: it does not fit on the top any more
+        Assert.Throws<PushPullException>(() => d1.Offset(rect, -5 * Mm));
+        // a side of the cube has no face round it
+        Assert.Throws<PushPullException>(() => doc.Offset(top, -1 * Mm));
+    }
+}
+
+/// <summary>Booleans with curved faces (cylinders etc.), exact.</summary>
+public class CurvedBooleanTests(ITestOutputHelper output)
+{
+    private const double Mm = 1e-3;
+    private static BrepBody Box(double x0, double y0, double z0, double x1, double y1, double z1) =>
+        BrepShapes.FromPolyhedron(Polyhedron.Box(x0 * Mm, y0 * Mm, z0 * Mm, x1 * Mm, y1 * Mm, z1 * Mm));
+    /// <summary>A cylinder of radius r along z round (x, y), from z0 to z1 (mm).</summary>
+    private static BrepBody Pin(double x, double y, double r, double z0, double z1) =>
+        BrepTransform.Translated(BrepShapes.Revolve((0, z0 * Mm), [new ProfileSegment((r * Mm, z0 * Mm)), new ProfileSegment((r * Mm, z1 * Mm)), new ProfileSegment((0, z1 * Mm))]), new Vec3(x * Mm, y * Mm, 0));
+    private static double Mm3(SketchDocument d, int b) => SketchDocument.FromBodies([d.Bodies[b]]).Volume() / (Mm * Mm * Mm);
+    private void Describe(SketchDocument d)
+    {
+        foreach (var b in d.Bodies)
+        {
+            output.WriteLine($"body: {b.Faces.Count} faces, {b.Edges.Count} edges, {b.Vertices.Count} vertices, topology {XtBrepBuilder.TopologyError(b) ?? "ok"}");
+            foreach (var f in b.Faces) output.WriteLine($"  {f.Surface.GetType().Name} rev {f.Reversed}: loops {string.Join(",", f.Loops.Select(l => string.Join("+", l.Select(c => b.Edges[c.Edge].Curve.GetType().Name.Replace("Brep", "") + (c.Forward ? ">" : "<") + (b.Edges[c.Edge].Start < 0 ? "o" : "")))))}");
+        }
+    }
+
+    [Fact]
+    public void A_pin_through_a_cube_taken_away_leaves_a_round_hole()
+    {
+        var doc = SketchDocument.FromBodies([Box(0, 0, 0, 10, 10, 10), Pin(5, 5, 2, -5, 15)]);
+        var (d, made) = doc.Combine(0, 1, Booleans.Op.Subtract);
+        Describe(d);
+        foreach (var b in d.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        Assert.Single(d.Bodies);
+        Assert.Equal(1000 - Math.PI * 4 * 10, Mm3(d, made[0]), 1.0); // (the round faces shown in triangles)
+        d.ToRsDocx();
+    }
+
+    [Fact]
+    public void A_pin_on_top_united_and_what_a_pin_and_a_cube_share()
+    {
+        // a pin r 2 from z 5 to 15 in the middle of a cube 10: 5 mm sticks out
+        var u = SketchDocument.FromBodies([Box(0, 0, 0, 10, 10, 10), Pin(5, 5, 2, 5, 15)]).Combine(0, 1, Booleans.Op.Union);
+        Describe(u.Doc);
+        foreach (var b in u.Doc.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        Assert.Single(u.Doc.Bodies);
+        Assert.Equal(1000 + Math.PI * 4 * 5, Mm3(u.Doc, u.Bodies[0]), 1.0);
+        u.Doc.ToRsDocx();
+        var i = SketchDocument.FromBodies([Box(0, 0, 0, 10, 10, 10), Pin(5, 5, 2, 5, 15)]).Combine(0, 1, Booleans.Op.Intersect);
+        Describe(i.Doc);
+        foreach (var b in i.Doc.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        Assert.Equal(Math.PI * 4 * 5, Mm3(i.Doc, i.Bodies[0]), 1.0);
+        i.Doc.ToRsDocx();
+    }
+
+    [Fact]
+    public void A_pin_half_over_the_edge_and_a_slanting_pin()
+    {
+        // round the right edge's middle (x 10): the cube gets a half round notch (lines on the side, half circles on top
+        // and bottom)
+        var h = SketchDocument.FromBodies([Box(0, 0, 0, 10, 10, 10), Pin(10, 5, 2, -5, 15)]).Combine(0, 1, Booleans.Op.Subtract);
+        Describe(h.Doc);
+        foreach (var b in h.Doc.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        Assert.Equal(1000 - Math.PI * 4 / 2 * 10, Mm3(h.Doc, h.Bodies[0]), 1.0);
+        h.Doc.ToRsDocx();
+        // a pin turned 30° round x, through the cube: ellipses top and bottom
+        var slant = BrepTransform.Rotated(Pin(0, 0, 1.5, -12, 12), new BrepTransform.Turn(new Vec3(0, 0, 0), new Vec3(1, 0, 0), Math.PI / 6));
+        slant = BrepTransform.Translated(slant, new Vec3(5 * Mm, 5 * Mm, 5 * Mm));
+        var e = SketchDocument.FromBodies([Box(0, 0, 0, 10, 10, 10), slant]).Combine(0, 1, Booleans.Op.Subtract);
+        Describe(e.Doc);
+        foreach (var b in e.Doc.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        Assert.Contains(e.Doc.Bodies[0].Edges, x => x.Curve is BrepEllipse);
+        Assert.Equal(1000 - Math.PI * 1.5 * 1.5 * 10 / Math.Cos(Math.PI / 6), Mm3(e.Doc, e.Bodies[0]), 1.0);
+        e.Doc.ToRsDocx();
+    }
+}
+
+public class CurvedBooleanProof
+{
+    /// <summary>(writes a file to open in DesignSpark; skipped unless PPM_PROOF is set)</summary>
+    [Fact]
+    public void Write_a_proof_file()
+    {
+        if (Environment.GetEnvironmentVariable("PPM_PROOF") is not { Length: > 0 } path) return;
+        const double Mm = 1e-3;
+        BrepBody Box(double x0, double y0, double z0, double x1, double y1, double z1) => BrepShapes.FromPolyhedron(Polyhedron.Box(x0 * Mm, y0 * Mm, z0 * Mm, x1 * Mm, y1 * Mm, z1 * Mm));
+        BrepBody Pin(double x, double y, double r, double z0, double z1) =>
+            BrepTransform.Translated(BrepShapes.Revolve((0, z0 * Mm), [new ProfileSegment((r * Mm, z0 * Mm)), new ProfileSegment((r * Mm, z1 * Mm)), new ProfileSegment((0, z1 * Mm))]), new Vec3(x * Mm, y * Mm, 0));
+        // a block 40 × 30 × 15: a round hole, a pin on top, a half notch at the side and a slanting hole
+        var doc = SketchDocument.FromBodies([Box(0, 0, 0, 40, 30, 15), Pin(10, 15, 4, -5, 20)]);
+        doc = doc.Combine(0, 1, Booleans.Op.Subtract).Doc;
+        doc = SketchDocument.FromBodies([doc.Bodies[0], Pin(25, 15, 3, 10, 25)]).Combine(0, 1, Booleans.Op.Union).Doc;
+        doc = SketchDocument.FromBodies([doc.Bodies[0], Pin(40, 8, 3, -5, 20)]).Combine(0, 1, Booleans.Op.Subtract).Doc;
+        var slant = BrepTransform.Translated(BrepTransform.Rotated(Pin(0, 0, 2.5, -20, 20), new BrepTransform.Turn(new Vec3(0, 0, 0), new Vec3(1, 0, 0), Math.PI / 6)), new Vec3(32 * Mm, 22 * Mm, 7.5 * Mm));
+        doc = SketchDocument.FromBodies([doc.Bodies[0], slant]).Combine(0, 1, Booleans.Op.Subtract).Doc;
+        doc.ToRsDocx().Save(path);
+    }
+}
+
+/// <summary>Follow Me along a path: a profile swept round the edge of a face.</summary>
+public class SweepTests
+{
+    private const double Mm = 1e-3;
+
+    [Fact]
+    public void A_triangle_at_a_corner_swept_round_the_top_chamfers_all_its_edges()
+    {
+        // a cube 10; on the left side (x 0) a triangle at the top front corner: (0,0,10) (0,2,10) (0,0,8) – drawn as a path
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm))]);
+        FaceRef Face(SketchDocument d, Vec3 n) => new(0, Enumerable.Range(0, d.Bodies[0].Faces.Count).First(f => d.Bodies[0].Faces[f].Surface is BrepPlane && FaceGeometry.Normal(d.Bodies[0].Faces[f]).Dot(n) > 0.999));
+        Vec3 P(double x, double y, double z) => new(x * Mm, y * Mm, z * Mm);
+        var left = Face(doc, new Vec3(-1, 0, 0));
+        var (d1, tri) = doc.DrawPath(left, [P(0, 2, 10), P(0, 0, 8)]);
+        var profile = new[] { tri, left }.First(f => FaceGeometry.LoopPoints(d1.Bodies[0], d1.Bodies[0].Faces[f.Face].Loops[0]).Count <= 4 && d1.TrianglesOf(f).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length / 2) < 3 * Mm * Mm);
+        var (d2, made) = d1.FollowPath(profile, Face(d1, new Vec3(0, 0, 1)));
+        foreach (var b in d2.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        Assert.Single(d2.Bodies);
+        // every top edge chamfered 2: the triangle (area 2) times the way its centre goes round (Pappus): a square 2/3 in
+        double v = d2.Volume() / (Mm * Mm * Mm);
+        Assert.Equal(1000 - 2 * 4 * (10 - 4.0 / 3), v, 3);
+        // the top is a square of 6 now, with four slanting faces round it
+        Assert.Equal(10, d2.Bodies[0].Faces.Count);
+        d2.ToRsDocx();
+    }
+}
+
+/// <summary>Pulling up two pieces of a face that meet only in a point.</summary>
+public class TouchingPiecesTests
+{
+    private const double Mm = 1e-3;
+    private static Vec3 P(double x, double y, double z) => new(x * Mm, y * Mm, z * Mm);
+
+    [Fact]
+    public void Two_opposite_triangles_pulled_up_make_the_second_a_part_of_its_own()
+    {
+        // the top of a 10 mm cube cut by both diagonals into four triangles; the front and the back one pulled up 5: the
+        // body would touch itself only along the upright edge at the middle (four faces round it), no solid. As
+        // DesignSpark does (testdata/twee_stukken.rsdocx): the second piece becomes a body of its own, the cube stays
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm))]);
+        int Top(SketchDocument d, Vec3 inside) => Enumerable.Range(0, d.Bodies[0].Faces.Count)
+            .First(f => FaceGeometry.Normal(d.Bodies[0].Faces[f]).Z > 0.999 && Drawing.Contains(d.Bodies[0], f, inside));
+        doc = doc.DrawPath(new FaceRef(0, Top(doc, P(5, 5, 10))), [P(0, 0, 10), P(10, 10, 10)]).Doc;
+        doc = doc.DrawPath(new FaceRef(0, Top(doc, P(2, 8, 10))), [P(0, 10, 10), P(10, 0, 10)]).Doc;
+        var (up, _) = doc.PushPull(new FaceRef(0, Top(doc, P(5, 1, 10))), 5 * Mm);
+        var (two, _) = up.PushPull(new FaceRef(0, Top(up, P(5, 9, 10))), 5 * Mm);
+        Assert.Equal(2, two.Bodies.Count);
+        Assert.Same(up.Bodies[0], two.Bodies[0]);
+        Assert.Equal(5, two.Bodies[1].Faces.Count); // (a three-sided prism)
+        Assert.Equal(1000 + 125 + 125, two.Volume() / (Mm * Mm * Mm), 3);
+        foreach (var b in two.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b));
+        two.ToRsDocx();
+        // the one beside it (sharing an edge with the raised one) goes up as part of the body
+        Assert.Single(up.PushPull(new FaceRef(0, Top(up, P(1, 5, 10))), 5 * Mm).Doc.Bodies);
+    }
+}
+
+/// <summary>Faces without thickness (a shape drawn in the air): made, pulled into solids, saved.</summary>
+public class SheetTests
+{
+    private const double Mm = 1e-3;
+    private static Vec3 P(double x, double y, double z) => new(x * Mm, y * Mm, z * Mm);
+    private static readonly Vec3 Up = new(0, 0, 1);
+    private static double Mm3(SketchDocument d) => d.Volume() / (Mm * Mm * Mm);
+    private static void AssertSound(SketchDocument d) { foreach (var b in d.Bodies) Assert.Null(XtBrepBuilder.TopologyError(b)); d.ToRsDocx(); }
+
+    /// <summary>A 20 × 10 mm rectangle at z 5.</summary>
+    private static BrepBody Rectangle() => Sheets.Face([P(0, 0, 5), P(20, 0, 5), P(20, 10, 5), P(0, 10, 5), P(0, 0, 5)],
+        [new BrepLine(), new BrepLine(), new BrepLine(), new BrepLine()], Up);
+
+    [Fact]
+    public void A_rectangle_in_the_air_is_a_sheet_and_pulled_a_block()
+    {
+        var doc = SketchDocument.FromBodies([Rectangle()]);
+        Assert.True(doc.Bodies[0].Sheet);
+        Assert.Equal(0, Mm3(doc), 6);
+        AssertSound(doc);
+        // up 8 mm: a block 20 × 10 × 8 standing on it
+        var (up, r) = doc.PushPull(new FaceRef(0, 0), 8 * Mm);
+        Assert.False(up.Bodies[0].Sheet);
+        Assert.Equal(6, up.Bodies[0].Faces.Count);
+        Assert.Equal(1600, Mm3(up), 3);
+        Assert.True(FaceGeometry.Normal(up.Bodies[0].Faces[r.FaceMap[0]]).Dot(Up) > 0.999);
+        AssertSound(up);
+        // down 3 mm (the other way): hanging under it
+        var (down, _) = doc.PushPull(new FaceRef(0, 0), -3 * Mm);
+        Assert.Equal(600, Mm3(down), 3);
+        Assert.True(down.Bodies[0].Vertices.Min(v => v.Z) < 2.5 * Mm);
+        AssertSound(down);
+    }
+
+    [Fact]
+    public void Loose_lines_closing_a_shape_beside_the_cube_make_a_sheet()
+    {
+        // on a 10 mm cube, in the plane of its top: a line from the corner (10, 10) out to (20, 10) and an arc back to
+        // the corner through (15, 14): only that corner touches the cube
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm))]);
+        var top = new FaceRef(0, Enumerable.Range(0, 6).First(f => FaceGeometry.Normal(doc.Bodies[0].Faces[f]).Dot(Up) > 0.999));
+        var arc = Drawing.ArcThrough(P(20, 10, 10), P(15, 14, 10), P(10, 10, 10), Up);
+        var lines = doc.AddLines([new SketchLine(P(10, 10, 10), P(20, 10, 10)), new SketchLine(P(20, 10, 10), P(10, 10, 10), arc.Centre, arc.Normal)]);
+        var (d, made) = lines.CloseLooseLines(top);
+        var sheetFace = Assert.Single(made);
+        Assert.Equal(2, d.Bodies.Count);
+        Assert.True(d.Bodies[sheetFace.Body].Sheet);
+        Assert.Empty(d.Lines);
+        Assert.Equal(1000, Mm3(d), 3);
+        AssertSound(d);
+        // pulled up 2 mm: a block of its own beside the cube
+        var (pulled, _) = d.PushPull(sheetFace, 2 * Mm);
+        Assert.False(pulled.Bodies[sheetFace.Body].Sheet);
+        Assert.True(Mm3(pulled) > 1000 + 2 * 20);
+        AssertSound(pulled);
+        // lines round the top itself (the whole top inside them) are not a sheet
+        var round = doc.AddLines([new SketchLine(P(-2, -2, 10), P(12, -2, 10)), new SketchLine(P(12, -2, 10), P(12, 12, 10)),
+            new SketchLine(P(12, 12, 10), P(-2, 12, 10)), new SketchLine(P(-2, 12, 10), P(-2, -2, 10))]);
+        Assert.Empty(round.CloseLooseLines(top).Faces);
+    }
+
+    [Fact]
+    public void DesignSparks_sheet_opens_as_a_sheet_and_goes_back_out()
+    {
+        // testdata/oppervlak.rsdocx (the converter's): four cubes and one "Oppervlak" of a rectangle and two discs
+        var path = TestFiles.Converter("oppervlak.rsdocx");
+        if (!File.Exists(path)) return; // (not yet in the converter's submodule: only with the converter next to this repository)
+        var d = SketchDocument.FromRsDocx(path);
+        var sheet = Assert.Single(d.Bodies, b => b.Sheet);
+        Assert.Equal(3, sheet.Faces.Count);
+        Assert.Equal(4, d.Bodies.Count(b => !b.Sheet));
+        AssertSound(d);
+        // one disc pulled: a pin of its own, the rest stays a sheet
+        int si = d.Bodies.ToList().IndexOf(sheet);
+        int disc = Enumerable.Range(0, 3).First(f => sheet.Faces[f].Loops[0].Count == 1);
+        var (p, _) = d.PushPull(new FaceRef(si, disc), 5 * Mm);
+        Assert.False(p.Bodies[si].Sheet);
+        Assert.Equal(2, Assert.Single(p.Bodies, b => b.Sheet).Faces.Count);
+        AssertSound(p);
+    }
+
+    [Fact]
+    public void Loose_lines_out_from_an_edge_and_back_close_a_sheet_with_that_piece_of_edge()
+    {
+        // on the top of a 10 mm cube: from the left edge (x 0) out to x −4 and back to the edge further on: with the
+        // piece of edge from y 2 to y 8 a rectangle of 4 × 6 beside the cube
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm))]);
+        var top = new FaceRef(0, Enumerable.Range(0, 6).First(f => FaceGeometry.Normal(doc.Bodies[0].Faces[f]).Dot(Up) > 0.999));
+        var lines = doc.AddLines([new SketchLine(P(0, 2, 10), P(-4, 2, 10)), new SketchLine(P(-4, 2, 10), P(-4, 8, 10)), new SketchLine(P(-4, 8, 10), P(0, 8, 10))]);
+        var (d, made) = lines.CloseLooseLines(top);
+        var face = Assert.Single(made);
+        Assert.True(d.Bodies[face.Body].Sheet);
+        Assert.Empty(d.Lines);
+        Assert.Equal(6, d.Bodies[0].Faces.Count); // (the cube itself as it was)
+        var (p, _) = d.PushPull(face, 1 * Mm);
+        Assert.Equal(1000 + 24, Mm3(p), 3);
+        AssertSound(p);
+    }
+
+    [Fact]
+    public void A_sheet_turned_round_its_edge_makes_part_of_a_cylinder_and_a_whole_one()
+    {
+        // the 20 × 10 rectangle at z 5 round its edge along x (y 0): a quarter, then a whole cylinder r 10, 20 long
+        var doc = SketchDocument.FromBodies([Rectangle()]);
+        var (quarter, _) = doc.Revolve(new FaceRef(0, 0), P(0, 0, 5), new Vec3(1, 0, 0), Math.PI / 2);
+        Assert.False(quarter.Bodies[0].Sheet);
+        // (measured by the triangles shown: just inside the round face, so a little less)
+        Assert.InRange(Mm3(quarter), Math.PI * 100 / 4 * 20 * 0.995, Math.PI * 100 / 4 * 20);
+        AssertSound(quarter);
+        var (whole, _) = doc.Revolve(new FaceRef(0, 0), P(0, 0, 5), new Vec3(1, 0, 0), 2 * Math.PI);
+        Assert.InRange(Mm3(whole), Math.PI * 100 * 20 * 0.995, Math.PI * 100 * 20);
+        AssertSound(whole);
+    }
+
+    [Fact]
+    public void A_sheet_followed_along_the_top_of_a_cube_makes_a_moulding()
+    {
+        // a triangle at the cube's corner (0, 0, 10), in the plane x 0, against its front (one side from z 8 to 10 on the
+        // front's edge, sticking out 2 at the top): swept along the top's edge, a moulding round the top (Pappus: area 2 ·
+        // the way of its centre, 2/3 out: 4 · (10 + 2 · 2/3))
+        var cube = BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm));
+        var tri = Sheets.Face([P(0, 0, 10), P(0, 0, 8), P(0, -2, 10), P(0, 0, 10)], [new BrepLine(), new BrepLine(), new BrepLine()], new Vec3(1, 0, 0));
+        var doc = SketchDocument.FromBodies([cube, tri]);
+        var top = new FaceRef(0, Enumerable.Range(0, 6).First(f => FaceGeometry.Normal(cube.Faces[f]).Dot(Up) > 0.999));
+        var (d, made) = doc.FollowPath(new FaceRef(1, 0), top);
+        Assert.Single(d.Bodies);
+        Assert.Equal(1000 + 2 * 4 * (10 + 2 * 2.0 / 3), Mm3(d), 0.5);
+        AssertSound(d);
+    }
+
+    [Fact]
+    public void Two_overlapping_rectangles_on_the_ground_make_the_overlap_a_face_of_its_own()
+    {
+        // 20 × 20 from (0, 0) and 20 × 20 from (10, 10): only the first, the overlap (10 × 10), only the second
+        var empty = SketchDocument.FromBodies([]);
+        IReadOnlyList<Vec3> Rect(double x, double y) => [P(x, y, 0), P(x + 20, y, 0), P(x + 20, y + 20, 0), P(x, y + 20, 0), P(x, y, 0)];
+        IReadOnlyList<BrepCurve> Lines4() => [new BrepLine(), new BrepLine(), new BrepLine(), new BrepLine()];
+        var (a, _) = empty.AddShape(Rect(0, 0), Lines4(), Up, new Vec3(0, 0, 0));
+        var (d, made) = a.AddShape(Rect(10, 10), Lines4(), Up, new Vec3(0, 0, 0));
+        Assert.Empty(d.Lines);
+        Assert.All(d.Bodies, b => Assert.True(b.Sheet));
+        var faces = d.Bodies.SelectMany((b, i) => Enumerable.Range(0, b.Faces.Count).Select(f => new FaceRef(i, f))).ToList();
+        Assert.Equal(3, faces.Count);
+        double Area(FaceRef f) => d.TrianglesOf(f).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length / 2) / (Mm * Mm);
+        Assert.Equal([100, 300, 300], faces.Select(Area).Select(x => Math.Round(x)).Order());
+        // the overlap pulled up 5: a block of 10 × 10 × 5
+        var overlap = faces.Single(f => Math.Round(Area(f)) == 100);
+        var (p, _) = d.PushPull(overlap, 5 * Mm);
+        Assert.Equal(500, Mm3(p), 3);
+        AssertSound(p);
+    }
+
+    [Fact]
+    public void Lines_on_the_ground_closing_a_shape_make_a_sheet()
+    {
+        // an empty document; a triangle of loose lines on the ground (z 0), and one line more that closes nothing
+        var empty = SketchDocument.FromBodies([]);
+        var lines = empty.AddLines([new SketchLine(P(0, 0, 0), P(30, 0, 0)), new SketchLine(P(30, 0, 0), P(30, 20, 0)),
+            new SketchLine(P(30, 20, 0), P(0, 0, 0)), new SketchLine(P(50, 0, 0), P(60, 0, 0))]);
+        var (d, made) = lines.CloseLooseLinesIn(Up, new Vec3(0, 0, 0));
+        var face = Assert.Single(made);
+        Assert.True(d.Bodies[face.Body].Sheet);
+        Assert.Single(d.Lines);
+        Assert.True(FaceGeometry.Normal(d.Bodies[face.Body].Faces[0]).Dot(Up) > 0.999);
+        var (block, _) = d.PushPull(face, 10 * Mm);
+        Assert.Equal(30 * 20 / 2 * 10, Mm3(block), 3);
+        AssertSound(block);
+    }
+
+    [Fact]
+    public void A_drawn_rectangle_turned_the_other_way_still_faces_up()
+    {
+        // the same corners clockwise seen from above: turned round, the face still facing up
+        var cw = Sheets.Face([P(0, 0, 5), P(0, 10, 5), P(20, 10, 5), P(20, 0, 5), P(0, 0, 5)],
+            [new BrepLine(), new BrepLine(), new BrepLine(), new BrepLine()], Up);
+        Assert.True(FaceGeometry.Normal(cw.Faces[0]).Dot(Up) > 0.999);
+        var (d, _) = SketchDocument.FromBodies([cw]).PushPull(new FaceRef(0, 0), 2 * Mm);
+        Assert.Equal(400, Mm3(d), 3);
+        AssertSound(d);
+    }
+
+    [Fact]
+    public void A_disc_and_a_half_disc_in_the_air_pulled_into_a_pin_and_half_a_pin()
+    {
+        // a whole circle r 4: a pin of 5 high
+        var ring = new BrepCircle(P(0, 0, 0), Up, new Vec3(1, 0, 0), 4 * Mm);
+        var disc = Sheets.Face([P(4, 0, 0), P(4, 0, 0)], [ring], Up);
+        var (pin, _) = SketchDocument.FromBodies([disc]).PushPull(new FaceRef(0, 0), 5 * Mm);
+        Assert.Equal(Math.PI * 16 * 5, Mm3(pin), 1.0); // (the round side shown in triangles)
+        Assert.Contains(pin.Bodies[0].Faces, f => f.Surface is BrepCylinder);
+        AssertSound(pin);
+        // a half disc: the straight edge from (4,0) to (-4,0) and back round over y > 0
+        var arc = new BrepCircle(P(0, 0, 0), Up, new Vec3(-1, 0, 0), 4 * Mm);
+        var half = Sheets.Face([P(4, 0, 0), P(-4, 0, 0), P(4, 0, 0)], [new BrepLine(), arc with { XAxis = new Vec3(-1, 0, 0), Normal = Up * -1 }], Up);
+        Assert.Null(XtBrepBuilder.TopologyError(half));
+        var (hp, _) = SketchDocument.FromBodies([half]).PushPull(new FaceRef(0, 0), 5 * Mm);
+        Assert.Equal(Math.PI * 16 / 2 * 5, Mm3(hp), 1.0);
+        AssertSound(hp);
     }
 }

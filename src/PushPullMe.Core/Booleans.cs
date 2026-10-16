@@ -21,11 +21,25 @@ public static class Booleans
         public Vec3 P3((double U, double V) q) => X * q.U + Y * q.V + N * D;
     }
 
+    /// <summary>What to make of two bodies.</summary>
+    public enum Op { Union, Subtract, Intersect }
+
     /// <summary>The union of two bodies, as one body; for each of its faces, the body (0 or 1) and face it came from.
     /// Throws when they are not (yet) possible: curved faces, not overlapping or touching in a face, or touching only in
     /// an edge or a point.</summary>
-    public static (BrepBody Body, List<(int Body, int Face)> From) Union(BrepBody a, BrepBody b)
+    public static (BrepBody Body, List<(int Body, int Face)> From) Union(BrepBody a, BrepBody b) => Combine(a, b, Op.Union).Single();
+
+    /// <summary>
+    /// Two bodies combined: their union, the first less the second, or what they have in common; as one body or more
+    /// (a cut can leave separate parts), for each face the body (0 or 1) and face it came from. Throws when it is not
+    /// (yet) possible: curved faces, bodies that do not meet, nothing left, a hollow inside, or touching only in an edge
+    /// or a point.
+    /// </summary>
+    public static List<(BrepBody Body, List<(int Body, int Face)> From)> Combine(BrepBody a, BrepBody b, Op op)
     {
+        // (curved faces or edges: the general way)
+        static bool Flat(BrepBody x) => x.Faces.All(f => f.Surface is BrepPlane) && x.Edges.All(e => e.Curve is BrepLine);
+        if (!Flat(a) || !Flat(b)) return BrepBooleans.Combine(a, b, op);
         var pa = Polys(a); var pb = Polys(b);
         var cutsA = pa.Select(_ => new List<(Vec3, Vec3)>()).ToList();
         var cutsB = pb.Select(_ => new List<(Vec3, Vec3)>()).ToList();
@@ -34,24 +48,37 @@ public static class Booleans
                 Cut(pa[i], pb[j], cutsA[i], cutsB[j]);
         var trisA = Triangles(pa); var trisB = Triangles(pb);
         var kept = new List<(Poly Plane, List<List<Vec3>> Loops, int Body, int Face)>();
-        bool any = false;
+        bool meet = false;
         for (int i = 0; i < pa.Count; i++)
             foreach (var (loops, at) in Pieces(pa[i], cutsA[i]))
             {
                 var where = Classify(at, pa[i], pb, trisB);
-                if (where != Where.Outside) any = true;
-                if (where is Where.Outside or Where.OnSame) kept.Add((pa[i], loops, 0, pa[i].Face));
+                if (where != Where.Outside) meet = true;
+                bool keep = op switch
+                {
+                    Op.Union => where is Where.Outside or Where.OnSame,
+                    Op.Subtract => where is Where.Outside or Where.OnOpposite,
+                    _ => where is Where.Inside or Where.OnSame,
+                };
+                if (keep) kept.Add((pa[i], loops, 0, pa[i].Face));
             }
         for (int j = 0; j < pb.Count; j++)
             foreach (var (loops, at) in Pieces(pb[j], cutsB[j]))
             {
                 var where = Classify(at, pb[j], pa, trisA);
-                if (where != Where.Outside) any = true;
-                if (where == Where.Outside) kept.Add((pb[j], loops, 1, pb[j].Face));
+                if (where != Where.Outside) meet = true;
+                // (taken away: its pieces inside the first become faces of the hollow, turned round)
+                if (op == Op.Union && where == Where.Outside) kept.Add((pb[j], loops, 1, pb[j].Face));
+                else if (op == Op.Intersect && where == Where.Inside) kept.Add((pb[j], loops, 1, pb[j].Face));
+                else if (op == Op.Subtract && where == Where.Inside) kept.Add((Flipped(pb[j]), loops.Select(l => Enumerable.Reverse(l).ToList()).ToList(), 1, pb[j].Face));
             }
-        if (!any) throw new PushPullException(Lang.T("Die delen raken elkaar niet; samenvoegen kan alleen als ze elkaar overlappen of met een vlak raken.", "Those parts do not touch; they can only be united when they overlap or touch with a face."));
+        if (!meet) throw new PushPullException(Lang.T("Die delen raken elkaar niet; dat kan alleen als ze elkaar overlappen of met een vlak raken.", "Those parts do not touch; that only works when they overlap or touch with a face."));
+        if (kept.Count == 0) throw new PushPullException(Lang.T("Dan blijft er niets over.", "Then nothing is left."));
         return Stitch(kept);
     }
+
+    /// <summary>The same face facing the other way.</summary>
+    private static Poly Flipped(Poly p) => new(p.N * -1, -p.D, p.X, p.Y * -1, p.Loops, p.Face);
 
     private static List<Poly> Polys(BrepBody body)
     {
@@ -60,7 +87,7 @@ public static class Booleans
         {
             var face = body.Faces[f];
             if (face.Surface is not BrepPlane pl || face.Loops.SelectMany(l => l).Any(c => body.Edges[c.Edge].Curve is not BrepLine))
-                throw new PushPullException(Lang.T("Samenvoegen kan (nog) alleen met delen die alleen platte vlakken en rechte randen hebben.", "Uniting only works (for now) with parts that have only flat faces and straight edges."));
+                throw new PushPullException(Lang.T("Dat kan (nog) alleen met delen die alleen platte vlakken en rechte randen hebben.", "That only works (for now) with parts that have only flat faces and straight edges."));
             var n = FaceGeometry.Normal(face);
             var x = (Math.Abs(n.X) < 0.9 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0)); x = (x - n * x.Dot(n)).Normalized();
             var y = n.Cross(x);
@@ -294,7 +321,7 @@ public static class Booleans
 
     // ---------------------------------------------------------------- inside, outside or on
 
-    private enum Where { Outside, Inside, OnSame, OnOpposite }
+    internal enum Where { Outside, Inside, OnSame, OnOpposite }
 
     private static List<(Vec3 A, Vec3 B, Vec3 C)> Triangles(List<Poly> polys)
     {
@@ -329,7 +356,7 @@ public static class Booleans
 
     // ---------------------------------------------------------------- one body again
 
-    private static (BrepBody, List<(int, int)>) Stitch(List<(Poly Plane, List<List<Vec3>> Loops, int Body, int Face)> pieces)
+    private static List<(BrepBody, List<(int, int)>)> Stitch(List<(Poly Plane, List<List<Vec3>> Loops, int Body, int Face)> pieces)
     {
         var verts = new List<Vec3>();
         int Id(Vec3 q) { int i = verts.FindIndex(v => (v - q).Length <= 1e-8); if (i < 0) { verts.Add(q); i = verts.Count - 1; } return i; }
@@ -379,13 +406,35 @@ public static class Booleans
             from.Add((pieces[pi].Body, pieces[pi].Face));
         }
         if (uses.Values.Any(u => u.Count != 2 || u[0] == u[1]))
-            throw new PushPullException(Lang.T("Zo samengevoegd klopt de vorm niet: raken de delen elkaar alleen in een rand of een punt?", "United like this the shape is not right: do the parts touch only in an edge or a point?"));
-        // one piece of solid (else: apart, or a hollow inside)
+            throw new PushPullException(Lang.T("Zo klopt de vorm niet: raken de delen elkaar alleen in een rand of een punt?", "Like this the shape is not right: do the parts touch only in an edge or a point?"));
+        // every piece of solid a body of its own (a hollow inside one: not yet)
         var faceOfEdge = new Dictionary<int, List<int>>();
         for (int f = 0; f < faces.Count; f++) foreach (var c in faces[f].Loops.SelectMany(l => l)) { if (!faceOfEdge.TryGetValue(c.Edge, out var lst)) faceOfEdge[c.Edge] = lst = []; lst.Add(f); }
-        var reached = new HashSet<int> { 0 }; var stack = new Stack<int>(); stack.Push(0);
-        while (stack.Count > 0) { int f = stack.Pop(); foreach (var c in faces[f].Loops.SelectMany(l => l)) foreach (int g in faceOfEdge[c.Edge]) if (reached.Add(g)) stack.Push(g); }
-        if (reached.Count != faces.Count) throw new PushPullException(Lang.T("Samengevoegd zijn het nog steeds losse delen (of zit er een holte in); dat kan nog niet.", "United they are still separate parts (or there is a hollow inside); that is not possible yet."));
-        return (new BrepBody { Vertices = verts, Edges = edges, Faces = faces }, from);
+        var part = Enumerable.Repeat(-1, faces.Count).ToArray(); int parts = 0;
+        for (int f0 = 0; f0 < faces.Count; f0++)
+        {
+            if (part[f0] >= 0) continue;
+            var stack = new Stack<int>(); stack.Push(f0); part[f0] = parts;
+            while (stack.Count > 0) { int f = stack.Pop(); foreach (var c in faces[f].Loops.SelectMany(l => l)) foreach (int g in faceOfEdge[c.Edge]) if (part[g] < 0) { part[g] = parts; stack.Push(g); } }
+            parts++;
+        }
+        var result = new List<(BrepBody, List<(int, int)>)>();
+        for (int k = 0; k < parts; k++)
+        {
+            var fs = Enumerable.Range(0, faces.Count).Where(f => part[f] == k).ToList();
+            var es = fs.SelectMany(f => faces[f].Loops.SelectMany(l => l)).Select(c => c.Edge).Distinct().OrderBy(e => e).ToList();
+            var vs = es.SelectMany(e => new[] { edges[e].Start, edges[e].End }).Distinct().OrderBy(v => v).ToList();
+            var ei = es.Select((e, i) => (e, i)).ToDictionary(x => x.e, x => x.i); var vi = vs.Select((v, i) => (v, i)).ToDictionary(x => x.v, x => x.i);
+            var body = new BrepBody
+            {
+                Vertices = vs.Select(v => verts[v]).ToList(),
+                Edges = es.Select(e => new BrepEdge(vi[edges[e].Start], vi[edges[e].End], edges[e].Curve)).ToList(),
+                Faces = fs.Select(f => new BrepFace(faces[f].Surface, faces[f].Reversed, faces[f].Loops.Select(l => (IReadOnlyList<BrepCoedge>)l.Select(c => new BrepCoedge(ei[c.Edge], c.Forward)).ToList()).ToList())).ToList(),
+            };
+            double volume = body.Faces.SelectMany(f => FaceGeometry.PlanarTriangles(body, f)).Sum(t => t.A.Dot(t.B.Cross(t.C))) / 6;
+            if (volume < 0) throw new PushPullException(Lang.T("Er zou een holte binnenin ontstaan; dat kan nog niet.", "There would be a hollow inside; that is not possible yet."));
+            result.Add((body, fs.Select(f => from[f]).ToList()));
+        }
+        return result;
     }
 }

@@ -4,7 +4,11 @@ using RsDocx.Core.Stl;
 namespace PushPullMe.Core;
 
 /// <summary>Why a push/pull cannot be done (shown to the user as it is).</summary>
-public sealed class PushPullException(string message) : Exception(message);
+public class PushPullException(string message) : Exception(message);
+
+/// <summary>The body would touch itself only along an edge (four faces round it): no solid. The piece can be made a body
+/// of its own instead (as DesignSpark does).</summary>
+public sealed class TouchesItselfException(string message) : PushPullException(message);
 
 /// <summary>The result of <see cref="PushPull.Apply"/>.</summary>
 /// <param name="Body">The new body.</param>
@@ -537,7 +541,7 @@ public static partial class PushPull
         var ends = e0.Start >= 0 ? new List<int> { e0.Start, e0.End } : [];
         JoinStraight(verts, edges, faces, ends);
         var (result, fMap) = Compact(verts, edges, faces);
-        if (XtBrepBuilder.TopologyError(result) is { } why) throw new PushPullException(Lang.T("Na het wissen sluit de vorm niet meer: ", "After erasing, the shape no longer closes: ") + why);
+        if (XtBrepBuilder.TopologyError(result) is not null) throw new PushPullException(Lang.T("Na het wissen: ", "After erasing: ") + WhyNotClosed(result));
         var map = Enumerable.Range(0, body.Faces.Count).Select(f => f == b ? fMap.GetValueOrDefault(a, -1) : fMap.GetValueOrDefault(f, -1)).ToList();
         return (result, map);
     }
@@ -1251,12 +1255,41 @@ public static partial class PushPull
     }
 
     /// <summary>
+    /// Why a body no longer closes, in the user's words: most often two parts of it that would touch only along an edge
+    /// (two blocks pulled up from faces that meet only in a point, side by side: four faces round one edge), which no
+    /// solid can be; where (millimetres).
+    /// </summary>
+    /// <summary>Whether an edge of the body is used more than once in one direction (more than two faces round it).</summary>
+    private static bool TouchesItself(BrepBody body) =>
+        body.Faces.SelectMany(f => f.Loops.SelectMany(l => l)).GroupBy(c => c).Any(g => g.Count() > 1);
+
+    internal static string WhyNotClosed(BrepBody body)
+    {
+        var uses = new Dictionary<(int, bool), int>();
+        foreach (var c in body.Faces.SelectMany(f => f.Loops.SelectMany(l => l))) uses[(c.Edge, c.Forward)] = uses.GetValueOrDefault((c.Edge, c.Forward)) + 1;
+        for (int e = 0; e < body.Edges.Count; e++)
+        {
+            if (uses.GetValueOrDefault((e, true)) < 2 && uses.GetValueOrDefault((e, false)) < 2) continue;
+            var E = body.Edges[e];
+            var at = E.Start >= 0 ? (body.Vertices[E.Start] + body.Vertices[E.End]) * 0.5 : FaceGeometry.EdgePoints(body, E)[0];
+            string mm = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{at.X * 1000:0.#}, {at.Y * 1000:0.#}, {at.Z * 1000:0.#}");
+            return Lang.T($"Zo raken twee uitstekende stukken elkaar alleen langs een rand (bij {mm} mm); dat kan een massief blok niet zijn. Laat ze een vlak delen (trek ook het vlak ertussen mee) of trek er maar één uit.",
+                $"That way two raised pieces would touch only along an edge (at {mm} mm); a solid block cannot be like that. Let them share a face (pull the face between them too) or pull only one of them.");
+        }
+        return Lang.T("Zo klopt de vorm van het blok niet meer (een rand hoort dan niet bij precies twee vlakken).", "That way the shape of the block no longer holds (an edge would not belong to exactly two faces).");
+    }
+
+    /// <summary>
     /// The changed faces must still be sound: every edge used once each way, and a planar face one outer loop running
     /// counter-clockwise with holes inside it, no loop crossing itself or another.
     /// </summary>
     private static void Check(BrepBody body, IEnumerable<int> changed)
     {
-        if (XtBrepBuilder.TopologyError(body) is { } why) throw new PushPullException(Lang.T("De vorm sluit niet meer: ", "The shape no longer closes: ") + why);
+        if (XtBrepBuilder.TopologyError(body) is not null)
+        {
+            string why = WhyNotClosed(body);
+            throw TouchesItself(body) ? new TouchesItselfException(why) : new PushPullException(why);
+        }
         foreach (int f in changed.Distinct())
         {
             var face = body.Faces[f];

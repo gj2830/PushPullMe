@@ -47,33 +47,48 @@ internal static class XamlTexts
             "3 point arc: click the start point, a point the arc goes through, and the end point (snapping to corners, midpoints and edges). From edge to edge it divides the face, otherwise a loose arc (that can close a face with lines or edges).",
         ["Taartpunt: klik het middelpunt, klik het beginpunt (de straal), beweeg voor de hoek (stappen van 15°) en klik; of typ de hoek + Enter. Wordt een vlak (boog + twee stralen) om eruit te trekken."] =
             "Pie: click the centre, click the start point (the radius), move for the angle (steps of 15°) and click; or type the angle + Enter. Becomes a face (arc + two radii) to pull out.",
-        ["Uit de vrije hand (Freehand) (nog niet)"] = "Freehand (not yet)",
+        ["Uit de vrije hand (Freehand): klik op een plat vlak om te beginnen, beweeg (het spoor wordt gevolgd) en klik om te eindigen. Terug bij het begin: een vlak; anders losse lijnen (die met andere lijnen of randen een vlak kunnen sluiten)."] =
+            "Freehand: click on a flat face to start, move (the track is followed) and click to finish. Back at the start: a face; otherwise loose lines (which can close a face with other lines or edges).",
+        ["Werkvlak: waar je tekent als er geen vlak onder de muis is (eerst de grond, met het raster). Klik een plat vlak: het werkvlak ligt er gelijk mee; klik leeg: weer op de grond. Pijltjes: draaien (15°, Shift 5°); typ mm + Enter: verschuiven langs de normaal (x;y: in het vlak)."] =
+            "Work plane: where you draw when there is no face under the mouse (at first the ground, with the grid). Click a flat face: the work plane lies level with it; click empty: back on the ground. Arrow keys: turn (15°, Shift 5°); type mm + Enter: shift along the normal (x;y: within the plane).",
         ["BEWERKEN"] = "EDIT",
-        ["Offset (F): klik een plat vlak en beweeg naar binnen: een nieuwe rand op vaste afstand van de buitenrand (voor een wand of kraag). Of typ de afstand + Enter."] =
-            "Offset (F): click a flat face and move inwards: a new edge at a fixed distance from the outer edge (for a wall or a collar). Or type the distance + Enter.",
+        ["Offset (F): klik een plat vlak en beweeg naar binnen: een nieuwe rand op vaste afstand van de buitenrand (voor een wand of kraag); beweeg naar buiten voor een rand eromheen (op het vlak eromheen). Of typ de afstand + Enter (min: naar buiten)."] =
+            "Offset (F): click a flat face and move inwards: a new edge at a fixed distance from the outer edge (for a wall or rim); move outwards for an edge round it (on the face round it). Or type the distance + Enter (minus: outwards).",
         ["Afronden (K): klik een scherpe rechte rand tussen twee platte vlakken en beweeg voor de straal; klik, of typ de straal + Enter. (Zoals DesignSpark; in SketchUp zit dit niet.)"] =
             "Round (K): click a sharp straight edge between two flat faces and move for the radius; click, or type the radius + Enter. (As in DesignSpark; SketchUp does not have this.)",
-        ["Ronddraaien (Follow Me, zoals DesignSpark's trekken met een draaias): klik een plat vlak, klik een as (een rechte rand, losse lijn of hulplijn in dat vlak), beweeg voor de hoek (stappen van 15°) en klik; of typ de hoek + Enter. Het vlak draait het lichaam uit."] =
-            "Follow Me (as DesignSpark's pull with a revolve axis): click a flat face, click an axis (a straight edge, loose line or guide line in that face's plane), move for the angle (steps of 15°) and click; or type the angle + Enter. The face turns out of the body.",
+        ["Ronddraaien en volgen (Follow Me): klik een plat vlak (het profiel), en dan een as (een rechte rand, losse lijn of hulplijn in dat vlak) om het rond te draaien – beweeg voor de hoek (stappen van 15°, of 360°) en klik, of typ de hoek + Enter – of een vlak waarvan de rand het pad is: het profiel loopt die rand rond (in het lichaam: weggesneden, zoals een afschuining; erbuiten: een lijst)."] =
+            "Revolve and follow (Follow Me): click a flat face (the profile), then an axis (a straight edge, loose line or guide line in that face) to turn it round – move for the angle (steps of 15°, or 360°) and click, or type the angle + Enter – or a face whose edge is the path: the profile goes round that edge (in the body: cut away, like a chamfer; outside it: a rim).",
         ["Spiegelen: klik een plat vlak; het lichaam spiegelt in dat vlak naar de andere kant. Ctrl+klik: een gespiegelde kopie erbij (twee helften van een symmetrisch onderdeel)."] =
             "Mirror: click a flat face; the body is mirrored in that face to the other side. Ctrl+click: add a mirrored copy (two halves of a symmetrical part).",
-        ["Buitenschil (Outer Shell): overlappende delen samenvoegen tot één (nog niet)"] = "Outer Shell: merge overlapping parts into one (not yet)",
-        ["Verenigen (Union): klik een deel, klik een tweede deel dat het overlapt of met een vlak raakt: ze worden één. (Nog alleen delen met platte vlakken en rechte randen.)"] =
-            "Union: click a part, click a second part that overlaps it or touches it with a face: they become one. (Only parts with flat faces and straight edges, for now.)",
-        ["Aftrekken (Subtract): een deel van een ander aftrekken (nog niet)"] = "Subtract: take one part away from another (not yet)",
-        ["Doorsnede (Intersect): alleen wat delen gemeen hebben (nog niet)"] = "Intersect: only what parts have in common (not yet)",
-        ["Wegsnijden (Trim): een deel wegsnijden met een ander (nog niet)"] = "Trim: cut a part away with another (not yet)",
-        ["Splitsen (Split): delen splitsen langs hun snijvlak (nog niet)"] = "Split: split parts along where they meet (not yet)",
+        ["Buitenschil (Outer Shell): alle delen die elkaar overlappen of met een vlak raken, in één keer samenvoegen. (Platte en ronde vlakken: cilinders, kegels, bollen, ringen; nog geen vrije vormen.)"] =
+            "Outer Shell: unite all parts that overlap or touch with a face, in one go. (Flat and round faces: cylinders, cones, spheres, tori; no free-form faces yet.)",
+        ["Verenigen (Union): klik een deel, klik een tweede deel dat het overlapt of met een vlak raakt: ze worden één. (Platte en ronde vlakken: cilinders, kegels, bollen, ringen; nog geen vrije vormen.)"] =
+            "Union: click a part, click a second part that overlaps it or touches it with a face: they become one. (Flat and round faces: cylinders, cones, spheres, tori; no free-form faces yet.)",
+        ["Aftrekken (Subtract): klik het deel waar iets af moet, klik het deel dat eraf gaat (dat verdwijnt). (Platte en ronde vlakken: cilinders, kegels, bollen, ringen; nog geen vrije vormen.)"] =
+            "Subtract: click the part to take something from, click the part that goes (it disappears). (Flat and round faces: cylinders, cones, spheres, tori; no free-form faces yet.)",
+        ["Doorsnede (Intersect): klik een deel en een tweede dat het overlapt: alleen wat ze gemeen hebben blijft over. (Platte en ronde vlakken: cilinders, kegels, bollen, ringen; nog geen vrije vormen.)"] =
+            "Intersect: click a part and a second one that overlaps it: only what they have in common is left. (Flat and round faces: cylinders, cones, spheres, tori; no free-form faces yet.)",
+        ["Wegsnijden (Trim): klik het deel dat bijgesneden wordt, klik het deel dat snijdt (dat blijft staan). (Platte en ronde vlakken: cilinders, kegels, bollen, ringen; nog geen vrije vormen.)"] =
+            "Trim: click the part to be trimmed, click the part that cuts (it stays). (Flat and round faces: cylinders, cones, spheres, tori; no free-form faces yet.)",
+        ["Splitsen (Split): klik twee delen die elkaar overlappen: ze worden drie delen (alleen het eerste, het gemeenschappelijke, alleen het tweede). (Platte en ronde vlakken: cilinders, kegels, bollen, ringen; nog geen vrije vormen.)"] =
+            "Split: click two parts that overlap: they become three parts (only the first, the common part, only the second). (Flat and round faces: cylinders, cones, spheres, tori; no free-form faces yet.)",
         ["METEN EN AANTEKENEN"] = "MEASURE AND ANNOTATE",
         ["Meetlint (T): klik een punt en beweeg om te meten; klik een rand en trek eraf voor een hulplijn (of typ de afstand + Enter). Delete: alle hulplijnen weg."] =
             "Tape measure (T): click a point and move to measure; click an edge and pull away for a guide line (or type the distance + Enter). Delete: remove all guide lines.",
-        ["Maatlijnen (Dimensions) (nog niet)"] = "Dimensions (not yet)",
-        ["Gradenboog (Protractor): hoeken meten, hulplijnen onder een hoek (nog niet)"] = "Protractor: measure angles, guide lines at an angle (not yet)",
-        ["Assen (Axes): het assenstelsel verplaatsen of draaien (nog niet)"] = "Axes: move or rotate the axes (not yet)",
-        ["Tekstlabels (Text) (nog niet)"] = "Text labels (not yet)",
-        ["Doorsnedevlak (Section Plane): het model doorsnijden om erin te kijken (nog niet)"] = "Section Plane: cut through the model to look inside (not yet)",
-        ["Labels/lagen (Tag): delen tonen en verbergen (nog niet)"] = "Tags: show and hide parts (not yet)",
-        ["3D-tekst (3D Text): tekst als vorm (nog niet)"] = "3D Text: text as a shape (not yet)",
+        ["Maatlijn (Dimensions): klik twee punten (vastklikken op hoeken en randen), beweeg om de maatlijn ervan af te zetten en klik. Klik een maat om hem weg te halen. Alleen in beeld."] =
+            "Dimension: click two points (snapping to corners and edges), move to set the dimension line off and click. Click a dimension to remove it. Only in the view.",
+        ["Gradenboog (Protractor): klik het middelpunt op een vlak, klik een punt voor de beginlijn, beweeg voor de hoek (stappen van 15°) en klik; of typ de hoek + Enter. Er komt een hulplijn onder die hoek."] =
+            "Protractor: click the centre on a face, click a point for the base line, move for the angle (steps of 15°) and click; or type the angle + Enter. A guide line at that angle appears.",
+        ["Assen (Axes): klik een nieuwe oorsprong, klik een punt in de richting van de rode as en een punt voor de groene as: vastklikken, rechthoeken en de pijltjes volgen die assen. Klik op een lege plek: de gewone assen terug."] =
+            "Axes: click a new origin, click a point in the direction of the red axis and a point for the green axis: snapping, rectangles and the arrow keys follow those axes. Click an empty spot: the usual axes back.",
+        ["Tekstlabel (Text): klik een punt op het model, typ de tekst en druk op Enter. Klik een label om het weg te halen. Alleen in beeld."] =
+            "Text: click a point on the model, type the text and press Enter. Click a label to remove it. Only in the view.",
+        ["Doorsnedevlak (Section Plane): klik een plat vlak, beweeg om het snijvlak het model in te schuiven en klik (of typ de diepte + Enter): alles ervoor wordt weggelaten, de snijlijn dik getekend. Esc (met ⊟ gekozen): weg ermee."] =
+            "Section Plane: click a flat face, move to slide the cutting plane into the model and click (or type the depth + Enter): everything in front of it is left out, the cut drawn thick. Esc (with ⊟ chosen): remove it.",
+        ["Verbergen (Tag): klik een deel om het te verbergen (bv. om erachter te werken); klik op een lege plek om alles weer te tonen. Alleen in beeld."] =
+            "Hide (Tag): click a part to hide it (e.g. to work behind it); click an empty spot to show everything again. Only in the view.",
+        ["3D-tekst (3D Text): klik een punt op een plat vlak, typ de tekst en druk op Enter: de letters worden vlakken (zo hoog als de maat in het vak, standaard een vijfde van het vlak). Typ daarna een dikte + Enter om ze er allemaal uit te trekken."] =
+            "3D Text: click a point on a flat face, type the text and press Enter: the letters become faces (as high as the size in the box, by default a fifth of the face). Then type a thickness + Enter to pull them all out.",
         ["KLEUR, SELECTIE EN GUM"] = "COLOUR, SELECTION AND ERASER",
         ["Verfemmer (B): kies een kleur en klik een vlak. Ctrl: het hele lichaam · Shift: alle vlakken in dezelfde kleur · Alt: kleur overnemen."] =
             "Paint bucket (B): choose a colour and click a face. Ctrl: the whole body · Shift: all faces of the same colour · Alt: pick up a colour.",
@@ -85,11 +100,16 @@ internal static class XamlTexts
             "Eraser (E): click a drawn line, rectangle or circle away; the faces become one again.",
         ["KIJKEN"] = "VIEW",
         ["Alles in beeld (Zoom Extents)"] = "Zoom Extents",
-        ["Zoomen (Zoom): slepen om in of uit te zoomen; zoomen kan al met het wieltje (nog niet)"] = "Zoom: drag to zoom in or out; the wheel zooms already (not yet)",
-        ["Inzoomen op een venster (Zoom Window) (nog niet)"] = "Zoom Window (not yet)",
-        ["Camera plaatsen (Position Camera) (nog niet)"] = "Position Camera (not yet)",
-        ["Rondkijken (Look Around) (nog niet)"] = "Look Around (not yet)",
-        ["Lopen (Walk): door het model lopen (nog niet)"] = "Walk: walk through the model (not yet)",
+        ["Zoomen (Zoom): klik, beweeg omhoog om in te zoomen of omlaag om uit te zoomen, klik om te stoppen. (Het wieltje zoomt ook.)"] =
+            "Zoom: click, move up to zoom in or down to zoom out, click to stop. (The wheel zooms too.)",
+        ["Zoomvenster (Zoom Window): klik een hoek, klik de andere hoek: wat in het kader staat, vult het beeld."] =
+            "Zoom Window: click a corner, click the other corner: what is in the frame fills the view.",
+        ["Camera plaatsen (Position Camera): klik waar je wilt staan (op een vlak of de grond); je kijkt vanaf ooghoogte. Typ een andere ooghoogte (mm) + Enter. Daarna rondkijken."] =
+            "Position Camera: click where you want to stand (on a face or the ground); you look from eye height. Type another eye height (mm) + Enter. Then look around.",
+        ["Rondkijken (Look Around): klik en beweeg om je hoofd te draaien zonder van je plek te gaan; klik om te stoppen."] =
+            "Look Around: click and move to turn your head without leaving your place; click to stop.",
+        ["Lopen (Walk): ↑/↓ vooruit en achteruit, ←/→ draaien, PageUp/PageDown omhoog en omlaag; klik en beweeg om rond te kijken."] =
+            "Walk: ↑/↓ forward and back, ←/→ turn, PageUp/PageDown up and down; click and move to look around.",
         ["Sleep een STL, 3MF of .rsdocx hierheen"] = "Drag an STL, 3MF or .rsdocx here",
         ["middelste knop = draaien · Shift + middelste knop = schuiven · wiel = zoomen"] = "middle button = orbit · Shift + middle button = pan · wheel = zoom",
         ["Vormen herkennen…"] = "Recognising shapes…",
