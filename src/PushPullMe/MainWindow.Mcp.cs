@@ -9,6 +9,7 @@ using Vector3D = System.Windows.Media.Media3D.Vector3D;
 using System.Windows.Media.Imaging;
 using HelixToolkit.Wpf.SharpDX;
 using PushPullMe.Core;
+using PushPullMe.Editor;
 using PushPullMe.Mcp;
 using RsDocx.Core.Brep;
 using RsDocx.Core.Stl;
@@ -22,23 +23,20 @@ namespace PushPullMe;
 /// </summary>
 public partial class MainWindow
 {
-    private static string AssistantFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe", "assistent.txt");
-
     /// <summary>The pipe server while it runs (null: off).</summary>
     private CancellationTokenSource? _mcpStop;
 
     /// <summary>The document as last opened or saved (to know whether there is unsaved work).</summary>
     private SketchDocument? _savedDoc;
 
-    private bool Unsaved => _doc != null && !ReferenceEquals(_doc, _savedDoc) && _undo.Count > 0;
+    private bool Unsaved => _doc != null && !ReferenceEquals(_doc, _savedDoc) && _history.CanUndo;
 
     /// <summary>The choice kept from before (off when there is none); PPM_MCP=1 turns it on for a test window.</summary>
     private void LoadAssistant()
     {
         // (the tools of this build, for the MCP server while this window does not listen)
         PipeProtocol.WriteToolsFile(ToolCatalog.ToJson());
-        bool on = Environment.GetEnvironmentVariable("PPM_MCP") == "1";
-        try { if (!on && File.Exists(AssistantFile)) on = File.ReadAllText(AssistantFile).Trim() == "aan"; } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        bool on = Settings.LoadAssistant();
         AssistantBox.IsChecked = on;
         if (on) StartMcp();
         Closed += (_, _) => _mcpStop?.Cancel();
@@ -47,12 +45,7 @@ public partial class MainWindow
     private void AssistantBox_Click(object sender, RoutedEventArgs e)
     {
         bool on = AssistantBox.IsChecked == true;
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(AssistantFile)!);
-            File.WriteAllText(AssistantFile, on ? "aan" : "uit");
-        }
-        catch (IOException) { } catch (UnauthorizedAccessException) { }
+        Settings.SaveAssistant(on);
         if (on) StartMcp(); else { _mcpStop?.Cancel(); _mcpStop = null; }
         StatusText.Text = on ? T("🤖 Een AI-assistent (via MCP) mag nu in dit venster meewerken. Alles wat hij doet zie je hier en kun je ongedaan maken.", "🤖 An AI assistant (through MCP) may now work along in this window. You see everything it does here and can undo it.")
             : T("🤖 De AI-assistent mag niet meer meewerken.", "🤖 The AI assistant may no longer work along.");
@@ -387,11 +380,11 @@ public partial class MainWindow
                 return Changed(before, doc, $"combineert {before.BodyName(x)} en {before.BodyName(y)}.", $"combined body {x} and {y}.", new JsonObject { ["bodies_made"] = new JsonArray(made.Select(m => (JsonNode)m).ToArray()) });
             }
             case "undo":
-                if (_undo.Count == 0) throw new McpRefusal("Nothing to undo.");
+                if (!_history.CanUndo) throw new McpRefusal("Nothing to undo.");
                 Undo(); StatusText.Text = $"🤖 {client}: " + T("maakt ongedaan.", "undid the last change.");
                 return Answer(true, "Undone.");
             case "redo":
-                if (_redo.Count == 0) throw new McpRefusal("Nothing to redo.");
+                if (!_history.CanRedo) throw new McpRefusal("Nothing to redo.");
                 Redo(); StatusText.Text = $"🤖 {client}: " + T("doet opnieuw.", "redid it.");
                 return Answer(true, "Redone.");
             case "open_file":
@@ -524,10 +517,9 @@ public partial class MainWindow
     /// as far back as the model needs from every azimuth: a turn round it in steps keeps it the same size and in view.</summary>
     private void LookRound(double azimuth, double elevation)
     {
-        var pts = _meshes.SelectMany(m => m.Mesh.Positions).ToList();
-        if (pts.Count == 0 || View.Camera is not PerspectiveCamera cam) return;
-        var lo = new Point3D(pts.Min(p => p.X), pts.Min(p => p.Y), pts.Min(p => p.Z));
-        var hi = new Point3D(pts.Max(p => p.X), pts.Max(p => p.Y), pts.Max(p => p.Z));
+        if (Picking.Bounds(_meshes) is not { } box || View.Camera is not PerspectiveCamera cam) return;
+        var lo = new Point3D(box.Min.X, box.Min.Y, box.Min.Z);
+        var hi = new Point3D(box.Max.X, box.Max.Y, box.Max.Z);
         var centre = lo + (hi - lo) * 0.5;
         var (tx, ty) = ViewReach(cam);
         double d = ViewAngles.FitDistanceAllRound(BoxCorners(lo, hi), Raw(centre), elevation, tx, ty);

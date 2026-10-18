@@ -19,11 +19,18 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- millimetres against metres (Display, Mm, TryMm) in every part of the window -->
+    <Using Include="PushPullMe.Editor.Units" Static="true" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="HelixToolkit.Wpf.SharpDX" Version="3.1.2" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
+    <!-- what the window does that needs no window (camera, picking, undo, settings): runs on every system -->
+    <ProjectReference Include="..\PushPullMe.Editor\PushPullMe.Editor.csproj" />
     <!-- the MCP server an AI assistant starts (its PipeProtocol is shared; its exe lands next to this one) -->
     <ProjectReference Include="..\PushPullMe.Mcp\PushPullMe.Mcp.csproj" />
     <!-- the converter's window, opened here for a mesh (STL/3MF); its result is taken over in memory -->

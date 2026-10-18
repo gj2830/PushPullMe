@@ -75,7 +75,7 @@ public partial class MainWindow
     {
         _doc = SketchDocument.FromBodies([]);
         _path = null; _plane = WorkPlane.Ground;
-        _undo.Clear(); _redo.Clear(); _last = null; _selected = null; _hover = null;
+        _history.Clear(); _last = null; _selected = null; _hover = null;
         UpdateUndoButtons();
         FileText.Text = T("nieuw", "new");
         EmptyHint.Visibility = Visibility.Collapsed;

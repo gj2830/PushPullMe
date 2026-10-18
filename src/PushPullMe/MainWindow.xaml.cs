@@ -14,6 +14,7 @@ using DxMesh = HelixToolkit.SharpDX.MeshGeometry3D;
 using PerspectiveCamera = HelixToolkit.Wpf.SharpDX.PerspectiveCamera;
 using ProjectionCamera = HelixToolkit.Wpf.SharpDX.ProjectionCamera;
 using PushPullMe.Core;
+using PushPullMe.Editor;
 using RsDocx.Core.Brep;
 using RsDocx.Core.Stl;
 
@@ -21,15 +22,12 @@ namespace PushPullMe;
 
 public partial class MainWindow : Window
 {
-    /// <summary>The model is in metres, shown in millimetres.</summary>
-    private const double Display = 1000;
-
     private SketchDocument? _doc;
     private string? _path;
-    private readonly List<SketchDocument> _undo = new(), _redo = new();
+    private readonly History _history = new();
 
-    /// <summary>Per body its shown mesh and, per triangle of it, the face it belongs to (for picking).</summary>
-    private readonly List<(DxMesh Mesh, List<int> FaceOfTriangle, int Body)> _meshes = new();
+    /// <summary>Per body and colour its shown triangles and, per triangle, the face it belongs to (for picking).</summary>
+    private readonly List<PickMesh> _meshes = new();
     private LinesVisual3D? _edges;
     private double _modelSize = 100;
 
@@ -89,9 +87,9 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
-        Lang.English = LoadLanguage();
+        Lang.English = Settings.LoadEnglish();
         InitializeComponent();
-        LoadJoin();
+        JoinBox.IsChecked = Settings.LoadJoin();
         LoadAssistant();
         BuildStructure();
         XamlTexts.Apply(this);
@@ -140,18 +138,12 @@ public partial class MainWindow : Window
         // an unexpected error: written down (for finding it later), the action in progress stopped, the model kept
         Application.Current.DispatcherUnhandledException += (_, e) =>
         {
-            try
-            {
-                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe");
-                Directory.CreateDirectory(dir);
-                File.AppendAllText(Path.Combine(dir, "fouten.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {e.Exception}\n\n");
-            }
-            catch (IOException) { }
+            AppData.LogError(e.Exception);
             Log("error: " + e.Exception);
             e.Handled = true;
             EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); _typed = "";
             Render();
-            ShowToast(T("😬 Er ging iets mis", "😬 Something went wrong"), T("Dat is afgebroken; je model is er nog. (De fout staat in %LOCALAPPDATA%\\PushPullMe\\fouten.log.)", "That was stopped; your model is still there. (The error is in %LOCALAPPDATA%\\PushPullMe\\fouten.log.)"));
+            ShowToast(T("😬 Er ging iets mis", "😬 Something went wrong"), T($"Dat is afgebroken; je model is er nog. (De fout staat in {AppData.ErrorLog}.)", $"That was stopped; your model is still there. (The error is in {AppData.ErrorLog}.)"));
             StatusText.Text = T("😬 Er ging iets mis; afgebroken.", "😬 Something went wrong; stopped.");
         };
     }
@@ -210,7 +202,7 @@ public partial class MainWindow : Window
     {
         ClearGuides();
         _doc = doc; _path = path; _plane = WorkPlane.Ground; _savedDoc = doc;
-        _undo.Clear(); _redo.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
+        _history.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
         _openGroup = null; _pickedUnits.Clear();
         UpdateUndoButtons();
         Render(zoom: true);
@@ -328,9 +320,7 @@ public partial class MainWindow : Window
 
     private void Commit(SketchDocument before, SketchDocument after)
     {
-        _undo.Add(before); _redo.Clear();
-        // (the bodies' names and groups along, a new body into the open group: see CarryMeta)
-        _doc = SketchDocument.CarryMeta(before, after, _openGroup);
+        _doc = _history.Commit(before, after, _openGroup);
         _multi = null;
         _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null;
         UpdateUndoButtons();
@@ -338,9 +328,9 @@ public partial class MainWindow : Window
 
     private void Undo()
     {
-        if (_undo.Count == 0 || _doc == null) return;
+        if (!_history.CanUndo || _doc == null) return;
         EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
-        _redo.Add(_doc); _doc = _undo[^1]; _undo.RemoveAt(_undo.Count - 1);
+        _doc = _history.Undo(_doc)!;
         if (_openGroup is { } og && _doc.Group(og) == null) _openGroup = null;
         _pickedUnits.Clear();
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
@@ -352,9 +342,9 @@ public partial class MainWindow : Window
 
     private void Redo()
     {
-        if (_redo.Count == 0 || _doc == null) return;
+        if (!_history.CanRedo || _doc == null) return;
         EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
-        _undo.Add(_doc); _doc = _redo[^1]; _redo.RemoveAt(_redo.Count - 1);
+        _doc = _history.Redo(_doc)!;
         if (_openGroup is { } og && _doc.Group(og) == null) _openGroup = null;
         _pickedUnits.Clear();
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
@@ -366,8 +356,8 @@ public partial class MainWindow : Window
 
     private void UpdateUndoButtons()
     {
-        UndoButton.IsEnabled = _undo.Count > 0;
-        RedoButton.IsEnabled = _redo.Count > 0;
+        UndoButton.IsEnabled = _history.CanUndo;
+        RedoButton.IsEnabled = _history.CanRedo;
     }
 
     // ------------------------------------------------------------------ showing the model
@@ -445,7 +435,7 @@ public partial class MainWindow : Window
                     Geometry = new DxMesh { Positions = pos, Normals = backNor, TriangleIndices = backIdx },
                     Material = back, CullMode = SharpDX.Direct3D11.CullMode.Back, FrontCounterClockwise = true, IsHitTestVisible = false,
                 });
-                _meshes.Add((mesh, map, b));
+                _meshes.Add(new PickMesh(pos, map, b));
             }
         }
         if (x1 > x0) _modelSize = (x1 - x0) * Display;
@@ -545,9 +535,6 @@ public partial class MainWindow : Window
 
     // ------------------------------------------------------------------ orbit (as in SketchUp)
 
-    /// <summary>Degrees of turn per pixel the mouse moves.</summary>
-    private const double OrbitSpeed = 0.4;
-
     private Point? _orbitFrom;
 
     /// <summary>How often the camera changed (for the test aid).</summary>
@@ -609,49 +596,28 @@ public partial class MainWindow : Window
     /// </summary>
     private void Orbit(double dx, double dy)
     {
-        if (View.Camera is not ProjectionCamera cam) return;
-        var position = cam.Position; var look = cam.LookDirection;
-        // (the screen's up, square to the look; the sideways direction from the two)
-        var f = look; f.Normalize();
-        var up = cam.UpDirection - f * Vector3D.DotProduct(cam.UpDirection, f);
-        if (up.Length < 1e-9) return;
-        up.Normalize();
-        var right = Vector3D.CrossProduct(f, up);
-        // camera the other way round than the model seems to turn
-        var turn = new RotateTransform3D(new AxisAngleRotation3D(up, -dx * OrbitSpeed), _orbitPivot).Value;
-        var tilt = new RotateTransform3D(new AxisAngleRotation3D(right, -dy * OrbitSpeed), _orbitPivot).Value;
-        var m = turn; m.Append(tilt);
-        SetCamera(m.Transform(position), m.Transform(look), m.Transform(up));
+        if (Viewport3DHelper.Pose(View)?.Orbit(Raw(_orbitPivot), dx, dy) is { } pose) SetCamera(pose);
     }
 
     /// <summary>The camera set, unless that would make it unusable (not a number, no direction, up along the look):
     /// then left as it was.</summary>
-    private void SetCamera(Point3D position, Vector3D look, Vector3D up)
+    private void SetCamera(CameraPose pose)
     {
-        if (View.Camera is not ProjectionCamera cam) return;
-        static bool Ok(double v) => double.IsFinite(v);
-        if (!(Ok(position.X) && Ok(position.Y) && Ok(position.Z) && Ok(look.X) && Ok(look.Y) && Ok(look.Z) && Ok(up.X) && Ok(up.Y) && Ok(up.Z))) return;
-        if (look.Length < 1e-9 || up.Length < 1e-9 || Vector3D.CrossProduct(look, up).Length < 1e-6 * look.Length * up.Length) return;
-        cam.Position = position; cam.LookDirection = look; cam.UpDirection = up;
+        if (View.Camera is not ProjectionCamera cam || !pose.IsUsable) return;
+        cam.Position = new Point3D(pose.Position.X, pose.Position.Y, pose.Position.Z);
+        cam.LookDirection = new Vector3D(pose.Look.X, pose.Look.Y, pose.Look.Z);
+        cam.UpDirection = new Vector3D(pose.Up.X, pose.Up.Y, pose.Up.Z);
     }
 
+    private void SetCamera(Point3D position, Vector3D look, Vector3D up) => SetCamera(new CameraPose(Raw(position), Raw(look), Raw(up)));
+
     /// <summary>Whether the camera can be used (a number everywhere, a direction to look in, up not along it).</summary>
-    private bool CameraOk() => View.Camera is ProjectionCamera c
-        && double.IsFinite(c.Position.X + c.Position.Y + c.Position.Z + c.LookDirection.X + c.LookDirection.Y + c.LookDirection.Z + c.UpDirection.X + c.UpDirection.Y + c.UpDirection.Z)
-        && c.LookDirection.Length > 1e-9 && Vector3D.CrossProduct(c.LookDirection, c.UpDirection).Length > 1e-6 * c.LookDirection.Length * c.UpDirection.Length;
+    private bool CameraOk() => Viewport3DHelper.Pose(View) is { IsUsable: true };
 
     /// <summary>The model moved along with the mouse (pixels), at the depth of the point grabbed.</summary>
     private void Pan(double dx, double dy)
     {
-        if (View.Camera is not ProjectionCamera cam || Viewport3DHelper.Reach(View) is not { } reach) return;
-        var f = cam.LookDirection; f.Normalize();
-        var r = Vector3D.CrossProduct(f, cam.UpDirection);
-        if (r.Length < 1e-9) return;
-        r.Normalize();
-        var u = Vector3D.CrossProduct(r, f);
-        // (a pixel at that depth, in millimetres)
-        double sx = 2 * _panDepth * reach.Tx / View.ActualWidth, sy = 2 * _panDepth * reach.Ty / View.ActualHeight;
-        SetCamera(cam.Position - r * (dx * sx) + u * (dy * sy), cam.LookDirection, cam.UpDirection);
+        if (Viewport3DHelper.Frame(View) is { } frame && Viewport3DHelper.Pose(View)?.Pan(frame, _panDepth, dx, dy) is { } pose) SetCamera(pose);
     }
 
     private Point? _panFrom;
@@ -671,8 +637,7 @@ public partial class MainWindow : Window
         if (FaceAt(pos)?.Point is { } hit) target = hit;
         else if (Viewport3DHelper.GetRay(View, pos) is { } ray) target = ray.Origin + ray.Direction * cam.LookDirection.Length;
         else return;
-        double f = Math.Pow(0.8, e.Delta / 120.0);
-        SetCamera(target + (cam.Position - target) * f, cam.LookDirection * f, cam.UpDirection);
+        if (Viewport3DHelper.Pose(View) is { } pose) SetCamera(pose.Zoom(Raw(target), e.Delta));
     }
 
     private void View_PreviewMouseUp(object sender, MouseButtonEventArgs e)
@@ -700,63 +665,17 @@ public partial class MainWindow : Window
 
     private (FaceRef Face, Point3D Point)? FaceAt(Point pos)
     {
-        foreach (var (mesh, map, body, tri, at) in Hits(pos))
+        foreach (var (_, map, body, tri, at) in Hits(pos))
             if (tri < map.Count) return (new FaceRef(body, map[tri]), at);
         return null;
     }
 
-    /// <summary>
-    /// The shown faces under a point of the screen, nearest first: its mesh, the face per triangle, the body, the
-    /// triangle hit and where. The ray through the mouse against the shown triangles, worked out here (the viewer's own
-    /// hit test lies about a pixel off: a click just inside an edge fell beside the face).
-    /// </summary>
-    private IEnumerable<(DxMesh Mesh, List<int> Map, int Body, int Triangle, Point3D At)> Hits(Point pos)
+    /// <summary>The shown faces under a point of the screen, nearest first: its mesh, the face per triangle, the body,
+    /// the triangle hit and where (see <see cref="Picking"/>).</summary>
+    private IEnumerable<(PickMesh Mesh, IReadOnlyList<int> Map, int Body, int Triangle, Point3D At)> Hits(Point pos)
     {
-        if (Viewport3DHelper.GetRay(View, pos) is not { } ray) return [];
-        var o = ray.Origin; var d = ray.Direction; d.Normalize();
-        var hits = new List<(double T, DxMesh Mesh, List<int> Map, int Body, int Triangle)>();
-        foreach (var (mesh, map, body) in _meshes)
-        {
-            var p = mesh.Positions;
-            if (p == null || p.Count < 3) continue;
-            // (not through its box: none of its triangles)
-            var b = mesh.Bound;
-            if (!RayHitsBox(o, d, b.Minimum, b.Maximum)) continue;
-            for (int i = 0; i + 2 < p.Count; i += 3)
-                if (RayTriangle(o, d, p[i], p[i + 1], p[i + 2]) is double t) hits.Add((t, mesh, map, body, i / 3));
-        }
-        return hits.OrderBy(h => h.T).Select(h => (h.Mesh, h.Map, h.Body, h.Triangle, o + d * h.T));
-    }
-
-    /// <summary>Where along the ray (from o along unit d) it goes through the triangle (either side), or null.</summary>
-    private static double? RayTriangle(Point3D o, Vector3D d, System.Numerics.Vector3 a3, System.Numerics.Vector3 b3, System.Numerics.Vector3 c3)
-    {
-        var a = new Point3D(a3.X, a3.Y, a3.Z);
-        Vector3D e1 = new Point3D(b3.X, b3.Y, b3.Z) - a, e2 = new Point3D(c3.X, c3.Y, c3.Z) - a;
-        var h = Vector3D.CrossProduct(d, e2); double det = Vector3D.DotProduct(e1, h);
-        if (Math.Abs(det) < 1e-12) return null;
-        var s = o - a; double u = Vector3D.DotProduct(s, h) / det;
-        if (u < 0 || u > 1) return null;
-        var q = Vector3D.CrossProduct(s, e1); double v = Vector3D.DotProduct(d, q) / det;
-        if (v < 0 || u + v > 1) return null;
-        double t = Vector3D.DotProduct(e2, q) / det;
-        return t > 0 ? t : null;
-    }
-
-    /// <summary>Whether the ray (from o along d) goes through the box (a little grown, for rounding).</summary>
-    private static bool RayHitsBox(Point3D o, Vector3D d, System.Numerics.Vector3 lo, System.Numerics.Vector3 hi)
-    {
-        double t0 = 0, t1 = double.MaxValue;
-        double[] org = [o.X, o.Y, o.Z], dir = [d.X, d.Y, d.Z], mn = [lo.X - 1e-3, lo.Y - 1e-3, lo.Z - 1e-3], mx = [hi.X + 1e-3, hi.Y + 1e-3, hi.Z + 1e-3];
-        for (int k = 0; k < 3; k++)
-        {
-            if (Math.Abs(dir[k]) < 1e-15) { if (org[k] < mn[k] || org[k] > mx[k]) return false; continue; }
-            double ta = (mn[k] - org[k]) / dir[k], tb = (mx[k] - org[k]) / dir[k];
-            if (ta > tb) (ta, tb) = (tb, ta);
-            t0 = Math.Max(t0, ta); t1 = Math.Min(t1, tb);
-            if (t0 > t1) return false;
-        }
-        return true;
+        if (Viewport3DHelper.Frame(View) is not { } frame) return [];
+        return Picking.Hits(_meshes, frame.Ray(new ScreenPoint(pos.X, pos.Y))).Select(h => (h.Mesh, h.Mesh.FaceOfTriangle, h.Mesh.Body, h.Triangle, new Point3D(h.At.X, h.At.Y, h.At.Z)));
     }
 
     private bool IsPlanar(FaceRef f) => _doc != null && _doc.Bodies[f.Body].Faces[f.Face].Surface is BrepPlane;
@@ -1229,7 +1148,7 @@ public partial class MainWindow : Window
     private (int, int, int, int) _treeCounts = (-1, -1, -1, -1);
     private readonly HashSet<SketchKind> _sketchHidden = new();
 
-    private static string StructureFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe", "structuur.txt");
+    private const string StructureFile = "structuur.txt";
 
     private bool SketchVisible(SketchKind k) => !_sketchHidden.Contains(k);
 
@@ -1401,24 +1320,12 @@ public partial class MainWindow : Window
 
     private (StructurePlace, bool) LoadStructurePlace()
     {
-        try
-        {
-            if (File.Exists(StructureFile) && File.ReadAllText(StructureFile).Trim().Split(' ') is [var a, var b])
-                return (Enum.TryParse<StructurePlace>(a, out var p) ? p : StructurePlace.Left, b == "dicht");
-        }
-        catch (IOException) { } catch (UnauthorizedAccessException) { }
+        if (AppData.Read(StructureFile)?.Split(' ') is [var a, var b])
+            return (Enum.TryParse<StructurePlace>(a, out var p) ? p : StructurePlace.Left, b == "dicht");
         return (StructurePlace.Right, false);
     }
 
-    private void SaveStructurePlace()
-    {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(StructureFile)!);
-            File.WriteAllText(StructureFile, $"{_structurePlace} {(_structureFolded ? "dicht" : "open")}");
-        }
-        catch (IOException) { } catch (UnauthorizedAccessException) { }
-    }
+    private void SaveStructurePlace() => AppData.Write(StructureFile, $"{_structurePlace} {(_structureFolded ? "dicht" : "open")}");
 
     /// <summary>The tree made anew for the document as it is now.</summary>
     private void RefreshStructure()
@@ -1442,52 +1349,23 @@ public partial class MainWindow : Window
 
     // ------------------------------------------------------------------ language
 
-    private static string LanguageFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe", "taal.txt");
-
     // ------------------------------------------------------------------ merge (samenvoegen)
-
-    private static string JoinFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe", "samenvoegen.txt");
 
     /// <summary>Whether ⇕ joins what it pulls against another part with it (the box bottom right; kept as set).</summary>
     private bool Join => JoinBox.IsChecked == true;
 
-    /// <summary>The choice kept from before (on when there is none).</summary>
-    private void LoadJoin()
-    {
-        try { if (File.Exists(JoinFile)) JoinBox.IsChecked = File.ReadAllText(JoinFile).Trim() != "uit"; } catch (IOException) { } catch (UnauthorizedAccessException) { }
-    }
-
     private void JoinBox_Click(object sender, RoutedEventArgs e)
     {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(JoinFile)!);
-            File.WriteAllText(JoinFile, Join ? "aan" : "uit");
-        }
-        catch (IOException) { } catch (UnauthorizedAccessException) { }
+        Settings.SaveJoin(Join);
         StatusText.Text = Join ? T("⇕ Samenvoegen aan: wat je tegen een ander deel aan trekt, wordt er één deel mee.", "⇕ Merge on: what you pull against another part becomes one part with it.")
             : T("⇕ Samenvoegen uit: wat je trekt blijft een apart deel.", "⇕ Merge off: what you pull stays a part of its own.");
-    }
-
-    /// <summary>English or Dutch: as chosen before, else as Windows speaks (Dutch for Dutch, English otherwise).</summary>
-    private static bool LoadLanguage()
-    {
-        // (the test aid: PPM_LANG=en or nl, without touching the choice kept)
-        if (Environment.GetEnvironmentVariable("PPM_LANG") is "en" or "nl") return Environment.GetEnvironmentVariable("PPM_LANG") == "en";
-        try { if (File.Exists(LanguageFile)) return File.ReadAllText(LanguageFile).Trim() == "en"; } catch (IOException) { } catch (UnauthorizedAccessException) { }
-        return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName != "nl";
     }
 
     /// <summary>🌐: the other language, at once (what the status bar says changes with the next step), and kept.</summary>
     private void Language_Click(object sender, RoutedEventArgs e)
     {
         Lang.English = !Lang.English;
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(LanguageFile)!);
-            File.WriteAllText(LanguageFile, Lang.English ? "en" : "nl");
-        }
-        catch (IOException) { } catch (UnauthorizedAccessException) { }
+        Settings.SaveEnglish(Lang.English);
         XamlTexts.Apply(this);
         LanguageButton.Content = Lang.English ? "🌐  EN" : "🌐  NL";
         StatusText.Text = T("Taal: Nederlands.", "Language: English.");
@@ -1497,7 +1375,6 @@ public partial class MainWindow : Window
     /// <summary>A text in the language chosen (see <see cref="Lang"/>).</summary>
     private static string T(string nl, string en) => Lang.T(nl, en);
 
-    private static string Mm(double metres) => (metres * Display).ToString("0.##", CultureInfo.CurrentCulture);
 
     /// <summary>The direction of a rectangle's first side on a face with normal n: the world axis that lies most in its
     /// plane (as SketchUp lines rectangles up with the axes).</summary>
@@ -2282,7 +2159,7 @@ public partial class MainWindow : Window
         try
         {
             var doc = MoveDoc(before, body, pick, offset, group, checkCrossing: true);
-            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
             _lastMove = (before, body, pick, offset.Normalized(), group);
             _last = null; _selected = null;
@@ -2622,9 +2499,6 @@ public partial class MainWindow : Window
         return (p, null);
     }
 
-    private static string Measure(Vec3 d) =>
-        T($"{Mm(d.Length)} mm (x {Mm(Math.Abs(d.X))} · y {Mm(Math.Abs(d.Y))} · z {Mm(Math.Abs(d.Z))})", $"{Mm(d.Length)} mm (x {Mm(Math.Abs(d.X))} · y {Mm(Math.Abs(d.Y))} · z {Mm(Math.Abs(d.Z))})");
-
     private void HoverTape((FaceRef Face, Point3D Point)? hit, Point pos)
     {
         if (_tapeStart != null) { TapeTo(hit, pos); return; }
@@ -2679,7 +2553,7 @@ public partial class MainWindow : Window
         if (TapePoint(hit, pos) is not { } tp) return;
         ShowSketch([start, tp.Point]);
         MeasureBox.Text = Mm((tp.Point - start).Length);
-        StatusText.Text = T($"📏 {Measure(tp.Point - start)}{(tp.Kind is { } tk ? " · 🎯 " + tk.Name() : "")} · klik om de maat vast te houden.", $"📏 {Measure(tp.Point - start)}{(tp.Kind is { } tk2 ? " · 🎯 " + tk2.Name() : "")} · click to keep the measurement.");
+        StatusText.Text = T($"📏 {Units.Measure(tp.Point - start)}{(tp.Kind is { } tk ? " · 🎯 " + tk.Name() : "")} · klik om de maat vast te houden.", $"📏 {Units.Measure(tp.Point - start)}{(tp.Kind is { } tk2 ? " · 🎯 " + tk2.Name() : "")} · click to keep the measurement.");
     }
 
     private void FinishTape((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -2696,8 +2570,8 @@ public partial class MainWindow : Window
         EndTape();
         ShowSketch([start, tp.Point]);
         MeasureBox.Text = Mm((tp.Point - start).Length);
-        StatusText.Text = T($"📏 Gemeten: {Measure(tp.Point - start)}.", $"📏 Measured: {Measure(tp.Point - start)}.");
-        Log($"measured {Measure(tp.Point - start)}");
+        StatusText.Text = T($"📏 Gemeten: {Units.Measure(tp.Point - start)}.", $"📏 Measured: {Units.Measure(tp.Point - start)}.");
+        Log($"measured {Units.Measure(tp.Point - start)}");
     }
 
     /// <summary>A typed distance with the tape from an edge: the guide that far off, the way it is being pulled.</summary>
@@ -2789,10 +2663,9 @@ public partial class MainWindow : Window
     /// corners of the box round the model just fit (90 % of the narrower side).</summary>
     private void ZoomAll(double ms)
     {
-        var pts = _meshes.SelectMany(m => m.Mesh.Positions).ToList();
-        if (pts.Count == 0 || View.Camera is not PerspectiveCamera cam) return;
-        var lo = new Point3D(pts.Min(p => p.X), pts.Min(p => p.Y), pts.Min(p => p.Z));
-        var hi = new Point3D(pts.Max(p => p.X), pts.Max(p => p.Y), pts.Max(p => p.Z));
+        if (Picking.Bounds(_meshes) is not { } box || View.Camera is not PerspectiveCamera cam) return;
+        var lo = new Point3D(box.Min.X, box.Min.Y, box.Min.Z);
+        var hi = new Point3D(box.Max.X, box.Max.Y, box.Max.Z);
         var centre = lo + (hi - lo) * 0.5;
         // (the way the camera looks; from the front left, a little above, when it has none that can be used)
         var f = CameraOk() ? cam.LookDirection : new Vector3D(1, 1.4, -0.9); f.Normalize();
@@ -3208,7 +3081,7 @@ public partial class MainWindow : Window
         try
         {
             var (doc, r) = before.PushPull(f, dist, join: Join);
-            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
             _last = (before, f, dist);
             _selected = r.FaceMap[f.Face] >= 0 ? new FaceRef(f.Body, r.FaceMap[f.Face]) : null;
@@ -5056,7 +4929,7 @@ public partial class MainWindow : Window
         try
         {
             var doc = Whole(before, body, copy, (sd, sb, sc) => sd.ScaleBody(sb, fixedPoint, factor, along, sc));
-            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
             _lastScale = (before, body, fixedPoint, along, copy);
             _last = null; _lastMove = null; _selected = null;
@@ -5226,7 +5099,7 @@ public partial class MainWindow : Window
         try
         {
             var doc = tilt is { } tf ? before.Tilt(tf, centre, axis, angle).Doc : Whole(before, body, copy, (rd, rb, rc) => rd.RotateBody(rb, centre, axis, angle, rc));
-            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
             _lastRotate = (before, body, centre, axis, copy, Math.Sign(angle) == 0 ? 1 : Math.Sign(angle), tilt);
             _last = null; _lastMove = null; _selected = null;
@@ -5389,7 +5262,7 @@ public partial class MainWindow : Window
         try
         {
             var (doc, faces) = before.RoundEdges(body, edges, radius);
-            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
             _last = null; _lastMove = null;
             _lastRound = (before, body, edges, radius);
@@ -5488,7 +5361,7 @@ public partial class MainWindow : Window
         try
         {
             var (doc, inner) = before.Offset(f, dist);
-            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
             _last = null; _lastMove = null;
             _lastOffset = (before, f, dist);
@@ -5867,9 +5740,6 @@ public partial class MainWindow : Window
         catch (PushPullException ex) { StatusText.Text = "⛔ " + ex.Message; return false; }
     }
 
-    private static bool TryMm(string s, out double mm) =>
-        double.TryParse(s.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out mm);
-
     // ------------------------------------------------------------------ messages
 
     private DispatcherTimer? _toastTimer;
@@ -5884,27 +5754,7 @@ public partial class MainWindow : Window
         _toastTimer.Start();
     }
 
-    /// <summary>The session log: PPM_LOG, or else %LOCALAPPDATA%PushPullMesessie.log (the last session; it starts empty).</summary>
-    private static readonly string? LogPath = Environment.GetEnvironmentVariable("PPM_LOG") ?? SessionLog();
-
-    private static string? SessionLog()
-    {
-        try
-        {
-            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe");
-            Directory.CreateDirectory(dir);
-            string path = Path.Combine(dir, "sessie.log");
-            File.WriteAllText(path, $"PushPullMe, sessie van {DateTime.Now:yyyy-MM-dd HH:mm}\n");
-            return path;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
-    }
-
-    private static void Log(string what)
-    {
-        if (LogPath == null) return;
-        try { File.AppendAllText(LogPath, $"[{DateTime.Now:HH:mm:ss}] {what}\n"); } catch (IOException) { }
-    }
+    private static void Log(string what) => SessionLog.Write(what);
 
     // ------------------------------------------------------------------ test aid (no clicking in the user's window)
 

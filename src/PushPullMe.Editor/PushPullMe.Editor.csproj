@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- What the window does that needs no window: the camera and the screen, picking, undo, units, the settings kept.
+       No UI framework here (net10.0, as the core), so it runs, and is tested, on Windows, Linux and macOS alike; the
+       window (WPF now) only shows and passes the mouse and keys on. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
+  </ItemGroup>
+
+</Project>

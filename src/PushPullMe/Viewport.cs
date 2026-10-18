@@ -2,6 +2,8 @@ using System.Numerics;
 using System.Windows;
 using System.Windows.Media.Media3D;
 using HelixToolkit.Wpf.SharpDX;
+using PushPullMe.Editor;
+using RsDocx.Core.Stl;
 
 namespace PushPullMe;
 
@@ -50,48 +52,48 @@ public sealed class LinesVisual3D : LineGeometryModel3D
 /// <summary>A ray in the view: where it starts and which way it goes.</summary>
 public sealed record Ray3D(Point3D Origin, Vector3D Direction);
 
-/// <summary>Between the screen and the model (as HelixToolkit.Wpf's Viewport3DHelper did it for WPF 3D).</summary>
+/// <summary>Between the screen and the model (as HelixToolkit.Wpf's Viewport3DHelper did it for WPF 3D): the sums are the
+/// editor's (<see cref="ViewFrame"/>), the camera and the view's size are this viewer's.</summary>
 public static class Viewport3DHelper
 {
-    /// <summary>
-    /// The camera as a frame, in double precision: the eye, its right, up and forward directions, and how far the view
-    /// reaches sideways and up per unit forward. (The viewer's own matrices are single precision: a click lay up to half
-    /// a millimetre beside where the point was drawn, enough to miss a face just inside its edge.)
-    /// </summary>
-    private static (Point3D Eye, Vector3D R, Vector3D U, Vector3D F, double Tx, double Ty, double W, double H)? Frame(Viewport3DX view)
+    /// <summary>The camera as a frame (null without a perspective camera or a size).</summary>
+    public static ViewFrame? Frame(Viewport3DX view)
     {
         if (view.Camera is not HelixToolkit.Wpf.SharpDX.PerspectiveCamera cam || view.ActualWidth < 1 || view.ActualHeight < 1) return null;
-        var f = cam.LookDirection; f.Normalize();
-        var r = Vector3D.CrossProduct(f, cam.UpDirection);
-        if (r.Length < 1e-12) return null;
-        r.Normalize();
-        var u = Vector3D.CrossProduct(r, f);
-        double w = view.ActualWidth, h = view.ActualHeight, t = Math.Tan(cam.FieldOfView * Math.PI / 360);
+        var eye = V(cam.Position); var look = V(cam.LookDirection); var up = V(cam.UpDirection);
         // (the angle of view across or up the view: whichever the viewer draws with, found once)
-        _horizontal ??= Horizontal(view, cam.Position, r, u, f, t, w, h);
-        return _horizontal == true ? (cam.Position, r, u, f, t, t * h / w, w, h) : (cam.Position, r, u, f, t * w / h, t, w, h);
+        _horizontal ??= Horizontal(view, eye, look, up, cam.FieldOfView);
+        return ViewFrame.Of(eye, look, up, cam.FieldOfView, _horizontal == true, view.ActualWidth, view.ActualHeight);
     }
 
     private static bool? _horizontal;
 
+    private static Vec3 V(Point3D p) => new(p.X, p.Y, p.Z);
+    private static Vec3 V(Vector3D v) => new(v.X, v.Y, v.Z);
+
+    /// <summary>The camera as it is now.</summary>
+    public static CameraPose? Pose(Viewport3DX view) =>
+        view.Camera is HelixToolkit.Wpf.SharpDX.ProjectionCamera c ? new CameraPose(V(c.Position), V(c.LookDirection), V(c.UpDirection)) : null;
+
     /// <summary>How far the view reaches sideways and up per unit forward (null without a perspective camera).</summary>
     public static (double Tx, double Ty)? Reach(Viewport3DX view) => Frame(view) is { } c ? (c.Tx, c.Ty) : null;
 
-    private static bool Horizontal(Viewport3DX view, Point3D eye, Vector3D r, Vector3D u, Vector3D f, double t, double w, double h)
+    private static bool? Horizontal(Viewport3DX view, Vec3 eye, Vec3 look, Vec3 up, double fov)
     {
-        var p = eye + f * 100 + r * 20 + u * 10;
-        var drawn = view.Project(p);
-        Point At(double tx, double ty) => new(w / 2 * (1 + 20 / (100 * tx)), h / 2 * (1 - 10 / (100 * ty)));
-        return (At(t, t * h / w) - drawn).Length <= (At(t * w / h, t) - drawn).Length;
+        double w = view.ActualWidth, h = view.ActualHeight;
+        if (ViewFrame.Of(eye, look, up, fov, true, w, h) is not { } across || ViewFrame.Of(eye, look, up, fov, false, w, h) is not { } upward) return null;
+        var p = eye + across.Forward * 100 + across.Right * 20 + across.Up * 10;
+        var drawn = view.Project(new Point3D(p.X, p.Y, p.Z));
+        double Off(ScreenPoint s) => (new Point(s.X, s.Y) - drawn).Length;
+        return Off(across.Project(p)) <= Off(upward.Project(p));
     }
 
     /// <summary>Where a point of the model is on the screen (pixels in the view).</summary>
     public static Point Point3DtoPoint2D(Viewport3DX view, Point3D p)
     {
         if (Frame(view) is not { } c) return view.Project(p);
-        var v = p - c.Eye; double z = Vector3D.DotProduct(v, c.F);
-        if (Math.Abs(z) < 1e-12) z = 1e-12;
-        return new Point(c.W / 2 * (1 + Vector3D.DotProduct(v, c.R) / (z * c.Tx)), c.H / 2 * (1 - Vector3D.DotProduct(v, c.U) / (z * c.Ty)));
+        var s = c.Project(V(p));
+        return new Point(s.X, s.Y);
     }
 
     /// <summary>The ray from the eye through a point of the screen (exactly the way back of <see cref="Point3DtoPoint2D"/>).</summary>
@@ -103,12 +105,11 @@ public static class Viewport3DHelper
             var rd = new Vector3D(r.Direction.X, r.Direction.Y, r.Direction.Z);
             return rd.Length < 1e-12 ? null : new Ray3D(new Point3D(r.Position.X, r.Position.Y, r.Position.Z), rd);
         }
-        var d = c.F + c.R * ((2 * pos.X / c.W - 1) * c.Tx) + c.U * ((1 - 2 * pos.Y / c.H) * c.Ty);
-        d.Normalize();
-        return new Ray3D(c.Eye, d);
+        var ray = c.Ray(new ScreenPoint(pos.X, pos.Y));
+        return new Ray3D(new Point3D(ray.Origin.X, ray.Origin.Y, ray.Origin.Z), new Vector3D(ray.Direction.X, ray.Direction.Y, ray.Direction.Z));
     }
 
-    /// <summary>From the model to the screen in one matrix (the perspective divide done by Transform).</summary>
+/// <summary>From the model to the screen in one matrix (the perspective divide done by Transform).</summary>
     public static Matrix3D GetTotalTransform(Viewport3DX view) => view.GetScreenViewProjectionMatrix3D();
 }
 

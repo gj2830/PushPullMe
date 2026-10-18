@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PushPullMe.Core\PushPullMe.Core.csproj" />
+    <ProjectReference Include="..\..\src\PushPullMe.Editor\PushPullMe.Editor.csproj" />
     <ProjectReference Include="..\..\src\PushPullMe.Mcp\PushPullMe.Mcp.csproj" />
   </ItemGroup>
 
