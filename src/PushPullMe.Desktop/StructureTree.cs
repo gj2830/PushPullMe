@@ -206,7 +206,7 @@ internal sealed class StructureTree : UserControl
 
     private static TreeViewItem Line(string text, bool shown, Action<bool> changed)
     {
-        var box = new CheckBox { IsChecked = shown, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0), Focusable = false, MinWidth = 0 };
+        var box = new CheckBox { Classes = { "small" }, IsChecked = shown, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0), Focusable = false };
         box.Click += (_, _) => changed(box.IsChecked == true);
         var row = new StackPanel { Orientation = Orientation.Horizontal };
         row.Children.Add(box);

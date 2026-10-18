@@ -5,6 +5,9 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- (the program as it is downloaded: PushPullMe, on every system) -->
+    <AssemblyName>PushPullMe</AssemblyName>
+    <RootNamespace>PushPullMe.Desktop</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>..\PushPullMe\Assets\pushpullme.ico</ApplicationIcon>

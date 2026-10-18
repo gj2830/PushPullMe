@@ -29,7 +29,9 @@ The birdhouse is in [examples/birdhouse.rsdocx](examples/birdhouse.rsdocx): open
 - **Measure and annotate**: tape measure and guides, protractor, dimensions, text labels, axes, section plane, hiding
   parts, paint and the colour picker.
 - **Look around**: orbit freely all the way round, pan, zoom to the mouse, zoom window, position camera, look around,
-  walk. Drawn with DirectX 11 (HelixToolkit.Wpf.SharpDX).
+  walk. Drawn with OpenGL.
+- **Windows, Linux and macOS**: the window is made with [Avalonia](https://avaloniaui.net); everything the tools do
+  lives in a layer of its own (`src/PushPullMe.Editor`), the same on every system.
 - Every tool works by dragging (press, drag, release) as well as by click, move, click; distances and angles can be
   typed.
 
@@ -41,21 +43,28 @@ The birdhouse is in [examples/birdhouse.rsdocx](examples/birdhouse.rsdocx): open
 
 ## Download
 
-[Releases](https://github.com/gj2830/PushPullMe/releases) has a zip for Windows (64-bit). Unpack it and start
-`PushPullMe.exe`; .NET does not need to be installed separately.
+[Releases](https://github.com/gj2830/PushPullMe/releases) has a ready-to-run package per system; .NET does not need to
+be installed separately.
+
+- **Windows** (64-bit): unpack the `win-x64` zip and start `PushPullMe.exe`.
+- **Linux** (64-bit): unpack the `linux-x64` tar.gz and start `PushPullMe/PushPullMe`. It needs OpenGL (a desktop with
+  a graphics driver has it).
+- **macOS**: unpack the zip (`osx-arm64` for Apple silicon, `osx-x64` for Intel) and move `PushPullMe.app` to your
+  Applications. It is not signed by Apple: the first time, right-click it and choose **Open** (or run
+  `xattr -dr com.apple.quarantine PushPullMe.app`).
 
 ## Build it yourself
 
-You need Windows and the .NET 10 SDK.
+You need the .NET 10 SDK, on Windows, Linux or macOS.
 
 ```
 git clone --recursive https://github.com/gj2830/PushPullMe.git
 cd PushPullMe
-dotnet build src/PushPullMe -c Release
+dotnet run --project src/PushPullMe.Desktop -c Release
 ```
 
-The app is then in `src/PushPullMe/bin/Release/net10.0-windows/PushPullMe.exe`. Cloned without `--recursive`? Fetch
-the converter with `git submodule update --init`.
+Cloned without `--recursive`? Fetch the converter with `git submodule update --init`. (`src/PushPullMe` is the earlier
+window, WPF and DirectX, Windows only; it runs on the same editor layer and goes away in time.)
 
 Tests: `dotnet test tests/PushPullMe.Tests`.
 
@@ -68,21 +77,26 @@ view. It is **off** until you tick **🤖 AI assistant may work along** (bottom 
 status bar, and every change can be undone (Ctrl+Z); before opening over unsaved work or overwriting a file it asks you.
 To show the model all round, the assistant can turn the camera round it (screenshot with an azimuth and elevation): the
 model keeps its size from every side and is not changed.
-It only listens on your own PC, to your own Windows account (a named pipe; no network port).
+It only listens on your own computer, to your own user account (a named pipe on Windows, a Unix socket on Linux and
+macOS; no network port).
 
-The MCP server is `PushPullMe.Mcp.exe`, next to `PushPullMe.exe` (stdio transport). Tell your client to start it:
+The MCP server is `PushPullMe.Mcp` (`PushPullMe.Mcp.exe` on Windows), next to the app (on macOS in
+`PushPullMe.app/Contents/MacOS/`; stdio transport). Tell your client to start it:
 
-- **Claude Code**: in this folder `.mcp.json` already does (built Release); elsewhere
-  `claude mcp add pushpullme -- "C:\path\to\PushPullMe.Mcp.exe"`.
+- **Claude Code**: in this folder `.mcp.json` already does (after `dotnet build src/PushPullMe.Mcp -c Release`);
+  elsewhere `claude mcp add pushpullme -- "/path/to/PushPullMe.Mcp"`.
 - **Claude Desktop** (`claude_desktop_config.json`):
-  `{"mcpServers": {"pushpullme": {"command": "C:\\path\\to\\PushPullMe.Mcp.exe"}}}`.
+  `{"mcpServers": {"pushpullme": {"command": "/path/to/PushPullMe.Mcp"}}}`.
 - **VS Code** (`.vscode/mcp.json`):
-  `{"servers": {"pushpullme": {"type": "stdio", "command": "C:\\path\\to\\PushPullMe.Mcp.exe"}}}`.
+  `{"servers": {"pushpullme": {"type": "stdio", "command": "/path/to/PushPullMe.Mcp"}}}`.
+
+On Windows the path is like `C:\path\to\PushPullMe.Mcp.exe`, with doubled backslashes inside JSON.
 
 The tools come from the app, not from the server: a rebuilt PushPullMe brings its new or changed tools as soon as it
 starts (the server looks every two seconds and tells the client, which fetches them again), without restarting the
 server or the client's session. While PushPullMe does not run, the server offers the tools the app last wrote down
-(`%LOCALAPPDATA%\PushPullMe\mcp-tools.json`). Only a change to the server itself (`src/PushPullMe.Mcp`) needs it
+(`mcp-tools.json` in the app's own folder: `%LOCALAPPDATA%\PushPullMe` on Windows, `~/.local/share/PushPullMe` on
+Linux, `~/Library/Application Support/PushPullMe` on macOS). Only a change to the server itself (`src/PushPullMe.Mcp`) needs it
 restarted (in Claude Code: `/mcp`, reconnect); building is fine while it runs, as long as the server did not change.
 
 ## Nederlands
@@ -99,17 +113,20 @@ met de greep, duwen/trekken (ook cilinders, afrondingen en vlakken zonder dikte)
 SketchUp, offset, afronden, verplaatsen, draaien, schalen, spiegelen, Follow Me (rond een as of langs een pad),
 verenigen/aftrekken/doorsnede/wegsnijden/splitsen (ook met ronde vlakken), meten, maatlijnen, tekst, doorsnedevlak,
 verbergen, verven, vrij draaien, zoomen naar de muis en lopen. Alles werkt met slepen en met klik-beweeg-klik; maten en
-hoeken kun je typen.
+hoeken kun je typen. Het draait op Windows, Linux en macOS.
 
 Het vogelhuisje bovenaan staat in [examples/birdhouse.rsdocx](examples/birdhouse.rsdocx); het opent in PushPullMe en in
 DesignSpark Mechanical.
 
 **Een AI-assistent laten meewerken (MCP):** vink rechtsonder **🤖 AI-assistent mag meewerken** aan, en laat je
-MCP-client (Claude Code, Claude Desktop, VS Code, …) `PushPullMe.Mcp.exe` starten (naast `PushPullMe.exe`); zie
-hierboven. Alles wat de assistent doet zie je in de statusregel en kun je ongedaan maken; standaard staat het uit.
+MCP-client (Claude Code, Claude Desktop, VS Code, …) `PushPullMe.Mcp` starten (naast het programma; op Windows
+`PushPullMe.Mcp.exe`); zie hierboven. Alles wat de assistent doet zie je in de statusregel en kun je ongedaan maken;
+standaard staat het uit.
 
-**Downloaden:** onder [Releases](https://github.com/gj2830/PushPullMe/releases) staat een zip voor Windows (64-bit);
-uitpakken en `PushPullMe.exe` starten. **Zelf bouwen:** Windows en de .NET 10 SDK, zie hierboven.
+**Downloaden:** onder [Releases](https://github.com/gj2830/PushPullMe/releases) staat een pakket per systeem: voor
+Windows een zip (`PushPullMe.exe` starten), voor Linux een tar.gz (`PushPullMe/PushPullMe` starten), voor macOS een zip
+met `PushPullMe.app` (niet door Apple ondertekend: de eerste keer rechtsklikken en **Open** kiezen). **Zelf bouwen:** de
+.NET 10 SDK op Windows, Linux of macOS, zie hierboven.
 
 ## License / Licentie
 

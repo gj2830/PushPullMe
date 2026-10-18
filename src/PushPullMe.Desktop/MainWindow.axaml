@@ -93,9 +93,9 @@
     <DockPanel Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0">
       <Border DockPanel.Dock="Right" Classes="card" Padding="14,6">
         <StackPanel Orientation="Horizontal">
-          <CheckBox x:Name="AssistantBox" Content="🤖 AI-assistent mag meewerken" VerticalAlignment="Center" Margin="0,0,16,0" Foreground="{StaticResource Muted}" Focusable="False"
+          <CheckBox x:Name="AssistantBox" Classes="small" Content="🤖 AI-assistent mag meewerken" VerticalAlignment="Center" Margin="0,0,16,0" Focusable="False"
                     ToolTip.Tip="Aan: een AI-assistent (via MCP, bijvoorbeeld Claude Code, Claude Desktop of VS Code) mag in dit venster meewerken: het model bekijken en bewerken. Alles wat hij doet zie je hier en kun je ongedaan maken. Zie de README voor het koppelen."/>
-          <CheckBox x:Name="JoinBox" Content="samenvoegen" IsChecked="True" VerticalAlignment="Center" Margin="0,0,16,0" Foreground="{StaticResource Muted}" Focusable="False"
+          <CheckBox x:Name="JoinBox" Classes="small" Content="samenvoegen" IsChecked="True" VerticalAlignment="Center" Margin="0,0,16,0" Focusable="False"
                     ToolTip.Tip="Aan: wat je met ⇕ tegen een ander deel aan trekt, wordt er één deel mee (zoals DesignSpark). Uit: het blijft een apart deel."/>
           <TextBlock x:Name="MeasureLabel" Text="Afstand" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Margin="0,0,10,0"/>
           <TextBlock x:Name="MeasureBox" Width="110" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{StaticResource Accent}"/>

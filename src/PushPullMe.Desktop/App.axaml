@@ -89,6 +89,33 @@
       <Setter Property="Width" Value="215"/>
     </Style>
 
+    <!-- small tick boxes, as WPF draws them (Fluent's are 20 px, blue and at least 32 px high) -->
+    <Style Selector="CheckBox.small">
+      <Setter Property="MinHeight" Value="0"/>
+      <Setter Property="MinWidth" Value="0"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <StackPanel Orientation="Horizontal" Background="Transparent">
+            <Border Name="Box" Width="13" Height="13" Background="White" BorderBrush="#5A6478" BorderThickness="1" CornerRadius="2" VerticalAlignment="Center">
+              <Path Name="Tick" Data="M 2.5,6.5 L 5.2,9.2 L 10.5,3.5" Stroke="#17223B" StrokeThickness="1.6" IsVisible="False"/>
+            </Border>
+            <ContentPresenter Content="{TemplateBinding Content}" Margin="5,0,0,0" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}"
+                              IsVisible="{TemplateBinding Content, Converter={x:Static ObjectConverters.IsNotNull}}"/>
+          </StackPanel>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="CheckBox.small:checked /template/ Path#Tick">
+      <Setter Property="IsVisible" Value="True"/>
+    </Style>
+    <Style Selector="CheckBox.small:pointerover /template/ Border#Box">
+      <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+    </Style>
+
     <!-- labels over the view -->
     <Style Selector="Border.label">
       <Setter Property="Background" Value="#EBFFFFFF"/>
