@@ -9,6 +9,10 @@ namespace PushPullMe.Tests;
 /// <summary>The MCP server (src/PushPullMe.Mcp): the protocol as a client speaks it, the tools, and the pipe to the app.</summary>
 public class McpTests
 {
+    /// <summary>A pipe of its own for one test. Short: on Linux and macOS a pipe is a socket in the temp folder, and macOS
+    /// allows a socket path of at most 104 characters (its temp folder alone is about 50).</summary>
+    private static string TestPipe() => "ppm" + Guid.NewGuid().ToString("N")[..8];
+
     private static JsonObject Parse(string? s) => (JsonObject)JsonNode.Parse(s!)!;
 
     /// <summary>The app's tools, as a running PushPullMe gives them.</summary>
@@ -93,7 +97,7 @@ public class McpTests
     [Fact]
     public async Task Without_PushPullMe_listening_a_tool_call_says_how_to_turn_it_on()
     {
-        var r = await McpServer.CallApp("test", "get_model", new JsonObject(), pipeName: "PushPullMe.mcp.test." + Guid.NewGuid().ToString("N"));
+        var r = await McpServer.CallApp("test", "get_model", new JsonObject(), pipeName: TestPipe());
         Assert.True(r.IsError);
         Assert.Contains("AI assistant may work along", r.Text);
     }
@@ -101,7 +105,7 @@ public class McpTests
     [Fact]
     public async Task A_call_goes_over_the_pipe_and_its_answer_comes_back()
     {
-        string name = "PushPullMe.mcp.test." + Guid.NewGuid().ToString("N");
+        string name = TestPipe();
         // the app's side, played here
         var app = Task.Run(async () =>
         {
@@ -185,7 +189,7 @@ public class McpTests
     [Fact]
     public async Task The_app_answers_which_tools_it_has_over_the_pipe_and_writes_them_down()
     {
-        string name = "PushPullMe.mcp.test." + Guid.NewGuid().ToString("N");
+        string name = TestPipe();
         var app = Task.Run(async () =>
         {
             await using var pipe = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
