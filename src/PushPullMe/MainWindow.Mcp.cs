@@ -4,6 +4,7 @@ using System.IO.Pipes;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Media;
+using Point3D = System.Windows.Media.Media3D.Point3D;
 using Vector3D = System.Windows.Media.Media3D.Vector3D;
 using System.Windows.Media.Imaging;
 using HelixToolkit.Wpf.SharpDX;
@@ -131,7 +132,10 @@ public partial class MainWindow
     private async Task<JsonObject> McpDo(string client, string tool, JsonObject a)
     {
         int Int(string n) => a[n] is { } v ? v.GetValue<int>() : throw new McpRefusal($"'{n}' is missing.");
-        double Num(string n) => a[n] is { } v ? v.GetValue<double>() : throw new McpRefusal($"'{n}' is missing.");
+        // (a number, or one written as text: a client that does not know the field yet sends it so)
+        double Num(string n) => a[n] is not { } v ? throw new McpRefusal($"'{n}' is missing.")
+            : v is JsonValue s && s.TryGetValue(out string? text) ? double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) ? d : throw new McpRefusal($"'{n}' must be a number.")
+            : v.GetValue<double>();
         bool Flag(string n) => a[n]?.GetValue<bool>() == true;
         Vec3 Pt(string n) => a[n] is JsonArray { Count: 3 } p ? new Vec3(p[0]!.GetValue<double>() / Display, p[1]!.GetValue<double>() / Display, p[2]!.GetValue<double>() / Display) : throw new McpRefusal($"'{n}' must be [x, y, z] in mm.");
         Vec3 Dir(string n) { var v = Pt(n) * Display; return v.Length < 1e-12 ? throw new McpRefusal($"'{n}' has no length.") : v.Normalized(); }
@@ -172,8 +176,15 @@ public partial class MainWindow
             case "screenshot":
             {
                 if (a["view"]?.GetValue<string>() is { } v && v != "current") LookFrom(v);
+                if (a["azimuth"] != null || a["elevation"] != null)
+                {
+                    var (az, el) = View.Camera is ProjectionCamera pc && CameraOk() ? ViewAngles.Of(Raw(pc.LookDirection)) : (325.0, 30.0);
+                    LookRound(a["azimuth"] != null ? Num("azimuth") : az, a["elevation"] != null ? Num("elevation") : el);
+                }
                 StatusText.Text = $"🤖 {client}: " + T("bekijkt het model.", "looks at the model.");
-                return Answer(true, "PNG of the 3D view.", await ViewPng());
+                var png = await ViewPng();
+                var (caz, cel) = View.Camera is ProjectionCamera c && CameraOk() ? ViewAngles.Of(Raw(c.LookDirection)) : (0.0, 0.0);
+                return Answer(true, new JsonObject { ["view"] = "PNG of the 3D view.", ["azimuth"] = Math.Round(caz, 1), ["elevation"] = Math.Round(cel, 1) }.ToJsonString(), png);
             }
             case "push_pull":
             {
@@ -403,6 +414,22 @@ public partial class MainWindow
         };
         cam.LookDirection = look; cam.UpDirection = up;
         ZoomAll(0);
+    }
+
+    /// <summary>The camera put round the middle of the model at that azimuth and elevation (degrees, as ViewAngles),
+    /// as far back as the model needs from every azimuth: a turn round it in steps keeps it the same size and in view.</summary>
+    private void LookRound(double azimuth, double elevation)
+    {
+        var pts = _meshes.SelectMany(m => m.Mesh.Positions).ToList();
+        if (pts.Count == 0 || View.Camera is not PerspectiveCamera cam) return;
+        var lo = new Point3D(pts.Min(p => p.X), pts.Min(p => p.Y), pts.Min(p => p.Z));
+        var hi = new Point3D(pts.Max(p => p.X), pts.Max(p => p.Y), pts.Max(p => p.Z));
+        var centre = lo + (hi - lo) * 0.5;
+        var (tx, ty) = ViewReach(cam);
+        double d = ViewAngles.FitDistanceAllRound(BoxCorners(lo, hi), Raw(centre), elevation, tx, ty);
+        var f = ViewAngles.Look(azimuth, elevation);
+        var look = new Vector3D(f.X, f.Y, f.Z) * d;
+        SetCamera(centre - look, look, new Vector3D(0, 0, 1));
     }
 
     /// <summary>The 3D view as a PNG, rendered by DirectX itself (never copied from the screen).</summary>

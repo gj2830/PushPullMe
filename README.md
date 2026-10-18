@@ -66,6 +66,8 @@ PushPullMe can let an AI assistant work along in its window through the
 …) can look at the model and change it: push/pull, draw, move, group, paint, open and save, and take a picture of the
 view. It is **off** until you tick **🤖 AI assistant may work along** (bottom right). You see everything it does in the
 status bar, and every change can be undone (Ctrl+Z); before opening over unsaved work or overwriting a file it asks you.
+To show the model all round, the assistant can turn the camera round it (screenshot with an azimuth and elevation): the
+model keeps its size from every side and is not changed.
 It only listens on your own PC, to your own Windows account (a named pipe; no network port).
 
 The MCP server is `PushPullMe.Mcp.exe`, next to `PushPullMe.exe` (stdio transport). Tell your client to start it:

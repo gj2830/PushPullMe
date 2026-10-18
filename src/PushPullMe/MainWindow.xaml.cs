@@ -2781,31 +2781,31 @@ public partial class MainWindow : Window
         var lo = new Point3D(pts.Min(p => p.X), pts.Min(p => p.Y), pts.Min(p => p.Z));
         var hi = new Point3D(pts.Max(p => p.X), pts.Max(p => p.Y), pts.Max(p => p.Z));
         var centre = lo + (hi - lo) * 0.5;
-        var corners = new[] { lo.X, hi.X }.SelectMany(x => new[] { lo.Y, hi.Y }.SelectMany(y => new[] { lo.Z, hi.Z }.Select(z => new Point3D(x, y, z)))).ToList();
         // (the way the camera looks; from the front left, a little above, when it has none that can be used)
         var f = CameraOk() ? cam.LookDirection : new Vector3D(1, 1.4, -0.9); f.Normalize();
         var r = Vector3D.CrossProduct(f, new Vector3D(0, 0, 1)); if (r.Length < 1e-9) r = new Vector3D(1, 0, 0); r.Normalize();
         var u = Vector3D.CrossProduct(r, f);
-        double w = View.ActualWidth > 0 ? View.ActualWidth : 1000, h = View.ActualHeight > 0 ? View.ActualHeight : 700;
-        double t = Math.Tan(cam.FieldOfView * Math.PI / 360);
-        var (tx, ty) = Viewport3DHelper.Reach(View) ?? (t * w / h, t);
-        // (how far out of the middle the furthest corner lands, as a part of the half view)
-        double Reach(double d)
-        {
-            var eye = centre - f * d; double m = 0;
-            foreach (var c in corners)
-            {
-                var v = c - eye; double z = Vector3D.DotProduct(v, f);
-                if (z <= 1e-9) return double.MaxValue;
-                m = Math.Max(m, Math.Max(Math.Abs(Vector3D.DotProduct(v, r) / (z * tx)), Math.Abs(Vector3D.DotProduct(v, u) / (z * ty))));
-            }
-            return m;
-        }
-        double near = 1e-3, far = Math.Max((hi - lo).Length, 1e-3) * 100;
-        for (int i = 0; i < 60; i++) { double mid = (near + far) / 2; if (Reach(mid) > 0.9) near = mid; else far = mid; }
+        var (tx, ty) = ViewReach(cam);
+        double far = ViewAngles.FitDistance(BoxCorners(lo, hi), Raw(centre), Raw(f), tx, ty);
         // (up the z axis, unless looking straight down or up)
         cam.Position = centre - f * far; cam.LookDirection = f * far; cam.UpDirection = Math.Abs(f.Z) > 0.999 ? u : new Vector3D(0, 0, 1);
     }
+
+    /// <summary>The tangents of half the view across and up.</summary>
+    private (double Tx, double Ty) ViewReach(PerspectiveCamera cam)
+    {
+        double w = View.ActualWidth > 0 ? View.ActualWidth : 1000, h = View.ActualHeight > 0 ? View.ActualHeight : 700;
+        double t = Math.Tan(cam.FieldOfView * Math.PI / 360);
+        return Viewport3DHelper.Reach(View) ?? (t * w / h, t);
+    }
+
+    /// <summary>A point or direction of the 3D view as it is (no change of unit), for the sums in ViewAngles.</summary>
+    private static Vec3 Raw(Point3D p) => new(p.X, p.Y, p.Z);
+    private static Vec3 Raw(Vector3D v) => new(v.X, v.Y, v.Z);
+
+    /// <summary>The eight corners of a box.</summary>
+    private static List<Vec3> BoxCorners(Point3D lo, Point3D hi) =>
+        new[] { lo.X, hi.X }.SelectMany(x => new[] { lo.Y, hi.Y }.SelectMany(y => new[] { lo.Z, hi.Z }.Select(z => new Vec3(x, y, z)))).ToList();
 
     /// <summary>A click with the bucket: the face painted (Ctrl the whole body, Shift every face of the same colour in the
     /// body), or with Alt its colour taken up.</summary>
