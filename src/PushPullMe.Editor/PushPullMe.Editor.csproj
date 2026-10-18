@@ -11,6 +11,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
+    <!-- the pipe to the MCP server (PipeProtocol): an AI assistant works along in the window -->
+    <ProjectReference Include="..\PushPullMe.Mcp\PushPullMe.Mcp.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,12 +1,13 @@
+using System.Diagnostics;
 using System.Globalization;
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Media3D;
+using System.Text.Json.Nodes;
 using PushPullMe.Core;
 using RsDocx.Core.Brep;
 using RsDocx.Core.Stl;
+using static PushPullMe.Editor.Units;
 
-namespace PushPullMe;
+namespace PushPullMe.Editor.Session;
+
 
 /// <summary>
 /// Drawing on the work plane (at first the ground, z = 0; ⊞ puts it level with a face, shifts and turns it), where there
@@ -14,7 +15,7 @@ namespace PushPullMe;
 /// a block), ╱ lines stay loose until they close a shape, which then becomes such a face. In an empty window the first
 /// click starts a new, empty document.
 /// </summary>
-public partial class MainWindow
+public sealed partial class EditorSession
 {
     private enum GroundKind { Rectangle, Circle, Line }
 
@@ -37,7 +38,7 @@ public partial class MainWindow
     private WorkPlane _plane = WorkPlane.Ground;
     private Vec3 GroundUp => _plane.N;
     private static readonly Color GridColor = Color.FromRgb(0xD3, 0xDC, 0xE8);
-    private readonly List<LinesVisual3D> _groundVisuals = new();
+    private readonly List<LineSet> _groundVisuals = new();
 
     /// <summary>Where the mouse points on the work plane, or null (looking along it, or away from it); close (12 pixels) to
     /// the end of a loose line, a point clicked or a corner of a face on the work plane: that point.</summary>
@@ -78,8 +79,8 @@ public partial class MainWindow
         _history.Clear(); _last = null; _selected = null; _hover = null;
         UpdateUndoButtons();
         FileText.Text = T("nieuw", "new");
-        EmptyHint.Visibility = Visibility.Collapsed;
-        SaveButton.IsEnabled = true;
+        EmptyHint.On = false;
+        SaveButton.On = true;
         Render();
         StatusText.Text = T("📄 Leeg werkblad. Teken op de grond met ▭ (R), ◯ (C) of ╱ (L) en trek het vlak met ⇕ (P) tot een blok, of open of sleep een model hierheen.", "📄 Empty work sheet. Draw on the ground with ▭ (R), ◯ (C) or ╱ (L) and pull the face into a block with ⇕ (P), or open or drop a model here.");
         Log("new document");
@@ -236,7 +237,7 @@ public partial class MainWindow
     private void RenderGround(SketchDocument? doc)
     {
         // (the button back to the ground: only while a work plane is set)
-        GroundButton.Visibility = _plane != WorkPlane.Ground ? Visibility.Visible : Visibility.Collapsed;
+        GroundButtonShown.On = _plane != WorkPlane.Ground;
         foreach (var v in _groundVisuals) View.Children.Remove(v);
         _groundVisuals.Clear();
         if (doc == null) return;
@@ -254,13 +255,13 @@ public partial class MainWindow
             grid.Add(Q(s, -reach)); grid.Add(Q(s, reach));
             grid.Add(Q(-reach, s)); grid.Add(Q(reach, s));
         }
-        var grey = new LinesVisual3D { Points = grid, Color = GridColor, Thickness = 0.8 };
-        var red = new LinesVisual3D { Points = [Q(-reach, 0), Q(reach, 0)], Color = AxisX, Thickness = 1.2 };
-        var green = new LinesVisual3D { Points = [Q(0, -reach), Q(0, reach)], Color = AxisY, Thickness = 1.2 };
+        var grey = new LineSet { Points = grid, Color = GridColor, Thickness = 0.8 };
+        var red = new LineSet { Points = [Q(-reach, 0), Q(reach, 0)], Color = AxisX, Thickness = 1.2 };
+        var green = new LineSet { Points = [Q(0, -reach), Q(0, reach)], Color = AxisY, Thickness = 1.2 };
         foreach (var v in new[] { grey, red, green })
         {
             // (behind everything drawn on it: the edges of a face there stay on top)
-            v.DepthBias = 200;
+            v.Behind = true;
             View.Children.Add(v); _groundVisuals.Add(v);
         }
         RenderGizmo();
@@ -268,12 +269,12 @@ public partial class MainWindow
 
     // ------------------------------------------------------------------ ⊞ the work plane
 
-    private bool WorkPlaneMode => WorkPlaneTool.IsChecked == true;
+    private bool WorkPlaneMode => Tool == Tool.WorkPlane;
 
     /// <summary>A click with ⊞: the work plane level with the flat face clicked (its origin where it was clicked), or
     /// back on the ground (an empty spot).</summary>
     /// <summary>The ⊞ grond button: the work plane back on the ground, as ⊞ and a click on empty space.</summary>
-    private void GroundButton_Click(object sender, RoutedEventArgs e)
+    public void GroundButton()
     {
         _grip = null;
         RenderGizmo();
@@ -303,12 +304,12 @@ public partial class MainWindow
 
     /// <summary>Arrow keys with ⊞: the work plane turned round its own green (left/right) or red (up/down) axis through
     /// its origin, 15° a press (5° with Shift).</summary>
-    private bool WorkPlaneKey(System.Windows.Input.Key key)
+    private bool WorkPlaneKey(Key key)
     {
-        if (key is not (System.Windows.Input.Key.Left or System.Windows.Input.Key.Right or System.Windows.Input.Key.Up or System.Windows.Input.Key.Down)) return false;
-        double deg = (Mods & System.Windows.Input.ModifierKeys.Shift) != 0 ? 5 : 15;
-        bool aroundGreen = key is System.Windows.Input.Key.Left or System.Windows.Input.Key.Right;
-        double sign = key is System.Windows.Input.Key.Right or System.Windows.Input.Key.Up ? 1 : -1;
+        if (key is not (Key.Left or Key.Right or Key.Up or Key.Down)) return false;
+        double deg = (Mods & ModifierKeys.Shift) != 0 ? 5 : 15;
+        bool aroundGreen = key is Key.Left or Key.Right;
+        double sign = key is Key.Right or Key.Up ? 1 : -1;
         var turn = new BrepTransform.Turn(_plane.Origin, aroundGreen ? _plane.Y : _plane.X, sign * deg * Math.PI / 180);
         var p = new WorkPlane(_plane.Origin, turn.Dir(_plane.X).Normalized(), turn.Dir(_plane.Y).Normalized());
         SetPlane(p, T($"⊞ Werkvlak {deg:0}° gedraaid om de {(aroundGreen ? "groene" : "rode")} as.", $"⊞ Work plane turned {deg:0}° round the {(aroundGreen ? "green" : "red")} axis."));

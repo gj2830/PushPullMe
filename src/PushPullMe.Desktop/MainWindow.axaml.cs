@@ -1,6 +1,7 @@
 using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -127,6 +128,9 @@ public partial class MainWindow : Window
                 report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"probe {probe} → screen ({s.X:0.##},{s.Y:0.##}) {what}"));
                 View.Pick(s);
             }
+        // (what the mouse would reach in the middle of the view: the view itself, or the mouse does nothing there)
+        var middle = View.TranslatePoint(new Point(View.Bounds.Width / 2, View.Bounds.Height / 2), this) ?? default;
+        report.AppendLine($"mouse in the middle reaches: {this.InputHitTest(middle)?.GetType().Name ?? "nothing"}");
         report.AppendLine($"status: {StatusText.Text}");
         var c0 = View.Camera;
         report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"camera at ({c0.Position.X:0.#},{c0.Position.Y:0.#},{c0.Position.Z:0.#}) look ({c0.Look.X:0.###},{c0.Look.Y:0.###},{c0.Look.Z:0.###})"));

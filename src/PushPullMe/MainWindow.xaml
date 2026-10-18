@@ -212,7 +212,7 @@
                                 IsChangeFieldOfViewEnabled="False" IsInertiaEnabled="False" MSAA="Eight"
                                 PreviewMouseWheel="View_PreviewMouseWheel"
                                 PreviewMouseDown="View_PreviewMouseDown" PreviewMouseMove="View_PreviewMouseMove" PreviewMouseUp="View_PreviewMouseUp"
-                                PreviewMouseLeftButtonDown="View_MouseLeftButtonDown" MouseMove="View_MouseMove" MouseLeave="View_MouseLeave">
+                                PreviewMouseLeftButtonDown="View_MouseLeftButtonDown" MouseLeave="View_MouseLeave">
                     <hx:Viewport3DX.Camera>
                         <hx:PerspectiveCamera Position="150,-200,150" LookDirection="-150,200,-150" UpDirection="0,0,1"
                                               FieldOfView="45" NearPlaneDistance="1" FarPlaneDistance="20000"/>
@@ -236,7 +236,7 @@
                 </StackPanel>
 
                 <!-- busy -->
-                <Border x:Name="Busy" Visibility="Collapsed" Background="#AAF3F6FB">
+                <Border x:Name="BusyCover" Visibility="Collapsed" Background="#AAF3F6FB">
                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                         <TextBlock Text="⏳" FontSize="44" HorizontalAlignment="Center"/>
                         <TextBlock x:Name="BusyText" Text="Vormen herkennen…" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,6,0,0"/>

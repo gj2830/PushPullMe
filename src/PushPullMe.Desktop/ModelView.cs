@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.OpenGL;
 using Avalonia.OpenGL.Controls;
+using Avalonia.Rendering;
 using PushPullMe.Core;
 using PushPullMe.Editor;
 using RsDocx.Core.Stl;
@@ -18,8 +19,12 @@ namespace PushPullMe.Desktop;
 /// zooms toward the mouse, a click picks a face. All the sums are the editor layer's (<see cref="ViewFrame"/>,
 /// <see cref="CameraPose"/>, <see cref="Picking"/>), so a click lands on the triangle drawn under it.
 /// </summary>
-public sealed class ModelView : OpenGlControlBase
+public sealed class ModelView : OpenGlControlBase, ICustomHitTest
 {
+    /// <summary>The mouse reaches the whole view (it draws no background of its own, so would otherwise be seen as
+    /// empty and passed through).</summary>
+    public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
     private static readonly Vector4 FrontColor = Rgb(0xF3, 0xF0, 0xE8), BackColor = Rgb(0x8E, 0x9B, 0xB8), EdgeColor = Rgb(0x26, 0x2B, 0x36),
         HoverColor = Rgb(0xFA, 0xCC, 0x15) with { W = 0.4f }, SelectColor = Rgb(0x25, 0x63, 0xEB) with { W = 0.35f },
         GridColor = Rgb(0xD5, 0xDC, 0xE6), XColor = Rgb(0xE1, 0x1D, 0x48), YColor = Rgb(0x16, 0xA3, 0x4A);

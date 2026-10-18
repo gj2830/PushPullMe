@@ -1,29 +1,28 @@
+using System.Diagnostics;
 using System.Globalization;
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Media3D;
+using System.Text.Json.Nodes;
 using PushPullMe.Core;
+using RsDocx.Core.Brep;
 using RsDocx.Core.Stl;
-using ProjectionCamera = HelixToolkit.Wpf.SharpDX.ProjectionCamera;
+using static PushPullMe.Editor.Units;
 
-namespace PushPullMe;
+namespace PushPullMe.Editor.Session;
+
 
 /// <summary>
 /// The work plane's handle (as DesignSpark's Move Grid): at its origin three arrows (shift along red, green, blue), three
 /// arcs (turn round them) and a yellow ball (take the origin to a point of the model). Click a part, move, click again
 /// (or type the distance / angle + Enter); Esc puts the plane back. Always the same size on the screen.
 /// </summary>
-public partial class MainWindow
+public sealed partial class EditorSession
 {
     private enum Grip { ShiftX, ShiftY, ShiftN, TurnX, TurnY, TurnN, Ball }
 
     /// <summary>A grip being moved: which, the plane it started from, where along / round it started.</summary>
     private (Grip Grip, WorkPlane From, double Start, Vec3 StartDir)? _grip;
     private Grip? _gripHover;
-    private readonly List<LinesVisual3D> _gizmo = new();
+    private readonly List<LineSet> _gizmo = new();
 
-    /// <summary>The handle drawn on top of everything (a block standing on the origin does not hide it).</summary>
-    private HelixToolkit.Wpf.SharpDX.TopMostGroup3D? _gizmoHost;
     private static readonly Color BallColor = Color.FromRgb(0xE8, 0xB4, 0x0C);
 
     /// <summary>The handle's arm length (metres): about 80 pixels at its origin.</summary>
@@ -62,8 +61,7 @@ public partial class MainWindow
     /// <summary>The handle shown (with ⊞ chosen), the grip under the mouse or being moved thicker.</summary>
     private void RenderGizmo()
     {
-        if (_gizmoHost == null) { _gizmoHost = new HelixToolkit.Wpf.SharpDX.TopMostGroup3D { EnableTopMost = true }; View.Children.Add(_gizmoHost); }
-        _gizmoHost.Children.Clear();
+        foreach (var old in _gizmo) View.Children.Remove(old);
         _gizmo.Clear();
         if (_doc == null || !WorkPlaneMode) return;
         double s = GripSize();
@@ -80,8 +78,9 @@ public partial class MainWindow
                 line.Add(P(tip)); line.Add(P(tip - a * (0.18 * s) - across));
             }
             bool hot = _grip?.Grip == g || (_grip == null && _gripHover == g);
-            var v = new LinesVisual3D { Points = line, Color = GripColor(g), Thickness = g == Grip.Ball ? (hot ? 14 : 10) : (hot ? 9 : 6) };
-            _gizmoHost.Children.Add(v); _gizmo.Add(v);
+            // (drawn on top of everything: a block standing on the origin does not hide it)
+            var v = new LineSet { Points = line, Color = GripColor(g), Thickness = g == Grip.Ball ? (hot ? 14 : 10) : (hot ? 9 : 6), OnTop = true };
+            View.Children.Add(v); _gizmo.Add(v);
         }
     }
 

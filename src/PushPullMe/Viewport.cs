@@ -68,6 +68,9 @@ public static class Viewport3DHelper
 
     private static bool? _horizontal;
 
+    /// <summary>Whether the viewer's angle of view is across the view (else up it); null before it can be told.</summary>
+    public static bool? FieldOfViewAcross(Viewport3DX view) { Frame(view); return _horizontal; }
+
     private static Vec3 V(Point3D p) => new(p.X, p.Y, p.Z);
     private static Vec3 V(Vector3D v) => new(v.X, v.Y, v.Z);
 

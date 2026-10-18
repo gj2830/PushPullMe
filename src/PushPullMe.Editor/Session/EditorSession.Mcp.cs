@@ -1,27 +1,22 @@
-using System.Globalization;
-using System.IO;
+using System.Diagnostics;
 using System.IO.Pipes;
-using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Media;
-using Point3D = System.Windows.Media.Media3D.Point3D;
-using Vector3D = System.Windows.Media.Media3D.Vector3D;
-using System.Windows.Media.Imaging;
-using HelixToolkit.Wpf.SharpDX;
-using PushPullMe.Core;
-using PushPullMe.Editor;
 using PushPullMe.Mcp;
+using System.Globalization;
+using System.Text.Json.Nodes;
+using PushPullMe.Core;
 using RsDocx.Core.Brep;
 using RsDocx.Core.Stl;
+using static PushPullMe.Editor.Units;
 
-namespace PushPullMe;
+namespace PushPullMe.Editor.Session;
+
 
 /// <summary>
 /// The app's side of the MCP server (src/PushPullMe.Mcp): with "AI assistant may work along" ticked, a named pipe of this
 /// Windows user takes tool calls from it (any MCP client: Claude Code, Claude Desktop, VS Code, …) and does them here, in
 /// this window, as the user would: through the same functions, each change undoable, shown in the status bar and the log.
 /// </summary>
-public partial class MainWindow
+public sealed partial class EditorSession
 {
     /// <summary>The pipe server while it runs (null: off).</summary>
     private CancellationTokenSource? _mcpStop;
@@ -37,14 +32,17 @@ public partial class MainWindow
         // (the tools of this build, for the MCP server while this window does not listen)
         PipeProtocol.WriteToolsFile(ToolCatalog.ToJson());
         bool on = Settings.LoadAssistant();
-        AssistantBox.IsChecked = on;
+        AssistantBox.On = on;
         if (on) StartMcp();
-        Closed += (_, _) => _mcpStop?.Cancel();
+        AssistantBox.Changed += AssistantSwitched;
     }
 
-    private void AssistantBox_Click(object sender, RoutedEventArgs e)
+    /// <summary>The window closed: the pipe server stopped.</summary>
+    public void Closed() => _mcpStop?.Cancel();
+
+    private void AssistantSwitched()
     {
-        bool on = AssistantBox.IsChecked == true;
+        bool on = AssistantBox.On;
         Settings.SaveAssistant(on);
         if (on) StartMcp(); else { _mcpStop?.Cancel(); _mcpStop = null; }
         StatusText.Text = on ? T("🤖 Een AI-assistent (via MCP) mag nu in dit venster meewerken. Alles wat hij doet zie je hier en kun je ongedaan maken.", "🤖 An AI assistant (through MCP) may now work along in this window. You see everything it does here and can undo it.")
@@ -69,10 +67,14 @@ public partial class MainWindow
             catch (IOException)
             {
                 // (another PushPullMe window has it)
-                await Dispatcher.InvokeAsync(() =>
+                await _window.OnUiThread(() =>
                 {
+                    _mcpStop = null;
+                    AssistantBox.Changed -= AssistantSwitched;
+                    AssistantBox.On = false;
+                    AssistantBox.Changed += AssistantSwitched;
                     StatusText.Text = T("🤖 Een ander PushPullMe-venster werkt al met de AI-assistent; dit venster niet.", "🤖 Another PushPullMe window already works with the AI assistant; this one does not.");
-                    AssistantBox.IsChecked = false; _mcpStop = null;
+                    return Task.FromResult(true);
                 });
                 return;
             }
@@ -89,7 +91,7 @@ public partial class MainWindow
                         await PipeProtocol.WriteAsync(pipe, new JsonObject { ["ok"] = true, ["tools"] = ToolCatalog.ToJson() }, ct);
                         continue;
                     }
-                    var answer = await await Dispatcher.InvokeAsync(() => McpCall(req["client"]?.GetValue<string>() ?? "?", req["tool"]?.GetValue<string>() ?? "", req["args"] as JsonObject ?? new JsonObject()));
+                    var answer = await _window.OnUiThread(() => McpCall(req["client"]?.GetValue<string>() ?? "?", req["tool"]?.GetValue<string>() ?? "", req["args"] as JsonObject ?? new JsonObject()));
                     await PipeProtocol.WriteAsync(pipe, answer, ct);
                 }
                 catch (OperationCanceledException) { return; }
@@ -121,7 +123,7 @@ public partial class MainWindow
         Log($"mcp {client} {tool} {args.ToJsonString()}");
         try
         {
-            if (AssistantBox.IsChecked != true) throw new McpRefusal("The user turned 'AI assistant may work along' off.");
+            if (!AssistantBox.On) throw new McpRefusal("The user turned 'AI assistant may work along' off.");
             bool reads = tool is "get_model" or "get_body" or "screenshot";
             if (!reads && ActionBusy) throw new McpRefusal("The user is in the middle of an action; try again in a moment.");
             if (!reads && tool is not ("open_file" or "undo" or "redo") && _doc == null) throw new McpRefusal("No model is open.");
@@ -431,8 +433,7 @@ public partial class MainWindow
     }
 
     /// <summary>A yes/no question to the user (the assistant waits for it).</summary>
-    private bool Ask(string question) =>
-        MessageBox.Show(this, question, "PushPullMe – " + T("AI-assistent", "AI assistant"), MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+    private bool Ask(string question) => _window.Ask(question);
 
     private static JsonArray Mm3(Vec3 v) => new(Math.Round(v.X * Display, 3), Math.Round(v.Y * Display, 3), Math.Round(v.Z * Display, 3));
 
@@ -532,11 +533,7 @@ public partial class MainWindow
     private async Task<byte[]> ViewPng()
     {
         await Task.Delay(300);
-        await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
-        var enc = new PngBitmapEncoder();
-        enc.Frames.Add(BitmapFrame.Create(View.RenderBitmap()));
-        using var ms = new MemoryStream();
-        enc.Save(ms);
-        return ms.ToArray();
+        await _window.Idle();
+        return _window.Snapshot() ?? throw new InvalidOperationException("The view could not be rendered.");
     }
 }

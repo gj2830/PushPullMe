@@ -2,16 +2,10 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using PushPullMe.Core;
+using PushPullMe.Editor.Session;
 using RsDocx.Core.Brep;
 
 namespace PushPullMe;
-
-/// <summary>The kinds of drawing aids the structure tree lists under "Schets".</summary>
-public enum SketchKind { Loose, Guides, Dimensions, Notes }
-
-/// <summary>What the structure tree's menu asks for a group: open it to work in, explode it, or make a group (of what is
-/// picked, or of the body the menu was opened on).</summary>
-public enum GroupAction { Open, Explode, Make }
 
 /// <summary>
 /// The structure of the model as a tree (as DesignSpark's structure tree): its groups with what is in them, its bodies
