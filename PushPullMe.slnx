@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/PushPullMe.Core/PushPullMe.Core.csproj" />
     <Project Path="src/PushPullMe/PushPullMe.csproj" />
+    <Project Path="src/PushPullMe.Desktop/PushPullMe.Desktop.csproj" />
     <Project Path="src/PushPullMe.Editor/PushPullMe.Editor.csproj" />
     <Project Path="src/PushPullMe.Mcp/PushPullMe.Mcp.csproj" />
   </Folder>

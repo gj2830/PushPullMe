@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The window for Windows, Linux and macOS (Avalonia, 3D through OpenGL); for now a first try: open a model, look
+       round it, pick a face. The work itself is done by the editor layer and the core, as in the WPF window. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>..\PushPullMe\Assets\pushpullme.ico</ApplicationIcon>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- (vertex data handed to OpenGL by pointer) -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="..\PushPullMe\Assets\pushpullme.png" Link="Assets\pushpullme.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+    <PackageReference Include="Silk.NET.OpenGL" Version="2.23.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
+    <ProjectReference Include="..\PushPullMe.Editor\PushPullMe.Editor.csproj" />
+  </ItemGroup>
+
+</Project>

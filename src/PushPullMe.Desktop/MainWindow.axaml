@@ -1,0 +1,31 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:PushPullMe.Desktop"
+        x:Class="PushPullMe.Desktop.MainWindow"
+        Title="PushPullMe" Width="1200" Height="800" Background="#F0F4F9"
+        Icon="/Assets/pushpullme.png">
+  <DockPanel Margin="12">
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,Auto,*,Auto" Margin="4,0,4,10">
+      <Image Source="/Assets/pushpullme.png" Width="32" Height="32" />
+      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0" Spacing="10">
+        <TextBlock Text="PushPullMe" FontSize="22" FontWeight="Bold" Foreground="#2563EB" />
+        <TextBlock x:Name="FileText" FontSize="13" Foreground="#64748B" VerticalAlignment="Bottom" Margin="0,0,0,3" />
+      </StackPanel>
+      <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="8">
+        <Button x:Name="ZoomButton" Click="Zoom_Click" CornerRadius="16" Padding="14,6" />
+        <Button x:Name="OpenButton" Click="Open_Click" CornerRadius="16" Padding="14,6" Background="#2563EB" Foreground="White" />
+      </StackPanel>
+    </Grid>
+    <Border DockPanel.Dock="Bottom" Background="White" CornerRadius="12" Padding="14,8" Margin="0,10,0,0">
+      <TextBlock x:Name="StatusText" TextWrapping="Wrap" />
+    </Border>
+    <Border CornerRadius="14" ClipToBounds="True" BorderBrush="#E2E8F0" BorderThickness="1">
+      <Grid>
+        <local:ModelView x:Name="View" />
+        <Border x:Name="Busy" IsVisible="False" Background="#B0FFFFFF">
+          <TextBlock x:Name="BusyText" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" />
+        </Border>
+      </Grid>
+    </Border>
+  </DockPanel>
+</Window>
