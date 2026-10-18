@@ -173,14 +173,17 @@ public class McpTests
         var server = new McpServer((_, _, _) => Task.FromResult(new ToolResult("")), () => Task.FromResult<JsonArray?>(app.DeepClone().AsArray()));
         var pipe = new Pipe();
         var output = new StringWriter();
-        var run = server.RunAsync(new StreamReader(pipe.Reader.AsStream()), TextWriter.Synchronized(output), watch: TimeSpan.FromMilliseconds(20));
+        var writer = TextWriter.Synchronized(output);
+        // (read under the writer's own lock: the server writes from another thread while the test looks)
+        string Seen() { lock (writer) return output.ToString(); }
+        var run = server.RunAsync(new StreamReader(pipe.Reader.AsStream()), writer, watch: TimeSpan.FromMilliseconds(20));
         async Task Say(string line) { await pipe.Writer.WriteAsync(System.Text.Encoding.UTF8.GetBytes(line + "\n")); }
         await Say(Request(1, "initialize"));
         await Say("""{"jsonrpc":"2.0","method":"notifications/initialized"}""");
         await Say(Request(2, "tools/list"));
-        for (int i = 0; i < 100 && !output.ToString().Contains("\"id\":2"); i++) await Task.Delay(10);
+        for (int i = 0; i < 500 && !Seen().Contains("\"id\":2"); i++) await Task.Delay(10);
         app.Add(ToolCatalog.ToJson()[1]!.DeepClone());
-        for (int i = 0; i < 200 && !output.ToString().Contains("list_changed"); i++) await Task.Delay(10);
+        for (int i = 0; i < 500 && !Seen().Contains("list_changed"); i++) await Task.Delay(10);
         await pipe.Writer.CompleteAsync();
         await run;
         Assert.Contains(McpServer.ListChanged, output.ToString().Split('\n').Select(l => l.Trim()));
