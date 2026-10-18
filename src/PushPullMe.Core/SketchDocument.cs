@@ -14,7 +14,7 @@ public readonly record struct FaceRef(int Body, int Face);
 /// mesh they were recognised in, or made when a push/pull adds one). Immutable: every change gives a new document,
 /// so undo is a list of documents.
 /// </summary>
-public sealed class SketchDocument
+public sealed partial class SketchDocument
 {
     public required IReadOnlyList<BrepBody> Bodies { get; init; }
 
@@ -229,7 +229,8 @@ public sealed class SketchDocument
         if (checkCrossing && r.FaceMap[f.Face] is >= 0 and var mf && doc.AgainstOpposite(new FaceRef(f.Body, mf)))
             throw new PushPullException(Lang.T("Zo komt het vlak precies tegen de andere kant aan: doorduwen tot een gat kan nog niet.", "That way the face comes exactly against the other side: pushing through to a hole is not possible yet."));
         // pulled against a part of its own (a piece that came apart before, touching along an edge only): one part again
-        if (join && checkCrossing && distance > 0 && doc.JoinTouching(f.Body, changedFaces) is { } joined)
+        // (with the groups, so only parts in the same group join)
+        if (join && checkCrossing && distance > 0 && CarryMeta(this, doc).JoinTouching(f.Body, changedFaces) is { } joined)
             return (joined.Doc, r with { Body = joined.Doc.Bodies[joined.Body], FaceMap = r.FaceMap.Select(_ => -1).ToList() });
         return (doc, r);
     }
@@ -289,7 +290,7 @@ public sealed class SketchDocument
         // a block lying with a face against a solid part (the triangle next to it, pulled from the same loose face before):
         // one part with it, as pulling faces of a block keeps them one; touching only along an edge it stays apart (as
         // DesignSpark). (Only when it is set, not while dragging: a boolean on every move of the mouse is too slow.)
-        if (join && doc.JoinTouching(f.Body, Enumerable.Range(0, td.Bodies[0].Faces.Count)) is { } joined)
+        if (join && CarryMeta(this, doc).JoinTouching(f.Body, Enumerable.Range(0, td.Bodies[0].Faces.Count)) is { } joined)
         {
             map[f.Face] = -1;
             return (joined.Doc, tr with { Body = joined.Doc.Bodies[joined.Body], FaceMap = map });
@@ -309,12 +310,14 @@ public sealed class SketchDocument
         for (int j = 0; j < doc.Bodies.Count; j++)
         {
             if (j == at || doc.Bodies[j].Sheet || region is not { } rg) continue;
+            // (only within the same group: parts in different groups never join, as in SketchUp)
+            if (doc.GroupOf(j) != doc.GroupOf(at)) continue;
             if (Box(doc.AllTriangles().Where(t => t.Face.Body == j).SelectMany(t => t.Triangles)) is not { } other || !Overlap(rg, other)) continue;
             try
             {
                 var (u, made) = doc.Combine(at, j, Booleans.Op.Union);
                 if (made.Count != 1) continue;
-                doc = u; at = made[0]; joined = true;
+                doc = CarryMeta(doc, u); at = made[0]; joined = true;
                 // (start over: the part is larger now, and what it lies against with it)
                 region = Box(doc.AllTriangles().Where(t => t.Face.Body == at).SelectMany(t => t.Triangles));
                 j = -1;
@@ -953,10 +956,17 @@ public sealed class SketchDocument
     /// the colour of the face they came from; flat faces in one plane next to each other merge. Also the bodies the
     /// result is in.
     /// </summary>
+    /// <summary>Two parts in different groups are not combined (as SketchUp keeps a group apart).</summary>
+    private void SameGroup(int a, int b)
+    {
+        if (GroupOf(a) != GroupOf(b))
+            throw new PushPullException(Lang.T("Deze delen liggen in verschillende groepen; open een groep of hef hem op om ze samen te bewerken.", "These parts lie in different groups; open a group or explode it to work on them together."));
+    }
+
     public (SketchDocument Doc, List<int> Bodies) Combine(int a, int b, Booleans.Op op, bool keepSecond = false)
     {
         if (a == b) throw new PushPullException(Lang.T("Kies twee verschillende delen.", "Pick two different parts."));
-        NoSheet(a); NoSheet(b);
+        NoSheet(a); NoSheet(b); SameGroup(a, b);
         return Replace(keepSecond ? [a] : [a, b], [Booleans.Combine(Bodies[a], Bodies[b], op)], a, b);
     }
 
@@ -967,7 +977,7 @@ public sealed class SketchDocument
     public (SketchDocument Doc, List<int> Bodies) Split(int a, int b)
     {
         if (a == b) throw new PushPullException(Lang.T("Kies twee verschillende delen.", "Pick two different parts."));
-        NoSheet(a); NoSheet(b);
+        NoSheet(a); NoSheet(b); SameGroup(a, b);
         var common = Booleans.Combine(Bodies[a], Bodies[b], Booleans.Op.Intersect);
         List<(BrepBody, List<(int, int)>)> Less(int x, int y)
         {
@@ -1159,9 +1169,18 @@ public sealed class SketchDocument
     /// <summary>As a DesignSpark package (exact surfaces).</summary>
     /// <summary>The model as STEP, its main format (see <see cref="StepWriter"/>): the bodies by name ("Vaste vorm 1",
     /// "Oppervlak 2"), the colours painted here and the loose lines (construction lines are aids only: left out).</summary>
-    public string ToStep(string fileName = "model.step") => StepWriter.Write(new StepModel(
-        Bodies.Select((b, i) => new StepBody(b, BodyName(i), i < Colors.Count && Colors[i].Count > 0 ? Colors[i] : null)).ToList(),
-        Lines.Where(l => !l.Construction).Select(l => new StepCurve(l.Start, l.End, l.Circle)).ToList()), fileName);
+    public string ToStep(string fileName = "model.step")
+    {
+        // the groups each before the groups in them (an assembly per group), by index
+        var order = new List<SketchGroup>();
+        void Add(int? parent) { foreach (var g in GroupsIn(parent)) { order.Add(g); Add(g.Id); } }
+        Add(null);
+        var index = order.Select((g, k) => (g.Id, k)).ToDictionary(x => x.Id, x => x.k);
+        return StepWriter.Write(new StepModel(
+            Bodies.Select((b, i) => new StepBody(b, BodyName(i), i < Colors.Count && Colors[i].Count > 0 ? Colors[i] : null, GroupOf(i) is { } g ? index[g] : null)).ToList(),
+            Lines.Where(l => !l.Construction).Select(l => new StepCurve(l.Start, l.End, l.Circle)).ToList(),
+            order.Select(g => new StepGroup(GroupName(g.Id), g.Parent is { } p ? index[p] : null)).ToList()), fileName);
+    }
 
     /// <summary>A body's name: its own (<see cref="Names"/>), or as DesignSpark gives it, numbered: "Vaste vorm 1",
     /// "Oppervlak 2" (a face without thickness).</summary>
@@ -1185,29 +1204,6 @@ public sealed class SketchDocument
     /// <summary>The bodies' own names (null: none), one per body.</summary>
     private List<string?> OwnNames() => Enumerable.Range(0, Bodies.Count).Select(b => b < Names.Count && !string.IsNullOrWhiteSpace(Names[b]) ? Names[b] : null).ToList();
 
-    /// <summary>
-    /// <paramref name="after"/> with the names of <paramref name="before"/> carried over: a body that did not change (the
-    /// same object) keeps its name; one that changed takes the name of the body that was in its place, unless that name
-    /// went to another already (a body joined into another one loses its name, the one it joined keeps its own).
-    /// </summary>
-    public static SketchDocument CarryNames(SketchDocument before, SketchDocument after)
-    {
-        // (a document that already has its names, such as a renamed one, keeps them)
-        if (before.Names.All(n => n == null) || after.Names.Count > 0) return after;
-        var names = new string?[after.Bodies.Count];
-        var used = new HashSet<int>();
-        for (int a = 0; a < after.Bodies.Count; a++)
-            for (int b = 0; b < before.Bodies.Count; b++)
-                if (ReferenceEquals(after.Bodies[a], before.Bodies[b])) { names[a] = b < before.Names.Count ? before.Names[b] : null; used.Add(b); break; }
-        for (int a = 0; a < after.Bodies.Count; a++)
-            if (names[a] == null && a < before.Bodies.Count && !used.Contains(a) && !after.Bodies.Any(x => ReferenceEquals(x, before.Bodies[a])))
-            {
-                names[a] = a < before.Names.Count ? before.Names[a] : null;
-                used.Add(a);
-            }
-        return new SketchDocument { Bodies = after.Bodies, Curved = after.Curved, Colors = after.Colors, Lines = after.Lines, Names = names };
-    }
-
     /// <summary>A STEP file (from here or from another CAD program, see <see cref="StepReader"/>): its bodies, colours and
     /// loose lines. Throws <see cref="StepException"/> when it cannot be read.</summary>
     public static SketchDocument FromStep(string path)
@@ -1221,6 +1217,9 @@ public sealed class SketchDocument
             Colors = m.Bodies.Select(b => (IReadOnlyDictionary<int, uint>)(b.FaceColors ?? new Dictionary<int, uint>())).ToList(),
             Lines = m.Curves.Select(c => c.Arc is { } a ? new SketchLine(c.Start, c.End, a.Centre, a.Normal) : new SketchLine(c.Start, c.End)).ToList(),
             Names = m.Bodies.Select(b => IsStandardName(b.Name) ? null : b.Name).ToList(),
+            // (the file's groups numbered from 1, in its order; a name that is only "Groep n" is none of its own)
+            Groups = m.Groups.Select((g, k) => new SketchGroup(k + 1, IsStandardGroupName(g.Name) ? null : g.Name, g.Parent + 1)).ToList(),
+            BodyGroups = m.Groups.Count > 0 ? m.Bodies.Select(b => b.Group + 1).ToList() : [],
         };
     }
 

@@ -24,6 +24,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
+    <!-- the MCP server an AI assistant starts (its PipeProtocol is shared; its exe lands next to this one) -->
+    <ProjectReference Include="..\PushPullMe.Mcp\PushPullMe.Mcp.csproj" />
     <!-- the converter's window, opened here for a mesh (STL/3MF); its result is taken over in memory -->
     <ProjectReference Include="$(RsConverterDir)tools\StlConverter\StlConverter.csproj" />
   </ItemGroup>

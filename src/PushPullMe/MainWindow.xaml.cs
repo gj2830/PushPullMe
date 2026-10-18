@@ -35,6 +35,16 @@ public partial class MainWindow : Window
 
     private FaceRef? _hover, _selected;
 
+    /// <summary>The group open to work in (as SketchUp's: a double click on it), null: none. What lies outside it is shown
+    /// faded and cannot be picked.</summary>
+    private int? _openGroup;
+
+    /// <summary>The group selected in the structure tree (to keep it in step with the view).</summary>
+    private int? _treeGroup;
+
+    /// <summary>The bodies and groups picked (a group with a click, more with Ctrl+click), for Ctrl+G.</summary>
+    private readonly List<GroupUnit> _pickedUnits = new();
+
     // push/pull in progress: the face, where it was grabbed (mm), its normal, the document it started from
     private FaceRef? _dragFace;
     private Point3D _dragStart;
@@ -82,6 +92,7 @@ public partial class MainWindow : Window
         Lang.English = LoadLanguage();
         InitializeComponent();
         LoadJoin();
+        LoadAssistant();
         BuildStructure();
         XamlTexts.Apply(this);
         LanguageButton.Content = Lang.English ? "🌐  EN" : "🌐  NL";
@@ -198,8 +209,9 @@ public partial class MainWindow : Window
     private void Adopt(SketchDocument doc, string path, (string Title, string Text)? note)
     {
         ClearGuides();
-        _doc = doc; _path = path; _plane = WorkPlane.Ground;
+        _doc = doc; _path = path; _plane = WorkPlane.Ground; _savedDoc = doc;
         _undo.Clear(); _redo.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
+        _openGroup = null; _pickedUnits.Clear();
         UpdateUndoButtons();
         Render(zoom: true);
         FileText.Text = Path.GetFileName(path);
@@ -287,11 +299,17 @@ public partial class MainWindow : Window
             if (path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase)) File.WriteAllBytes(path, _doc.ToStl());
             else if (IsStep(path)) File.WriteAllText(path, _doc.ToStep(Path.GetFileName(path)));
             else _doc.ToRsDocx().Save(path);
-            _path = path; FileText.Text = Path.GetFileName(path);
+            _path = path; FileText.Text = Path.GetFileName(path); _savedDoc = _doc;
             if (_doc.Colors.Any(c => c.Count > 0) && path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase))
             {
                 ShowToast(T("💾 Opgeslagen, zonder kleuren", "💾 Saved, without colours"), Path.GetFileName(path) + T(": een STL kan geen kleuren bevatten. Sla op als .rsdocx om ze te bewaren (DesignSpark ziet ze dan ook).", ": an STL cannot hold colours. Save as .rsdocx to keep them (DesignSpark sees them too)."));
                 Log($"saved {path} (colours left out)");
+                return;
+            }
+            if (_doc.Groups.Count > 0 && !IsStep(path))
+            {
+                ShowToast(T("💾 Opgeslagen, zonder groepen", "💾 Saved, without groups"), Path.GetFileName(path) + T(": groepen worden hierin (nog) niet bewaard. Sla op als STEP om ze te houden.", ": groups are not kept in it (yet). Save as STEP to keep them."));
+                Log($"saved {path} (groups left out)");
                 return;
             }
             ShowToast(T("💾 Opgeslagen", "💾 Saved"), Path.GetFileName(path));
@@ -311,8 +329,8 @@ public partial class MainWindow : Window
     private void Commit(SketchDocument before, SketchDocument after)
     {
         _undo.Add(before); _redo.Clear();
-        // (the bodies' names along: see CarryNames)
-        _doc = SketchDocument.CarryNames(before, after);
+        // (the bodies' names and groups along, a new body into the open group: see CarryMeta)
+        _doc = SketchDocument.CarryMeta(before, after, _openGroup);
         _multi = null;
         _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null;
         UpdateUndoButtons();
@@ -323,6 +341,8 @@ public partial class MainWindow : Window
         if (_undo.Count == 0 || _doc == null) return;
         EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
         _redo.Add(_doc); _doc = _undo[^1]; _undo.RemoveAt(_undo.Count - 1);
+        if (_openGroup is { } og && _doc.Group(og) == null) _openGroup = null;
+        _pickedUnits.Clear();
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         Render();
         UpdateUndoButtons();
@@ -335,6 +355,8 @@ public partial class MainWindow : Window
         if (_redo.Count == 0 || _doc == null) return;
         EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
         _undo.Add(_doc); _doc = _redo[^1]; _redo.RemoveAt(_redo.Count - 1);
+        if (_openGroup is { } og && _doc.Group(og) == null) _openGroup = null;
+        _pickedUnits.Clear();
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         Render();
         UpdateUndoButtons();
@@ -378,6 +400,8 @@ public partial class MainWindow : Window
         {
             var body = doc.Bodies[b];
             if (_hidden.Contains(body)) continue;
+            // (outside the open group: faded, and not to be picked)
+            bool outside = Outside(b);
             // one mesh per colour painted on the body (null: the standard colour)
             var byColor = new Dictionary<uint, (HelixToolkit.Vector3Collection Pos, HelixToolkit.Vector3Collection Nor, List<int> Map)>();
             const uint Standard = 0;
@@ -405,6 +429,11 @@ public partial class MainWindow : Window
             {
                 if (pos.Count == 0) continue;
                 var mesh = new DxMesh { Positions = pos, Normals = nor, TriangleIndices = new HelixToolkit.IntCollection(Enumerable.Range(0, pos.Count)) };
+                if (outside)
+                {
+                    ModelHost.Children.Add(new MeshGeometryModel3D { Geometry = mesh, Material = Phong(Color.FromArgb(0x38, FrontColor.R, FrontColor.G, FrontColor.B)), IsTransparent = true, CullMode = SharpDX.Direct3D11.CullMode.Back, FrontCounterClockwise = true, IsHitTestVisible = false });
+                    continue;
+                }
                 ModelHost.Children.Add(new MeshGeometryModel3D { Geometry = mesh, Material = key == Standard ? front : Phong(Argb(key)), CullMode = SharpDX.Direct3D11.CullMode.Back, FrontCounterClockwise = true });
                 // the inside (seen through a hole or a cut): the back colour, the triangles turned round
                 var backIdx = new HelixToolkit.IntCollection(pos.Count);
@@ -426,7 +455,7 @@ public partial class MainWindow : Window
         for (int b = 0; b < doc.Bodies.Count; b++)
         {
             var body = doc.Bodies[b];
-            if (_hidden.Contains(body)) continue;
+            if (_hidden.Contains(body) || Outside(b)) continue;
             var curvedUses = new int[body.Edges.Count];
             foreach (var face in body.Faces.Where(f => f.Surface is not BrepPlane))
                 foreach (var c in face.Loops.SelectMany(l => l)) curvedUses[c.Edge]++;
@@ -451,6 +480,10 @@ public partial class MainWindow : Window
             ZoomAll(0);
         }
     }
+
+    /// <summary>Whether body <paramref name="b"/> lies outside the open group (shown faded, not to be picked); by the
+    /// document worked on, so a preview (made without the groups) shows the same.</summary>
+    private bool Outside(int b) => _openGroup != null && _doc != null && b < _doc.Bodies.Count && _doc.UnitOf(b, _openGroup) == null;
 
     /// <summary>The outward normal to shade a point of a face with: of the surface where it is round, of the plane or
     /// the triangle otherwise.</summary>
@@ -488,6 +521,9 @@ public partial class MainWindow : Window
             });
         }
         if (_selected is { } s) Add(s, SelectColor, 0.35);
+        foreach (var u in _pickedUnits)
+            foreach (int pb in _doc.BodiesOf(u))
+                if (pb < doc.Bodies.Count) for (int pf2 = 0; pf2 < doc.Bodies[pb].Faces.Count; pf2++) Add(new FaceRef(pb, pf2), SelectColor, 0.25);
         if (_multi is { } mu) foreach (int mf in mu.Faces) if (_selected is not { } sel || sel != new FaceRef(mu.Body, mf)) Add(new FaceRef(mu.Body, mf), SelectColor, 0.35);
         if (_dragFace is { } dfc && _dragValid && _previewFace is { } pf) Add(pf, SelectColor, 0.3);
         else if (_drawFace is { } df) Add(df, SelectColor, 0.15);
@@ -496,6 +532,13 @@ public partial class MainWindow : Window
         if (_dragFace != null && _snapBase is { } sb)
             Add(_previewMap != null && _dragValid && sb.Body == _dragFace.Value.Body && sb.Face < _previewMap.Count ? new FaceRef(sb.Body, _previewMap[sb.Face]) : sb, HoverColor, 0.45);
         // (the structure tree shows what is picked too)
+        int? pickedGroup = _pickedUnits.Count == 1 ? _pickedUnits[0].Group : null;
+        if (pickedGroup != null)
+        {
+            if (pickedGroup != _treeGroup) { _treeGroup = pickedGroup; _treePicked = (null, null); _structure?.SelectGroup(pickedGroup); }
+            return;
+        }
+        _treeGroup = null;
         (int?, int?) picked = _selected is { } ps ? (ps.Body, ps.Face) : _multi is { } pm && ReferenceEquals(doc, _doc) && pm.Body < doc.Bodies.Count && pm.Faces.Count == doc.Bodies[pm.Body].Faces.Count ? (pm.Body, null) : (null, null);
         if (picked != _treePicked) { _treePicked = picked; _structure?.Select(picked.Item1, picked.Item2); }
     }
@@ -875,8 +918,131 @@ public partial class MainWindow : Window
 
     private void View_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        // (a double click with ↖: a group opened, or beside it closed)
+        if (e.ClickCount == 2 && DoubleClickAt(e.GetPosition(View.Viewport))) { e.Handled = true; return; }
         if (PressAt(e.GetPosition(View.Viewport))) e.Handled = true;
     }
+
+    // ------------------------------------------------------------------ groups (as SketchUp's)
+
+    /// <summary>Tools that change faces: inside a group only (a closed one is taken as a whole).</summary>
+    private bool EditsFaces => PushMode || DrawMode || PolygonMode || ArcMode || Arc3Mode || CentreArcMode || PieMode || RotRectMode
+        || FreehandMode || OffsetMode || RoundMode || EraserMode || FollowMode || BoolMode != null;
+
+    /// <summary>
+    /// A click where a group is (as SketchUp): with ↖ the whole group picked (Ctrl: a group or body added to what is
+    /// picked, or taken off it); a tool that changes faces does nothing on a closed group (it says to open it); moving,
+    /// turning, scaling, mirroring and painting take the whole group (see <see cref="Whole"/>). Whether it was used.
+    /// </summary>
+    private bool GroupClick(Point pos)
+    {
+        if (_doc is not { } doc) return false;
+        bool select = SelectTool.IsChecked == true;
+        var unit = FaceAt(pos) is { } h ? doc.UnitOf(h.Face.Body, _openGroup) : null;
+        if (select && (Mods & ModifierKeys.Control) != 0 && unit is { } cu)
+        {
+            // (the body picked with a plain click before goes along)
+            if (_pickedUnits.Count == 0 && (_selected?.Body ?? _multi?.Body) is int sb && doc.UnitOf(sb, _openGroup) is { } su && su != cu) _pickedUnits.Add(su);
+            if (!_pickedUnits.Remove(cu)) _pickedUnits.Add(cu);
+            _selected = null; _multi = null; UpdateHighlight();
+            StatusText.Text = T($"📦 {_pickedUnits.Count} gekozen. Ctrl+G maakt er een groep van; Ctrl+klik: erbij of eraf.", $"📦 {_pickedUnits.Count} picked. Ctrl+G makes a group of them; Ctrl+click: add or take off.");
+            return true;
+        }
+        if (unit is not { Group: { } g })
+        {
+            if (select && _pickedUnits.Count > 0) { _pickedUnits.Clear(); UpdateHighlight(); }
+            return false;
+        }
+        string name = doc.GroupName(g);
+        if (select)
+        {
+            _pickedUnits.Clear(); _pickedUnits.Add(unit.Value);
+            _selected = null; _multi = null; UpdateHighlight();
+            StatusText.Text = T($"📦 {name} ({doc.Members(g).Count} lichamen): dubbelklik om erin te werken · Ctrl+Shift+G heft de groep op.", $"📦 {name} ({doc.Members(g).Count} bodies): double click to work in it · Ctrl+Shift+G explodes the group.");
+            return true;
+        }
+        if (EditsFaces)
+        {
+            StatusText.Text = T($"📦 {name} is een groep: dubbelklik erop met ↖ om erin te werken.", $"📦 {name} is a group: double click it with ↖ to work in it.");
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>A double click (with ↖): a closed group opened, beside the open group (on nothing, or outside it) that one
+    /// closed. Whether it was used.</summary>
+    private bool DoubleClickAt(Point pos)
+    {
+        if (_doc is not { } doc || SelectTool.IsChecked != true || ActionBusy) return false;
+        var unit = FaceAt(pos) is { } h ? doc.UnitOf(h.Face.Body, _openGroup) : null;
+        if (unit is { Group: { } g }) { OpenGroup(g); return true; }
+        if (unit == null && _openGroup != null) { CloseGroup(); return true; }
+        return false;
+    }
+
+    private void OpenGroup(int g)
+    {
+        _openGroup = g; _pickedUnits.Clear(); _selected = null; _multi = null; _hover = null;
+        Render();
+        // (in the structure tree: unfolded to it)
+        _treeGroup = g; _structure?.SelectGroup(g);
+        StatusText.Text = T($"📦 In {_doc!.GroupName(g)}: wat je nu maakt komt erin. Esc of dubbelklik ernaast sluit hem.", $"📦 In {_doc!.GroupName(g)}: what you make now goes into it. Esc or a double click beside it closes it.");
+        Log($"open group {g}");
+    }
+
+    /// <summary>The open group closed (one level: the group it is in is open then).</summary>
+    private void CloseGroup()
+    {
+        if (_openGroup is not { } g || _doc == null) return;
+        _openGroup = _doc.Group(g)?.Parent;
+        _pickedUnits.Clear(); _pickedUnits.Add(GroupUnit.OfGroup(g)); _selected = null; _multi = null; _hover = null;
+        Render();
+        StatusText.Text = _openGroup is { } up ? T($"📦 Terug in {_doc.GroupName(up)}.", $"📦 Back in {_doc.GroupName(up)}.") : T("📦 Groep gesloten.", "📦 Group closed.");
+        Log($"close group {g}");
+    }
+
+    /// <summary>Ctrl+G: a group of what is picked (or of the body picked).</summary>
+    private void MakeGroupOfPicked()
+    {
+        if (_doc is not { } before) return;
+        var units = _pickedUnits.ToList();
+        if (units.Count == 0 && (_selected?.Body ?? _multi?.Body) is int b && before.UnitOf(b, _openGroup) is { } u) units.Add(u);
+        try
+        {
+            var (doc, g) = before.MakeGroup(units);
+            Commit(before, doc);
+            _pickedUnits.Clear(); _pickedUnits.Add(GroupUnit.OfGroup(g)); _selected = null; _multi = null;
+            Render();
+            StatusText.Text = T($"📦 {doc.GroupName(g)} gemaakt ({doc.Members(g).Count} lichamen). Dubbelklik om erin te werken.", $"📦 {doc.GroupName(g)} made ({doc.Members(g).Count} bodies). Double click to work in it.");
+            Log($"make group {g} of {string.Join(",", units.Select(x => x.Group is { } gg ? $"group {gg}" : $"body {x.Body}"))}");
+        }
+        catch (PushPullException ex) { StatusText.Text = "⛔ " + ex.Message; }
+    }
+
+    /// <summary>Ctrl+Shift+G: the group picked (or else the open one) taken away; what was in it stays, picked.</summary>
+    private void UngroupPicked()
+    {
+        if (_doc is not { } before) return;
+        int? g = _pickedUnits.Count == 1 && _pickedUnits[0].Group is { } pg ? pg : _openGroup;
+        if (g is not { } id) { StatusText.Text = T("📦 Kies eerst een groep (klik erop met ↖).", "📦 First pick a group (click it with ↖)."); return; }
+        string name = before.GroupName(id);
+        if (_openGroup == id) _openGroup = before.Group(id)?.Parent;
+        var doc = before.Ungroup(id);
+        Commit(before, doc);
+        _pickedUnits.Clear();
+        foreach (var x in before.Members(id).Select(b => doc.UnitOf(b, _openGroup)).OfType<GroupUnit>().Distinct()) _pickedUnits.Add(x);
+        Render();
+        StatusText.Text = T($"📦 {name} opgeheven.", $"📦 {name} exploded.");
+        Log($"explode group {id}");
+    }
+
+    /// <summary>A whole-body change (turn, scale, mirror, move; with whether to copy) of body <paramref name="body"/>: of
+    /// its whole group when it lies in a closed one.</summary>
+    private SketchDocument Whole(SketchDocument d, int body, bool copy, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op) =>
+        d.UnitOf(body, _openGroup) is { Group: { } g } ? d.TransformGroup(g, op, copy).Doc : op(d, body, copy).Doc;
+
+    /// <summary>The group a body is taken with (it lies in a closed one), or null.</summary>
+    private int? GroupTaken(int body) => _doc?.UnitOf(body, _openGroup)?.Group;
 
     /// <summary>The left button down at a point of the view; whether it was used.</summary>
     private bool PressAt(Point at)
@@ -916,6 +1082,7 @@ public partial class MainWindow : Window
     private bool ClickAt(Point pos)
     {
         bool handled = false;
+        if (!ActionBusy && GroupClick(pos)) return true;
         if (_movePick != null) { handled = true; MoveTo(pos); FinishMove(); return handled; }
         if (_dragFace != null) { handled = true; Finish(_dragDist); return handled; }
         if (_drawFace != null) { handled = true; DrawTo(pos); FinishDraw(); return handled; }
@@ -1072,6 +1239,47 @@ public partial class MainWindow : Window
             RefreshStructure();
             StatusText.Text = T($"🌲 {old} heet nu {_doc!.BodyName(b)}.", $"🌲 {old} is now called {_doc!.BodyName(b)}.");
             Log($"rename body {b}: {_doc.BodyName(b)}");
+        };
+        _structure.GroupPicked += g =>
+        {
+            if (_doc?.Group(g) == null) return;
+            _pickedUnits.Clear(); _pickedUnits.Add(GroupUnit.OfGroup(g)); _treeGroup = g;
+            _selected = null; _multi = null;
+            UpdateHighlight();
+            StatusText.Text = T($"🌲 📦 {_doc.GroupName(g)} ({_doc.Members(g).Count} lichamen).", $"🌲 📦 {_doc.GroupName(g)} ({_doc.Members(g).Count} bodies).");
+        };
+        _structure.GroupRenamed += (g, name) =>
+        {
+            if (_doc is not { } before || before.Group(g) == null) return;
+            string old = before.GroupName(g);
+            Commit(before, before.RenameGroup(g, name));
+            RefreshStructure();
+            StatusText.Text = T($"🌲 {old} heet nu {_doc!.GroupName(g)}.", $"🌲 {old} is now called {_doc!.GroupName(g)}.");
+            Log($"rename group {g}: {_doc.GroupName(g)}");
+        };
+        _structure.GroupMenu += (what, g, b) =>
+        {
+            if (_doc == null) return;
+            switch (what)
+            {
+                case GroupAction.Open when g is { } og:
+                    // (a group inside another: those round it open too)
+                    OpenGroup(og);
+                    break;
+                case GroupAction.Explode when g is { } eg:
+                    _pickedUnits.Clear(); _pickedUnits.Add(GroupUnit.OfGroup(eg));
+                    UngroupPicked();
+                    break;
+                case GroupAction.Make:
+                    // (the body the menu was on, with what is picked when it lies in the same group)
+                    if (b is int mb && mb < _doc.Bodies.Count)
+                    {
+                        var unit = GroupUnit.OfBody(mb);
+                        if (!_pickedUnits.Contains(unit)) { if (_pickedUnits.Any(u => (u.Group is { } ug ? _doc.Group(ug)?.Parent : _doc.GroupOf(u.Body!.Value)) != _doc.GroupOf(mb))) _pickedUnits.Clear(); _pickedUnits.Add(unit); }
+                    }
+                    MakeGroupOfPicked();
+                    break;
+            }
         };
         _structure.SketchShown += (k, shown) =>
         {
@@ -1854,6 +2062,9 @@ public partial class MainWindow : Window
     // a move in progress: what is picked up (body, selection, a word for it), where it was grabbed, the document it
     // started from, the axis it is held to (by an arrow key), the offset now and whether that works
     private (int Body, MoveSelection Pick, string What)? _movePick;
+
+    /// <summary>The group moved as a whole (picked in a closed one), or null.</summary>
+    private int? _moveGroup;
     private Vec3 _moveGrab;
     private SketchDocument? _moveBase;
     private int? _moveAxis;
@@ -1865,13 +2076,17 @@ public partial class MainWindow : Window
     private ModifierKeys? _simMods;
 
     /// <summary>The last move: typing a distance right after it changes it (as with Push/Pull).</summary>
-    private (SketchDocument Before, int Body, MoveSelection Pick, Vec3 Dir)? _lastMove;
+    private (SketchDocument Before, int Body, MoveSelection Pick, Vec3 Dir, int? Group)? _lastMove;
 
     /// <summary>What the mouse points at to move: a corner of the face under it (within 10 pixels), else an edge of it
     /// (within 8), else the face; with the point it is grabbed at.</summary>
     private (int Body, MoveSelection Pick, string What, Vec3 Grab)? MovePickAt((FaceRef Face, Point3D Point)? hit, Point pos)
     {
         if (hit is not { } h || _doc == null) return null;
+        // (in a closed group: the whole group, Ctrl a copy of it)
+        if (GroupTaken(h.Face.Body) is { } mg)
+            return (h.Face.Body, (Mods & ModifierKeys.Control) != 0 ? MoveSelection.Copy() : MoveSelection.WholeBody(),
+                (Mods & ModifierKeys.Control) != 0 ? T($"geheel ({_doc.GroupName(mg)}, als kopie)", $"whole ({_doc.GroupName(mg)}, as a copy)") : T($"geheel ({_doc.GroupName(mg)})", $"whole ({_doc.GroupName(mg)})"), V(h.Point));
         // Ctrl: a copy of the whole body (as SketchUp's Move with Ctrl); Shift: the whole body
         if ((Mods & ModifierKeys.Control) != 0) return (h.Face.Body, MoveSelection.Copy(), T("lichaam (als kopie)", "body (as a copy)"), V(h.Point));
         if ((Mods & ModifierKeys.Shift) != 0) return (h.Face.Body, MoveSelection.WholeBody(), T("lichaam", "body"), V(h.Point));
@@ -1927,7 +2142,7 @@ public partial class MainWindow : Window
     private void StartMove((FaceRef Face, Point3D Point)? hit, Point pos)
     {
         if (MovePickAt(hit, pos) is not { } p || _doc == null) return;
-        _movePick = (p.Body, p.Pick, p.What); _moveGrab = p.Grab; _moveBase = _doc; _moveAxis = null;
+        _movePick = (p.Body, p.Pick, p.What); _moveGrab = p.Grab; _moveBase = _doc; _moveAxis = null; _moveGroup = GroupTaken(p.Body);
         _moveOffset = default; _moveValid = false; _typed = ""; _last = null; _lastMove = null; _selected = null;
         if (p.Pick.Faces.Count > 0) _hover = new FaceRef(p.Body, p.Pick.Faces.First());
         UpdateHighlight();
@@ -1937,7 +2152,7 @@ public partial class MainWindow : Window
 
     private void EndMove()
     {
-        _movePick = null; _moveBase = null; _moveAxis = null; _moveValid = false;
+        _movePick = null; _moveBase = null; _moveAxis = null; _moveValid = false; _moveGroup = null;
         ShowSketch([]);
     }
 
@@ -1957,6 +2172,8 @@ public partial class MainWindow : Window
         if (_moveAxis == null)
         {
             var body = _moveBase.Bodies[mp.Body];
+            // (a group moved: none of the corners of its bodies)
+            var groupMoving = _moveGroup is { } mvg && mp.Pick.Whole == MoveWhole.Body ? _moveBase.Members(mvg).ToHashSet() : [];
             // (the whole body: none of its corners; a copy: the original stays, its corners are fine)
             var moving = mp.Pick.Whole == MoveWhole.Body ? Enumerable.Range(0, body.Vertices.Count).ToHashSet() : mp.Pick.Vertices.Concat(mp.Pick.Edges.Select(e => body.Edges[e]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End }))
                 .Concat(mp.Pick.Faces.SelectMany(f => body.Faces[f].Loops.SelectMany(l => l)).Select(c => body.Edges[c.Edge]).Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End })).ToHashSet();
@@ -1964,7 +2181,7 @@ public partial class MainWindow : Window
             for (int bi = 0; bi < _moveBase.Bodies.Count; bi++)
                 for (int vi = 0; vi < _moveBase.Bodies[bi].Vertices.Count; vi++)
                 {
-                    if (bi == mp.Body && moving.Contains(vi)) continue;
+                    if ((bi == mp.Body && moving.Contains(vi)) || groupMoving.Contains(bi)) continue;
                     var v = _moveBase.Bodies[bi].Vertices[vi];
                     double px = (Screen(v) - pos).Length;
                     if (px < 12 && (near == null || px < near.Value.Px)) near = (v, px);
@@ -2020,7 +2237,7 @@ public partial class MainWindow : Window
         if (offset.Length < 1e-9) { _moveValid = false; Render(_moveBase); return; }
         try
         {
-            var (doc, _) = _moveBase.Move(mp.Body, mp.Pick, offset, checkCrossing: false);
+            var doc = MoveDoc(_moveBase, mp.Body, mp.Pick, offset, _moveGroup, checkCrossing: false);
             _moveValid = true;
             Render(doc);
             StatusText.Text = T($"✥ {Mm(offset.Length)} mm{(axis is int ax ? " langs de " + Axes[ax].Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · klik om neer te zetten, of typ de afstand + Enter. Esc breekt af.", $"✥ {Mm(offset.Length)} mm{(axis is int ax2 ? " along the " + Axes[ax2].Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · click to put it down, or type the distance + Enter. Esc cancels.");
@@ -2031,13 +2248,19 @@ public partial class MainWindow : Window
     private void FinishMove()
     {
         if (_movePick is not { } mp || _moveBase is not { } before) return;
-        var offset = _moveOffset;
+        var offset = _moveOffset; int? group = _moveGroup;
         EndMove();
         if (offset.Length < 1e-9) { Render(); return; }
-        ApplyMove(before, mp.Body, mp.Pick, offset, replaceLast: false);
+        ApplyMove(before, mp.Body, mp.Pick, offset, replaceLast: false, group);
     }
 
-    private void ApplyMove(SketchDocument before, int body, MoveSelection pick, Vec3 offset, bool replaceLast)
+    /// <summary>A move (see <see cref="SketchDocument.Move(int, MoveSelection, Vec3, bool)"/>), of a whole group when
+    /// <paramref name="group"/> is set.</summary>
+    private static SketchDocument MoveDoc(SketchDocument d, int body, MoveSelection pick, Vec3 offset, int? group, bool checkCrossing) =>
+        group is { } g ? d.TransformGroup(g, (x, b, c) => x.MoveBody(b, offset, c), pick.Whole == MoveWhole.Copy).Doc
+            : d.Move(body, pick, offset, checkCrossing).Doc;
+
+    private void ApplyMove(SketchDocument before, int body, MoveSelection pick, Vec3 offset, bool replaceLast, int? group = null)
     {
         string what = pick.Whole == MoveWhole.Copy ? "copy" : pick.Whole == MoveWhole.Body ? "all"
             : pick.Faces.Count > 1 ? $"faces {string.Join(",", pick.Faces)}"
@@ -2045,10 +2268,10 @@ public partial class MainWindow : Window
         string off = string.Create(CultureInfo.InvariantCulture, $"{offset.X * Display:0.###},{offset.Y * Display:0.###},{offset.Z * Display:0.###}");
         try
         {
-            var (doc, r) = before.Move(body, pick, offset);
-            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            var doc = MoveDoc(before, body, pick, offset, group, checkCrossing: true);
+            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
             else Commit(before, doc);
-            _lastMove = (before, body, pick, offset.Normalized());
+            _lastMove = (before, body, pick, offset.Normalized(), group);
             _last = null; _selected = null;
             Render();
             MeasureBox.Text = Mm(offset.Length);
@@ -2598,7 +2821,9 @@ public partial class MainWindow : Window
             return;
         }
         var body = before.Bodies[h.Face.Body];
-        IEnumerable<FaceRef> faces = (mods & ModifierKeys.Control) != 0
+        IEnumerable<FaceRef> faces = GroupTaken(h.Face.Body) is { } pg
+            ? before.Members(pg).SelectMany(b => Enumerable.Range(0, before.Bodies[b].Faces.Count).Select(f => new FaceRef(b, f)))
+            : (mods & ModifierKeys.Control) != 0
             ? Enumerable.Range(0, body.Faces.Count).Select(f => new FaceRef(h.Face.Body, f))
             : (mods & ModifierKeys.Shift) != 0
                 ? Enumerable.Range(0, body.Faces.Count).Select(f => new FaceRef(h.Face.Body, f)).Where(f => before.ColorOf(f) == before.ColorOf(h.Face))
@@ -2970,7 +3195,7 @@ public partial class MainWindow : Window
         try
         {
             var (doc, r) = before.PushPull(f, dist, join: Join);
-            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
             else Commit(before, doc);
             _last = (before, f, dist);
             _selected = r.FaceMap[f.Face] >= 0 ? new FaceRef(f.Body, r.FaceMap[f.Face]) : null;
@@ -4604,7 +4829,7 @@ public partial class MainWindow : Window
         _mirrorBody = null;
         try
         {
-            var (doc, _) = before.MirrorBody(body, origin, n, copy);
+            var doc = Whole(before, body, copy, (md, mb, mc) => md.MirrorBody(mb, origin, n, mc));
             Commit(before, doc);
             _last = null; _lastMove = null; _selected = null; _hover = null;
             Render();
@@ -4789,7 +5014,7 @@ public partial class MainWindow : Window
         ShowSketch([_scFixed, _scFixed + (_scGrab - _scFixed) * f], default, color: axisColor);
         try
         {
-            var (doc, _) = _scBase.ScaleBody(_scBody, _scFixed, f, _scAxis, _scCopy);
+            var doc = Whole(_scBase, _scBody, _scCopy, (sd, sb, sc) => sd.ScaleBody(sb, _scFixed, f, _scAxis, sc));
             _scOk = true;
             Render(doc);
             StatusText.Text = T($"⇲ {f.ToString("0.##", CultureInfo.CurrentCulture)}×{(axisName != null ? " langs de " + axisName : "")} · klik om vast te zetten, of typ de factor + Enter. Pijltjes: langs één as. Esc breekt af.", $"⇲ {f.ToString("0.##", CultureInfo.CurrentCulture)}×{(axisName != null ? " along the " + axisName : "")} · click to set it, or type the factor + Enter. Arrow keys: along one axis. Esc cancels.");
@@ -4817,8 +5042,8 @@ public partial class MainWindow : Window
     {
         try
         {
-            var (doc, _) = before.ScaleBody(body, fixedPoint, factor, along, copy);
-            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            var doc = Whole(before, body, copy, (sd, sb, sc) => sd.ScaleBody(sb, fixedPoint, factor, along, sc));
+            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
             else Commit(before, doc);
             _lastScale = (before, body, fixedPoint, along, copy);
             _last = null; _lastMove = null; _selected = null;
@@ -4857,7 +5082,7 @@ public partial class MainWindow : Window
         var face = _doc.Bodies[h.Face.Body].Faces[h.Face.Face];
         // close to a straight edge of a flat face: that face tilts round the edge (its neighbours follow)
         _rotTilt = null;
-        if (face.Surface is BrepPlane && EdgeAt(hit, pos) is { } he && he.Body == h.Face.Body
+        if (face.Surface is BrepPlane && GroupTaken(h.Face.Body) == null && EdgeAt(hit, pos) is { } he && he.Body == h.Face.Body
             && _doc.Bodies[he.Body].Edges[he.Edge] is { Curve: BrepLine, Start: >= 0 } hinge && ScreenDistanceToEdge(_doc.Bodies[he.Body], he.Edge, pos) < 8)
         {
             var bd = _doc.Bodies[he.Body];
@@ -4956,7 +5181,7 @@ public partial class MainWindow : Window
         try
         {
             var doc = _rotTilt is { } tf ? _rotBase.Tilt(tf, _rotCentre, _rotAxis, _rotAngle, checkCrossing: false).Doc
-                : _rotBase.RotateBody(_rotBody, _rotCentre, _rotAxis, _rotAngle, _rotCopy).Doc;
+                : Whole(_rotBase, _rotBody, _rotCopy, (rd, rb, rc) => rd.RotateBody(rb, _rotCentre, _rotAxis, _rotAngle, rc));
             _rotOk = true;
             Render(doc);
             StatusText.Text = T($"↻ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 && deg != 0 ? " · 🎯 15°-stap" : "")} · klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.", $"↻ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 && deg != 0 ? " · 🎯 15° step" : "")} · click to set it, or type the angle + Enter. Esc cancels.");
@@ -4987,8 +5212,8 @@ public partial class MainWindow : Window
         double deg = angle * 180 / Math.PI;
         try
         {
-            var doc = tilt is { } tf ? before.Tilt(tf, centre, axis, angle).Doc : before.RotateBody(body, centre, axis, angle, copy).Doc;
-            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            var doc = tilt is { } tf ? before.Tilt(tf, centre, axis, angle).Doc : Whole(before, body, copy, (rd, rb, rc) => rd.RotateBody(rb, centre, axis, angle, rc));
+            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
             else Commit(before, doc);
             _lastRotate = (before, body, centre, axis, copy, Math.Sign(angle) == 0 ? 1 : Math.Sign(angle), tilt);
             _last = null; _lastMove = null; _selected = null;
@@ -5151,7 +5376,7 @@ public partial class MainWindow : Window
         try
         {
             var (doc, faces) = before.RoundEdges(body, edges, radius);
-            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
             else Commit(before, doc);
             _last = null; _lastMove = null;
             _lastRound = (before, body, edges, radius);
@@ -5250,7 +5475,7 @@ public partial class MainWindow : Window
         try
         {
             var (doc, inner) = before.Offset(f, dist);
-            if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
+            if (replaceLast) { _doc = SketchDocument.CarryMeta(before, doc, _openGroup); _redo.Clear(); UpdateUndoButtons(); }
             else Commit(before, doc);
             _last = null; _lastMove = null;
             _lastOffset = (before, f, dist);
@@ -5307,6 +5532,11 @@ public partial class MainWindow : Window
         if (ctrl && e.Key == Key.Y) { Redo(); e.Handled = true; return; }
         if (ctrl && e.Key == Key.O) { _ = OpenDialog(); e.Handled = true; return; }
         if (ctrl && e.Key == Key.S) { Save_Click(this, new RoutedEventArgs()); e.Handled = true; return; }
+        if ((Mods & ModifierKeys.Control) != 0 && e.Key == Key.G && Keyboard.FocusedElement is not TextBox)
+        {
+            if ((Mods & ModifierKeys.Shift) != 0) UngroupPicked(); else MakeGroupOfPicked();
+            e.Handled = true; return;
+        }
         // (typing a label or a name in the structure tree: the keys are the box's)
         if (Keyboard.FocusedElement is TextBox) return;
         if (ctrl) return;
@@ -5352,6 +5582,8 @@ public partial class MainWindow : Window
                 else if (_mirrorBody != null) { _mirrorBody = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_typed.Length > 0) { _typed = ""; MeasureBox.Text = ""; }
                 else if (_multi != null) { _multi = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Keuze leeg.", "Selection cleared."); }
+                else if (_pickedUnits.Count > 0) { _pickedUnits.Clear(); UpdateHighlight(); StatusText.Text = T("Keuze leeg.", "Selection cleared."); }
+                else if (_openGroup != null) CloseGroup();
                 e.Handled = true;
                 break;
             case Key.Back when _typed.Length > 0:
@@ -5399,7 +5631,9 @@ public partial class MainWindow : Window
                 // the plane through the middle of the body, square to red, green or blue
                 int body = _mirrorBody.Value;
                 var dir = Axes[e.Key switch { Key.Right => 0, Key.Left => 1, _ => 2 }].Dir;
-                var pts = _doc!.AllTriangles().Where(x => x.Face.Body == body).SelectMany(x => x.Triangles).SelectMany(t => new[] { t.A, t.B, t.C }).ToList();
+                // (of the whole group when it is in a closed one)
+                var those = GroupTaken(body) is { } mgr ? _doc!.Members(mgr).ToHashSet() : [body];
+                var pts = _doc!.AllTriangles().Where(x => those.Contains(x.Face.Body)).SelectMany(x => x.Triangles).SelectMany(t => new[] { t.A, t.B, t.C }).ToList();
                 var lo = new Vec3(pts.Min(q => q.X), pts.Min(q => q.Y), pts.Min(q => q.Z)); var hi = new Vec3(pts.Max(q => q.X), pts.Max(q => q.Y), pts.Max(q => q.Z));
                 MirrorBodyIn(body, (lo + hi) * 0.5, dir, "its middle");
                 e.Handled = true;
@@ -5584,13 +5818,14 @@ public partial class MainWindow : Window
             // along the way it is going now (or the axis held)
             var d = _moveAxis is int ax ? Axes[ax].Dir * (_moveOffset.Dot(Axes[ax].Dir) < 0 ? -1 : 1) : _moveOffset.Length > 1e-12 ? _moveOffset.Normalized() : default;
             if (d.Length < 0.5) { StatusText.Text = T("✥ Beweeg eerst de muis in de richting om te verplaatsen.", "✥ First move the mouse in the direction to move."); return; }
+            int? group = _moveGroup;
             EndMove();
-            ApplyMove(mb, mp.Body, mp.Pick, d * Math.Abs(dist), replaceLast: false);
+            ApplyMove(mb, mp.Body, mp.Pick, d * Math.Abs(dist), replaceLast: false, group);
             return;
         }
         if (_dragFace == null && _lastMove is { } lm)
         {
-            ApplyMove(lm.Before, lm.Body, lm.Pick, lm.Dir * (dist < 0 ? -1 : 1) * Math.Abs(dist), replaceLast: true);
+            ApplyMove(lm.Before, lm.Body, lm.Pick, lm.Dir * (dist < 0 ? -1 : 1) * Math.Abs(dist), replaceLast: true, lm.Group);
             return;
         }
         if (_dragFace is { } f && _dragBase is { } before)
@@ -5782,6 +6017,7 @@ public partial class MainWindow : Window
                 case "move": MouseMoveAt(Screen()); break;
                 case "mods": _simMods = arg switch { "ctrl" => ModifierKeys.Control, "shift" => ModifierKeys.Shift, "ctrl+shift" => ModifierKeys.Control | ModifierKeys.Shift, _ => null }; break;
                 case "click": ClickAt(Screen()); break;
+                case "dblclick": if (!DoubleClickAt(Screen())) ClickAt(Screen()); break;
                 case "down": PressAt(Screen()); break;
                 case "up": ReleaseAt(Screen()); break;
                 case "probe":

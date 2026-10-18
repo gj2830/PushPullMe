@@ -59,6 +59,24 @@ the converter with `git submodule update --init`.
 
 Tests: `dotnet test tests/PushPullMe.Tests`.
 
+## Working with an AI assistant (MCP)
+
+PushPullMe can let an AI assistant work along in its window through the
+[Model Context Protocol](https://modelcontextprotocol.io): any MCP client (Claude Code, Claude Desktop, VS Code, Cursor,
+…) can look at the model and change it: push/pull, draw, move, group, paint, open and save, and take a picture of the
+view. It is **off** until you tick **🤖 AI assistant may work along** (bottom right). You see everything it does in the
+status bar, and every change can be undone (Ctrl+Z); before opening over unsaved work or overwriting a file it asks you.
+It only listens on your own PC, to your own Windows account (a named pipe; no network port).
+
+The MCP server is `PushPullMe.Mcp.exe`, next to `PushPullMe.exe` (stdio transport). Tell your client to start it:
+
+- **Claude Code**: in this folder `.mcp.json` already does (built Release); elsewhere
+  `claude mcp add pushpullme -- "C:\path\to\PushPullMe.Mcp.exe"`.
+- **Claude Desktop** (`claude_desktop_config.json`):
+  `{"mcpServers": {"pushpullme": {"command": "C:\\path\\to\\PushPullMe.Mcp.exe"}}}`.
+- **VS Code** (`.vscode/mcp.json`):
+  `{"servers": {"pushpullme": {"type": "stdio", "command": "C:\\path\\to\\PushPullMe.Mcp.exe"}}}`.
+
 ## Nederlands
 
 Een speels tekenprogramma voor 3D-vormen in de stijl van SketchUp, met de gewoontes van DesignSpark Mechanical. Het
@@ -77,6 +95,10 @@ hoeken kun je typen.
 
 Het vogelhuisje bovenaan staat in [examples/birdhouse.rsdocx](examples/birdhouse.rsdocx); het opent in PushPullMe en in
 DesignSpark Mechanical.
+
+**Een AI-assistent laten meewerken (MCP):** vink rechtsonder **🤖 AI-assistent mag meewerken** aan, en laat je
+MCP-client (Claude Code, Claude Desktop, VS Code, …) `PushPullMe.Mcp.exe` starten (naast `PushPullMe.exe`); zie
+hierboven. Alles wat de assistent doet zie je in de statusregel en kun je ongedaan maken; standaard staat het uit.
 
 **Downloaden:** onder [Releases](https://github.com/gj2830/PushPullMe/releases) staat een zip voor Windows (64-bit);
 uitpakken en `PushPullMe.exe` starten. **Zelf bouwen:** Windows en de .NET 10 SDK, zie hierboven.

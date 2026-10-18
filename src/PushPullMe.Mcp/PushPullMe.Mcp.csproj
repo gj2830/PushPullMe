@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The MCP server (stdio) an AI assistant starts: it passes each tool call on to a running PushPullMe (over a named
+       pipe, see PipeProtocol). No packages: the protocol is JSON-RPC, written here with System.Text.Json. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,71 @@
+using System.Text.Json.Nodes;
+
+namespace PushPullMe.Mcp;
+
+/// <summary>A tool as an MCP client sees it: its name, what it does (for the language model, in English) and the JSON
+/// schema of its arguments.</summary>
+public sealed record Tool(string Name, string Description, JsonObject InputSchema);
+
+/// <summary>The tools PushPullMe offers (a fixed set: each goes through the app's own functions and can be undone).</summary>
+public static class ToolCatalog
+{
+    private static JsonObject Int(string d) => new() { ["type"] = "integer", ["description"] = d };
+    private static JsonObject Num(string d) => new() { ["type"] = "number", ["description"] = d };
+    private static JsonObject Str(string d) => new() { ["type"] = "string", ["description"] = d };
+    private static JsonObject Bool(string d) => new() { ["type"] = "boolean", ["description"] = d };
+    private static JsonObject Point(string d) => new() { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "number" }, ["minItems"] = 3, ["maxItems"] = 3, ["description"] = d + " [x, y, z] in mm" };
+    private static JsonObject Ints(string d) => new() { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "integer" }, ["description"] = d };
+    private static JsonObject Choice(string d, params string[] values) => new() { ["type"] = "string", ["enum"] = new JsonArray(values.Select(v => (JsonNode)v!).ToArray()), ["description"] = d };
+
+    private static JsonObject Schema(params (string Name, JsonObject Schema, bool Required)[] props)
+    {
+        var p = new JsonObject();
+        foreach (var (n, s, _) in props) p[n] = s;
+        var o = new JsonObject { ["type"] = "object", ["properties"] = p };
+        var req = props.Where(x => x.Required).Select(x => (JsonNode)x.Name!).ToArray();
+        if (req.Length > 0) o["required"] = new JsonArray(req);
+        return o;
+    }
+
+    private const string BodyNote = " Bodies and faces are numbered from 0, as get_model and get_body give them.";
+
+    public static readonly IReadOnlyList<Tool> Tools =
+    [
+        new("get_model", "The model open in PushPullMe: file, bodies (number, name, group, solid or surface, face count, bounding box in mm), groups, the group open for editing, loose lines. Lengths in mm; z is up.", Schema()),
+        new("get_body", "The faces of one body: number, kind (flat, cylinder, cone, sphere, torus, free form), outward normal (flat faces), centre and area." + BodyNote,
+            Schema(("body", Int("Body number"), true))),
+        new("screenshot", "A PNG of PushPullMe's 3D view (only the view, never the screen), optionally from a standard direction first.",
+            Schema(("view", Choice("Direction to look from; 'current' keeps the camera", "current", "iso", "top", "front", "right", "all"), false))),
+        new("push_pull", "Push/pull a flat face along its normal (positive: outward, the body grows). A face on a round end of a revolve follows the turn. Parts touching afterwards are joined when the app's 'join' box is ticked (only within the same group)." + BodyNote,
+            Schema(("body", Int("Body number"), true), ("face", Int("Face number"), true), ("distance", Num("Distance in mm"), true))),
+        new("draw_rectangle", "Draw a rectangle: on a flat face of a body (both corners on that face; it splits the face), or with body/face left out on the ground or the work plane (a new surface body, to push/pull up into a solid)." + BodyNote,
+            Schema(("corner1", Point("First corner"), true), ("corner2", Point("Opposite corner"), true), ("body", Int("Body of the face to draw on"), false), ("face", Int("Face to draw on"), false))),
+        new("move", "Move a whole body by an offset (or, when it lies in a closed group, the whole group); copy: a moved copy instead." + BodyNote,
+            Schema(("body", Int("Body number"), true), ("offset", Point("Offset"), true), ("copy", Bool("Make a copy"), false))),
+        new("rotate", "Turn a whole body (or its closed group) round an axis through a point." + BodyNote,
+            Schema(("body", Int("Body number"), true), ("centre", Point("A point on the axis"), true), ("axis", Point("Axis direction (any length)"), true), ("degrees", Num("Angle, counter-clockwise seen from the tip of the axis"), true), ("copy", Bool("Make a copy"), false))),
+        new("scale", "Scale a whole body (or its closed group) from a fixed point." + BodyNote,
+            Schema(("body", Int("Body number"), true), ("fixed_point", Point("The point that stays"), true), ("factor", Num("Factor, e.g. 2 or 0.5"), true), ("copy", Bool("Make a copy"), false))),
+        new("mirror", "Mirror a whole body (or its closed group) in a plane." + BodyNote,
+            Schema(("body", Int("Body number"), true), ("origin", Point("A point in the plane"), true), ("normal", Point("Plane normal"), true), ("copy", Bool("Keep the original, add the mirrored copy"), false))),
+        new("paint", "Paint faces of a body a colour (or take the paint off with color null). Without faces: all faces of the body." + BodyNote,
+            Schema(("body", Int("Body number"), true), ("faces", Ints("Face numbers"), false), ("color", new JsonObject { ["type"] = new JsonArray("string", "null"), ["description"] = "#RRGGBB, or null for no paint" }, true))),
+        new("rename", "Give a body or a group a name (empty: back to the standard name).",
+            Schema(("body", Int("Body number"), false), ("group", Int("Group id"), false), ("name", Str("The new name"), true))),
+        new("make_group", "Make a group of bodies and/or groups that lie directly in the same group (as SketchUp's Make Group). Returns the new group's id.",
+            Schema(("bodies", Ints("Body numbers"), false), ("groups", Ints("Group ids"), false), ("name", Str("Its name (optional)"), false))),
+        new("explode_group", "Take a group away; what was in it goes to the group it was in.", Schema(("group", Int("Group id"), true))),
+        new("open_group", "Open a group to work inside it (what lies outside is shown faded and cannot be picked), or with group left out close the open one.",
+            Schema(("group", Int("Group id"), false))),
+        new("boolean", "Combine two solid bodies: union, subtract (b from a) or intersect. They must lie in the same group." + BodyNote,
+            Schema(("op", Choice("Operation", "union", "subtract", "intersect"), true), ("a", Int("First body"), true), ("b", Int("Second body"), true))),
+        new("undo", "Undo the last change (the user can also press Ctrl+Z).", Schema()),
+        new("redo", "Redo what was undone.", Schema()),
+        new("open_file", "Open a file (.step/.stp, .rsdocx, .stl, .3mf). The user is asked first when there is unsaved work.",
+            Schema(("path", Str("Full path"), true))),
+        new("save_file", "Save the model (.step is the main format; .rsdocx for DesignSpark; .stl). The user is asked first when the file exists.",
+            Schema(("path", Str("Full path"), true))),
+        new("simulate", "Play mouse and keys in the window, for trying the user interface: steps split by '|', e.g. 'tool:R|click:0,0,0|click:20,20,0|tool:P|click:10,10,0|type:20|enter'. Steps: tool:<P R L C E M T B F K Q S G A MIRROR UNION … or SEL>, move:x,y,z / click:x,y,z / dblclick:x,y,z (a world point in mm, through the real hit tests), mods:ctrl|shift|ctrl+shift|none, key:<WPF key name>, type:<text>, enter, esc, camera:… . Returns what the status bar said after each step.",
+            Schema(("steps", Str("The steps"), true))),
+    ];
+}

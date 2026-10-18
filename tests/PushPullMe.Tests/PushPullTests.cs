@@ -3555,21 +3555,164 @@ public class StepFileTests(ITestOutputHelper output)
         int block = 0;
         var top = new FaceRef(block, Enumerable.Range(0, d.Bodies[block].Faces.Count).First(f => d.Bodies[block].Faces[f].Surface is BrepPlane && FaceGeometry.Normal(d.Bodies[block].Faces[f]).Z > 0.999));
         var (pulled, _) = d.PushPull(top, 2 * Mm);
-        var kept = SketchDocument.CarryNames(d, pulled);
+        var kept = SketchDocument.CarryMeta(d, pulled);
         Assert.Equal(d.Names, kept.Names);
-        var painted = SketchDocument.CarryNames(kept, kept.Paint([new FaceRef(2, 0)], 0xFF00FF00));
+        var painted = SketchDocument.CarryMeta(kept, kept.Paint([new FaceRef(2, 0)], 0xFF00FF00));
         Assert.Equal(d.Names, painted.Names);
         var raw = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm)), BrepShapes.FromPolyhedron(Polyhedron.Box(5 * Mm, 0, 0, 15 * Mm, 10 * Mm, 10 * Mm))]);
         var two = new SketchDocument { Bodies = raw.Bodies, Curved = raw.Curved, Names = ["Links", "Rechts"] };
         var (joined, _) = two.Combine(0, 1, Booleans.Op.Union);
-        Assert.Equal("Links", SketchDocument.CarryNames(two, joined).BodyName(0));
+        Assert.Equal("Links", SketchDocument.CarryMeta(two, joined).BodyName(0));
         Assert.True(SketchDocument.IsStandardName("Vaste vorm 12") && SketchDocument.IsStandardName("Oppervlak") && !SketchDocument.IsStandardName("Blok"));
         // renamed (in the structure tree): kept after the next change; a standard name typed is no name of its own again
-        var renamed = SketchDocument.CarryNames(two, two.Rename(1, "  Steun "));
+        var renamed = SketchDocument.CarryMeta(two, two.Rename(1, "  Steun "));
         Assert.Equal("Steun", renamed.BodyName(1));
-        var moved = SketchDocument.CarryNames(renamed, renamed.Paint([new FaceRef(1, 0)], 0xFFFF0000));
+        var moved = SketchDocument.CarryMeta(renamed, renamed.Paint([new FaceRef(1, 0)], 0xFFFF0000));
         Assert.Equal(["Links", "Steun"], moved.Names);
         Assert.Null(moved.Rename(0, "Vaste vorm").Names[0]);
         Assert.Equal("Vaste vorm 1", moved.Rename(0, "").BodyName(0).Replace("Solid", "Vaste vorm"));
+    }
+}
+
+/// <summary>Groups (as SketchUp's): made, explored, carried through changes, moved and copied as a whole, and parts in
+/// different groups never joined.</summary>
+public class GroupTests
+{
+    private const double Mm = 0.001;
+
+    /// <summary>Blocks of 10 mm side by side along x, <paramref name="gap"/> apart.</summary>
+    private static SketchDocument Blocks(int n, double gap = 2) => SketchDocument.FromBodies(Enumerable.Range(0, n)
+        .Select(i => BrepShapes.FromPolyhedron(Polyhedron.Box(i * (10 + gap) * Mm, 0, 0, (i * (10 + gap) + 10) * Mm, 10 * Mm, 10 * Mm))).ToList());
+
+    private static FaceRef Side(SketchDocument d, int body, Vec3 n) =>
+        new(body, Enumerable.Range(0, d.Bodies[body].Faces.Count).First(f => d.Bodies[body].Faces[f].Surface is BrepPlane && FaceGeometry.Normal(d.Bodies[body].Faces[f]).Dot(n) > 0.999));
+
+    [Fact]
+    public void A_group_is_made_nested_and_taken_away_again()
+    {
+        var d = Blocks(3);
+        var (g1, a) = d.MakeGroup([GroupUnit.OfBody(0), GroupUnit.OfBody(1)], "Paar");
+        Assert.Equal([a, a, null], g1.BodyGroups);
+        Assert.Equal("Paar", g1.GroupName(a));
+        Assert.Equal([0, 1], g1.Members(a));
+        // a click: the group from outside, the body inside it once it is open, nothing outside the open group
+        Assert.Equal(GroupUnit.OfGroup(a), g1.UnitOf(0, null));
+        Assert.Equal(GroupUnit.OfBody(2), g1.UnitOf(2, null));
+        Assert.Equal(GroupUnit.OfBody(0), g1.UnitOf(0, a));
+        Assert.Null(g1.UnitOf(2, a));
+        // the pair and the third block in a group round it: the pair stays a group inside it
+        var (g2, b) = g1.MakeGroup([GroupUnit.OfGroup(a), GroupUnit.OfBody(2)]);
+        Assert.Equal(b, g2.Group(a)!.Parent);
+        Assert.Equal([0, 1, 2], g2.Members(b));
+        Assert.Equal(GroupUnit.OfGroup(b), g2.UnitOf(0, null));
+        Assert.Equal(GroupUnit.OfGroup(a), g2.UnitOf(0, b));
+        Assert.StartsWith(Lang.T("Groep", "Group"), g2.GroupName(b));
+        // what lies in different groups cannot go into one group together
+        Assert.Throws<PushPullException>(() => g2.MakeGroup([GroupUnit.OfBody(0), GroupUnit.OfBody(2)]));
+        // the outer one taken away: the pair at the top again
+        var g3 = g2.Ungroup(b);
+        Assert.Null(g3.Group(a)!.Parent);
+        Assert.Equal([a, a, null], g3.BodyGroups);
+        Assert.Equal("Twee", g3.RenameGroup(a, " Twee ").GroupName(a));
+        Assert.Null(g3.RenameGroup(a, "Groep 4").Group(a)!.Name);
+    }
+
+    [Fact]
+    public void Groups_are_carried_through_changes_and_a_new_body_goes_into_the_open_group()
+    {
+        var (d, a) = Blocks(2, gap: 20).MakeGroup([GroupUnit.OfBody(0)]);
+        var (pulled, _) = d.PushPull(Side(d, 0, new Vec3(0, 0, 1)), 3 * Mm);
+        var kept = SketchDocument.CarryMeta(d, pulled);
+        Assert.Equal([a, null], kept.BodyGroups);
+        var painted = SketchDocument.CarryMeta(kept, kept.Paint([new FaceRef(0, 0)], 0xFF00FF00));
+        Assert.Equal([a, null], painted.BodyGroups);
+        // a copy made while the group is open: in the group
+        var (copied, nb) = painted.RotateBody(0, new Vec3(0, 0, 0), new Vec3(0, 0, 1), Math.PI / 2, copy: true);
+        var inside = SketchDocument.CarryMeta(painted, copied, newInto: a);
+        Assert.Equal(a, inside.GroupOf(nb));
+        Assert.Equal([0, 2], inside.Members(a));
+        // and with nothing open: on its own
+        Assert.Null(SketchDocument.CarryMeta(painted, copied).GroupOf(nb));
+        // the last body out of a group (here: the group taken away by a boolean... a group with nothing left) goes
+        var empty = SketchDocument.CarryMeta(d, d.WithMeta(d.Names, d.Groups, [null, null]));
+        Assert.Empty(empty.Groups);
+    }
+
+    [Fact]
+    public void Parts_in_different_groups_do_not_join_after_a_pull()
+    {
+        var d = Blocks(2);
+        var right = new Vec3(1, 0, 0);
+        // no groups: pulled against the other block, one part
+        var (joined, _) = d.PushPull(Side(d, 0, right), 2 * Mm);
+        Assert.Single(joined.Bodies);
+        // the same in one group: one part, still in the group
+        var (same, g) = d.MakeGroup([GroupUnit.OfBody(0), GroupUnit.OfBody(1)]);
+        var (sj, _) = same.PushPull(Side(same, 0, right), 2 * Mm);
+        Assert.Single(sj.Bodies);
+        Assert.Equal(g, SketchDocument.CarryMeta(same, sj).GroupOf(0));
+        // in different groups: both stay
+        var (apart, _) = d.MakeGroup([GroupUnit.OfBody(0)]);
+        var (aj, _) = apart.PushPull(Side(apart, 0, right), 2 * Mm);
+        Assert.Equal(2, aj.Bodies.Count);
+        // and no boolean across groups
+        Assert.Throws<PushPullException>(() => apart.Combine(0, 1, Booleans.Op.Union));
+    }
+
+    [Fact]
+    public void A_group_is_moved_turned_and_copied_as_a_whole()
+    {
+        var (d, g) = Blocks(3).MakeGroup([GroupUnit.OfBody(0), GroupUnit.OfBody(1)], "Paar");
+        var (inner, _) = d.MakeGroup([GroupUnit.OfBody(1)], "Een");
+        double vol = inner.Volume();
+        var offset = new Vec3(0, 50 * Mm, 0);
+        var (moved, mg) = inner.TransformGroup(g, (doc, b, c) => doc.MoveBody(b, offset, c), copy: false);
+        Assert.Equal(g, mg);
+        Assert.Equal(inner.Bodies[0].Vertices[0] + offset, moved.Bodies[0].Vertices[0]);
+        Assert.Equal(inner.Bodies[1].Vertices[0] + offset, moved.Bodies[1].Vertices[0]);
+        Assert.Same(inner.Bodies[2], moved.Bodies[2]);
+        Assert.Equal(inner.BodyGroups, moved.BodyGroups);
+        // turned: the volume the same
+        var (turned, _) = inner.TransformGroup(g, (doc, b, c) => doc.RotateBody(b, new Vec3(0, 0, 0), new Vec3(0, 0, 1), 0.3, c), copy: false);
+        Assert.Equal(vol, turned.Volume(), 12);
+        // copied: a new group named the same, with the inner group copied too, the copies in them
+        var (copy, cg) = inner.TransformGroup(g, (doc, b, c) => doc.MoveBody(b, offset, c), copy: true);
+        Assert.Equal(5, copy.Bodies.Count);
+        Assert.NotEqual(g, cg);
+        Assert.Equal("Paar", copy.GroupName(cg));
+        Assert.Equal([3, 4], copy.Members(cg));
+        Assert.Equal("Een", copy.GroupName(copy.GroupOf(4)!.Value));
+        Assert.Equal(cg, copy.Group(copy.GroupOf(4)!.Value)!.Parent);
+        Assert.Equal(inner.Members(g), copy.Members(g));
+        // (three blocks of the same size, two of them copied)
+        Assert.Equal(vol * 5 / 3, copy.Volume(), 12);
+    }
+}
+
+public class GroupFileTests
+{
+    private const double Mm = 0.001;
+
+    [Fact]
+    public void Groups_and_their_names_go_through_STEP()
+    {
+        var d = SketchDocument.FromBodies(Enumerable.Range(0, 3)
+            .Select(i => BrepShapes.FromPolyhedron(Polyhedron.Box(i * 20 * Mm, 0, 0, (i * 20 + 10) * Mm, 10 * Mm, 10 * Mm))).ToList());
+        var (g1, pair) = d.MakeGroup([GroupUnit.OfBody(0), GroupUnit.OfBody(1)], "Paar");
+        var (g2, all) = g1.MakeGroup([GroupUnit.OfGroup(pair), GroupUnit.OfBody(2)]);
+        string path = Path.Combine(Path.GetTempPath(), $"ppm_groepen_{Guid.NewGuid():N}.step");
+        try
+        {
+            File.WriteAllText(path, g2.ToStep("groepen.step"));
+            var back = SketchDocument.FromStep(path);
+            Assert.Equal(2, back.Groups.Count);
+            int outer = back.Groups.Single(g => g.Parent == null).Id, inner = back.Groups.Single(g => g.Parent != null).Id;
+            Assert.Equal("Paar", back.GroupName(inner));
+            Assert.Null(back.Group(outer)!.Name);
+            Assert.Equal(outer, back.Group(inner)!.Parent);
+            Assert.Equal([inner, inner, outer], back.BodyGroups);
+            Assert.Equal(g2.Volume(), back.Volume(), 12);
+        }
+        finally { File.Delete(path); }
     }
 }

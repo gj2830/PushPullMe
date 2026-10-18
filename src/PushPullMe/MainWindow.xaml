@@ -279,6 +279,9 @@
         <DockPanel Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0">
             <Border DockPanel.Dock="Right" Style="{StaticResource Card}" Padding="14,6" Margin="0">
                 <StackPanel Orientation="Horizontal">
+                    <CheckBox x:Name="AssistantBox" Content="🤖 AI-assistent mag meewerken" IsChecked="False" VerticalAlignment="Center" Margin="0,0,16,0"
+                              Foreground="{StaticResource Muted}" Click="AssistantBox_Click"
+                              ToolTip="Aan: een AI-assistent (via MCP, bijvoorbeeld Claude Code, Claude Desktop of VS Code) mag in dit venster meewerken: het model bekijken en bewerken. Alles wat hij doet zie je hier en kun je ongedaan maken. Zie de README voor het koppelen."/>
                     <CheckBox x:Name="JoinBox" Content="samenvoegen" IsChecked="True" VerticalAlignment="Center" Margin="0,0,16,0"
                               Foreground="{StaticResource Muted}" Click="JoinBox_Click"
                               ToolTip="Aan: wat je met ⇕ tegen een ander deel aan trekt, wordt er één deel mee (zoals DesignSpark). Uit: het blijft een apart deel."/>

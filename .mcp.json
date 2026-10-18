@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "pushpullme": {
+      "command": "src/PushPullMe/bin/Release/net10.0-windows/PushPullMe.Mcp.exe"
+    }
+  }
+}

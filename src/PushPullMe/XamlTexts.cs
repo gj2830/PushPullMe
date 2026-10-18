@@ -118,6 +118,9 @@ internal static class XamlTexts
         ["🎨 Verf"] = "🎨 Paint",
         ["Afstand"] = "Distance",
         ["samenvoegen"] = "merge",
+        ["🤖 AI-assistent mag meewerken"] = "🤖 AI assistant may work along",
+        ["Aan: een AI-assistent (via MCP, bijvoorbeeld Claude Code, Claude Desktop of VS Code) mag in dit venster meewerken: het model bekijken en bewerken. Alles wat hij doet zie je hier en kun je ongedaan maken. Zie de README voor het koppelen."] =
+            "On: an AI assistant (through MCP, for example Claude Code, Claude Desktop or VS Code) may work along in this window: look at the model and change it. You see everything it does here and can undo it. See the README for connecting it.",
         ["Aan: wat je met ⇕ tegen een ander deel aan trekt, wordt er één deel mee (zoals DesignSpark). Uit: het blijft een apart deel."] =
             "On: what you pull with ⇕ against another part becomes one part with it (as in DesignSpark). Off: it stays a part of its own.",
         ["Open een model om te beginnen."] = "Open a model to begin.",
