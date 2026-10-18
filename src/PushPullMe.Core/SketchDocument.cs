@@ -1,6 +1,7 @@
 using RsDocx.Core;
 using RsDocx.Core.Brep;
 using RsDocx.Core.Package;
+using RsDocx.Core.Step;
 using RsDocx.Core.Stl;
 
 namespace PushPullMe.Core;
@@ -26,6 +27,10 @@ public sealed class SketchDocument
 
     /// <summary>Loose lines and arcs (sketch curves), not part of any body.</summary>
     public IReadOnlyList<SketchLine> Lines { get; init; } = [];
+
+    /// <summary>A name per body, as given in a file it came from (null, or missing: none of its own; it is then called
+    /// "Vaste vorm n" or "Oppervlak n", see <see cref="BodyName"/>). Carried along by <see cref="CarryNames"/>.</summary>
+    public IReadOnlyList<string?> Names { get; init; } = [];
 
     /// <summary>The same bodies with these loose lines.</summary>
     public SketchDocument WithLines(IReadOnlyList<SketchLine> lines) => new() { Bodies = Bodies, Curved = Curved, Colors = Colors, Lines = lines };
@@ -121,10 +126,10 @@ public sealed class SketchDocument
     /// (they are shown here all the same).</summary>
     public static SketchDocument FromRsDocx(string path, out int hidden)
     {
-        var bodies = RsDocxReader.Read(path, out hidden, out var colors);
+        var bodies = RsDocxReader.Read(path, out hidden, out var colors, out var names);
         // (a flat face's outer loop first, as the rest expects; a file need not have it so: boltest.rsdocx)
         var doc = FromBodies(bodies.Select(b => new BrepBody { Vertices = b.Vertices, Edges = b.Edges, Faces = Core.PushPull.OrderLoops(b), Sheet = b.Sheet }).ToList());
-        return new SketchDocument { Bodies = doc.Bodies, Curved = doc.Curved, Colors = colors, Lines = RsDocxSketch.Read(RsDocxPackage.Open(path)) };
+        return new SketchDocument { Bodies = doc.Bodies, Curved = doc.Curved, Colors = colors, Lines = RsDocxSketch.Read(RsDocxPackage.Open(path)), Names = names };
     }
 
     /// <summary>Bodies made here (planes only, or with curved faces shown by their own triangles).</summary>
@@ -160,11 +165,15 @@ public sealed class SketchDocument
     /// <see cref="PushPullException"/> (the document stays as it is) when that cannot be done, also when the face would
     /// run into another part of the model (unless <paramref name="checkCrossing"/> is false: a quick preview while
     /// dragging).
+    /// <paramref name="join"/>: a piece pulled against another part with a face becomes one part with it (as DesignSpark's
+    /// "merge" in its pull; off: it stays apart).
     /// </summary>
-    public (SketchDocument Doc, PushPullResult Result) PushPull(FaceRef f, double distance, bool checkCrossing = true)
+    public (SketchDocument Doc, PushPullResult Result) PushPull(FaceRef f, double distance, bool checkCrossing = true, bool join = true)
     {
         var body = Bodies[f.Body];
-        if (body.Sheet) return PushSheet(f, distance, checkCrossing);
+        if (body.Sheet) return PushSheet(f, distance, checkCrossing, join);
+        // the end of a piece turned round an axis: it follows the turn, out and in (as DesignSpark)
+        if (Core.Revolve.EndAxis(body, f.Face) is { } end) return TurnEnd(f, end, distance, checkCrossing);
         if (body.Faces[f.Face].Surface is BrepCylinder || (body.Faces[f.Face].Surface is BrepSphere or BrepTorus && Core.PushPull.IsRoundingSet(body, f.Face)))
             return PushPullCylinder(f, distance, checkCrossing);
         PushPullResult r;
@@ -219,6 +228,9 @@ public sealed class SketchDocument
                 : Lang.T("Zo komt het vlak door een ander deel van het model heen; dat kan nog niet.", "That way the face goes through another part of the model; that is not possible yet."));
         if (checkCrossing && r.FaceMap[f.Face] is >= 0 and var mf && doc.AgainstOpposite(new FaceRef(f.Body, mf)))
             throw new PushPullException(Lang.T("Zo komt het vlak precies tegen de andere kant aan: doorduwen tot een gat kan nog niet.", "That way the face comes exactly against the other side: pushing through to a hole is not possible yet."));
+        // pulled against a part of its own (a piece that came apart before, touching along an edge only): one part again
+        if (join && checkCrossing && distance > 0 && doc.JoinTouching(f.Body, changedFaces) is { } joined)
+            return (joined.Doc, r with { Body = joined.Doc.Bodies[joined.Body], FaceMap = r.FaceMap.Select(_ => -1).ToList() });
         return (doc, r);
     }
 
@@ -253,7 +265,7 @@ public sealed class SketchDocument
     /// sheet's other faces, if any, stay a sheet of their own (a new body). The face map gives the pulled face's new
     /// number in the solid.
     /// </summary>
-    private (SketchDocument Doc, PushPullResult Result) PushSheet(FaceRef f, double distance, bool checkCrossing)
+    private (SketchDocument Doc, PushPullResult Result) PushSheet(FaceRef f, double distance, bool checkCrossing, bool join = true)
     {
         if (Math.Abs(distance) < 1e-9) throw new PushPullException(Lang.T("Trek het vlak een eindje uit om er een blok van te maken.", "Pull the face out a little to make a block of it."));
         var sheet = Bodies[f.Body];
@@ -273,7 +285,55 @@ public sealed class SketchDocument
         var changed = Enumerable.Range(0, td.Bodies[0].Faces.Count).Select(g => new FaceRef(f.Body, g)).ToHashSet();
         if (checkCrossing && Intersections.FirstCrossing(doc, changed) is not null)
             throw new PushPullException(Lang.T("Zo komt het blok door een ander deel van het model heen; dat kan nog niet.", "That way the block goes through another part of the model; that is not possible yet."));
+        if (!checkCrossing) return (doc, tr with { Body = td.Bodies[0], FaceMap = map });
+        // a block lying with a face against a solid part (the triangle next to it, pulled from the same loose face before):
+        // one part with it, as pulling faces of a block keeps them one; touching only along an edge it stays apart (as
+        // DesignSpark). (Only when it is set, not while dragging: a boolean on every move of the mouse is too slow.)
+        if (join && doc.JoinTouching(f.Body, Enumerable.Range(0, td.Bodies[0].Faces.Count)) is { } joined)
+        {
+            map[f.Face] = -1;
+            return (joined.Doc, tr with { Body = joined.Doc.Bodies[joined.Body], FaceMap = map });
+        }
         return (doc, tr with { Body = td.Bodies[0], FaceMap = map });
+    }
+
+    /// <summary>
+    /// Body <paramref name="body"/> joined with each solid part one of its faces <paramref name="near"/> (those just
+    /// pulled) lies against with a face: tried as a union, kept only when that gives one body (touching along an edge
+    /// only, a part stays apart, as DesignSpark makes it), then looked again from the larger part. Null when nothing joined.
+    /// </summary>
+    internal (SketchDocument Doc, int Body)? JoinTouching(int body, IEnumerable<int> near)
+    {
+        var doc = this; int at = body; bool joined = false;
+        var region = Box(near.SelectMany(g => TrianglesOf(new FaceRef(body, g))));
+        for (int j = 0; j < doc.Bodies.Count; j++)
+        {
+            if (j == at || doc.Bodies[j].Sheet || region is not { } rg) continue;
+            if (Box(doc.AllTriangles().Where(t => t.Face.Body == j).SelectMany(t => t.Triangles)) is not { } other || !Overlap(rg, other)) continue;
+            try
+            {
+                var (u, made) = doc.Combine(at, j, Booleans.Op.Union);
+                if (made.Count != 1) continue;
+                doc = u; at = made[0]; joined = true;
+                // (start over: the part is larger now, and what it lies against with it)
+                region = Box(doc.AllTriangles().Where(t => t.Face.Body == at).SelectMany(t => t.Triangles));
+                j = -1;
+            }
+            catch (PushPullException) { }
+        }
+        return joined ? (doc, at) : null;
+
+        static (Vec3 Lo, Vec3 Hi)? Box(IEnumerable<(Vec3 A, Vec3 B, Vec3 C)> tris)
+        {
+            var p = tris.SelectMany(t => new[] { t.A, t.B, t.C }).ToList();
+            if (p.Count == 0) return null;
+            return (new Vec3(p.Min(q => q.X), p.Min(q => q.Y), p.Min(q => q.Z)), new Vec3(p.Max(q => q.X), p.Max(q => q.Y), p.Max(q => q.Z)));
+        }
+        static bool Overlap((Vec3 Lo, Vec3 Hi) a, (Vec3 Lo, Vec3 Hi) b)
+        {
+            const double tol = 1e-6;
+            return a.Lo.X <= b.Hi.X + tol && b.Lo.X <= a.Hi.X + tol && a.Lo.Y <= b.Hi.Y + tol && b.Lo.Y <= a.Hi.Y + tol && a.Lo.Z <= b.Hi.Z + tol && b.Lo.Z <= a.Hi.Z + tol;
+        }
     }
 
     /// <summary>
@@ -377,8 +437,26 @@ public sealed class SketchDocument
     /// </summary>
     public (SketchDocument Doc, MoveResult Result) Move(int body, MoveSelection pick, Vec3 offset, bool checkCrossing = true)
     {
-        if (pick.Whole != MoveWhole.None) return MoveWholeBody(body, pick.Whole == MoveWhole.Copy, offset);
+        if (pick.Whole != MoveWhole.None || IsClosedFreeForm(body, pick)) return MoveWholeBody(body, pick.Whole == MoveWhole.Copy, offset);
         return Move(body, pick, new Motion(offset), checkCrossing);
+    }
+
+    /// <summary>Whether the pick is the whole of a body made of faces without edges (a closed free form, as DesignSpark's
+    /// revolved spline): moving it is moving the body.</summary>
+    private bool IsClosedFreeForm(int body, MoveSelection pick) =>
+        pick.Faces.Count > 0 && pick.Faces.Count == Bodies[body].Faces.Count && Bodies[body].Edges.Count == 0;
+
+    /// <summary>
+    /// The end face of a piece turned round an axis (<see cref="Core.Revolve.EndAxis"/>) turned on or back along it:
+    /// <paramref name="distance"/> is the way its middle goes along the turn (out positive), so the angle is that over its
+    /// distance from the axis. The faces round it, all of revolution round the axis, grow or shrink with it.
+    /// </summary>
+    private (SketchDocument Doc, PushPullResult Result) TurnEnd(FaceRef f, (Vec3 Point, Vec3 Dir, double Radius) end, double distance, bool checkCrossing)
+    {
+        double angle = distance / end.Radius;
+        if (Math.Abs(angle) >= 2 * Math.PI) throw new PushPullException(Lang.T("Zo ver draait het vlak helemaal rond; dat kan niet.", "That far the face turns all the way round; that is not possible."));
+        var (doc, r) = Move(f.Body, MoveSelection.Face(f.Face), new Motion(default, new BrepTransform.Turn(end.Point, end.Dir, angle)), checkCrossing);
+        return (doc, new PushPullResult(r.Body, r.FaceMap, [], [], new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>(), r.Changed, []));
     }
 
     /// <summary>A face tilted round an axis (one of its edges): see <see cref="Core.PushPull.Move(BrepBody, MoveSelection, Motion)"/>.</summary>
@@ -1079,9 +1157,76 @@ public sealed class SketchDocument
         StlWriter.WriteBinary(AllTriangles().SelectMany(x => x.Triangles).Select(t => new StlTriangle(t.A * scale, t.B * scale, t.C * scale)).ToList(), "PushPullMe<stl unit=MM>");
 
     /// <summary>As a DesignSpark package (exact surfaces).</summary>
+    /// <summary>The model as STEP, its main format (see <see cref="StepWriter"/>): the bodies by name ("Vaste vorm 1",
+    /// "Oppervlak 2"), the colours painted here and the loose lines (construction lines are aids only: left out).</summary>
+    public string ToStep(string fileName = "model.step") => StepWriter.Write(new StepModel(
+        Bodies.Select((b, i) => new StepBody(b, BodyName(i), i < Colors.Count && Colors[i].Count > 0 ? Colors[i] : null)).ToList(),
+        Lines.Where(l => !l.Construction).Select(l => new StepCurve(l.Start, l.End, l.Circle)).ToList()), fileName);
+
+    /// <summary>A body's name: its own (<see cref="Names"/>), or as DesignSpark gives it, numbered: "Vaste vorm 1",
+    /// "Oppervlak 2" (a face without thickness).</summary>
+    public string BodyName(int b) => b < Names.Count && !string.IsNullOrWhiteSpace(Names[b]) ? Names[b]!
+        : (Bodies[b].Sheet ? Lang.T("Oppervlak", "Surface") : Lang.T("Vaste vorm", "Solid")) + $" {b + 1}";
+
+    /// <summary>Whether a name is only the standard one a program gives (DesignSpark's "Vaste vorm", "Oppervlak", ours
+    /// numbered, "Solid"/"Surface"): no name of its own.</summary>
+    public static bool IsStandardName(string? name) => string.IsNullOrWhiteSpace(name)
+        || System.Text.RegularExpressions.Regex.IsMatch(name.Trim(), @"^(vaste vorm|oppervlak|solid|surface|body)( \d+)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>The document with body <paramref name="b"/> named <paramref name="name"/> (empty, or a standard name such as
+    /// "Vaste vorm": no name of its own any more).</summary>
+    public SketchDocument Rename(int b, string? name)
+    {
+        var names = OwnNames();
+        names[b] = IsStandardName(name) ? null : name!.Trim();
+        return new SketchDocument { Bodies = Bodies, Curved = Curved, Colors = Colors, Lines = Lines, Names = names };
+    }
+
+    /// <summary>The bodies' own names (null: none), one per body.</summary>
+    private List<string?> OwnNames() => Enumerable.Range(0, Bodies.Count).Select(b => b < Names.Count && !string.IsNullOrWhiteSpace(Names[b]) ? Names[b] : null).ToList();
+
+    /// <summary>
+    /// <paramref name="after"/> with the names of <paramref name="before"/> carried over: a body that did not change (the
+    /// same object) keeps its name; one that changed takes the name of the body that was in its place, unless that name
+    /// went to another already (a body joined into another one loses its name, the one it joined keeps its own).
+    /// </summary>
+    public static SketchDocument CarryNames(SketchDocument before, SketchDocument after)
+    {
+        // (a document that already has its names, such as a renamed one, keeps them)
+        if (before.Names.All(n => n == null) || after.Names.Count > 0) return after;
+        var names = new string?[after.Bodies.Count];
+        var used = new HashSet<int>();
+        for (int a = 0; a < after.Bodies.Count; a++)
+            for (int b = 0; b < before.Bodies.Count; b++)
+                if (ReferenceEquals(after.Bodies[a], before.Bodies[b])) { names[a] = b < before.Names.Count ? before.Names[b] : null; used.Add(b); break; }
+        for (int a = 0; a < after.Bodies.Count; a++)
+            if (names[a] == null && a < before.Bodies.Count && !used.Contains(a) && !after.Bodies.Any(x => ReferenceEquals(x, before.Bodies[a])))
+            {
+                names[a] = a < before.Names.Count ? before.Names[a] : null;
+                used.Add(a);
+            }
+        return new SketchDocument { Bodies = after.Bodies, Curved = after.Curved, Colors = after.Colors, Lines = after.Lines, Names = names };
+    }
+
+    /// <summary>A STEP file (from here or from another CAD program, see <see cref="StepReader"/>): its bodies, colours and
+    /// loose lines. Throws <see cref="StepException"/> when it cannot be read.</summary>
+    public static SketchDocument FromStep(string path)
+    {
+        var m = StepReader.Read(path);
+        if (m.Bodies.Count == 0 && m.Curves.Count == 0) throw new StepException(Lang.T("Er staan geen lichamen in dit STEP-bestand.", "There are no bodies in this STEP file."));
+        var doc = FromBodies(m.Bodies.Select(b => new BrepBody { Vertices = b.Body.Vertices, Edges = b.Body.Edges, Faces = Core.PushPull.OrderLoops(b.Body), Sheet = b.Body.Sheet }).ToList());
+        return new SketchDocument
+        {
+            Bodies = doc.Bodies, Curved = doc.Curved,
+            Colors = m.Bodies.Select(b => (IReadOnlyDictionary<int, uint>)(b.FaceColors ?? new Dictionary<int, uint>())).ToList(),
+            Lines = m.Curves.Select(c => c.Arc is { } a ? new SketchLine(c.Start, c.End, a.Centre, a.Normal) : new SketchLine(c.Start, c.End)).ToList(),
+            Names = m.Bodies.Select(b => IsStandardName(b.Name) ? null : b.Name).ToList(),
+        };
+    }
+
     public RsDocxPackage ToRsDocx()
     {
-        var pkg = RsDocxComposer.Compose(Bodies);
+        var pkg = RsDocxComposer.Compose(Bodies, names: OwnNames());
         // the colours painted here, as DesignSpark keeps them (see RsDocxColors)
         RsDocxColors.Write(pkg, Colors);
         // the loose lines, as DesignSpark keeps them (see RsDocxSketch)

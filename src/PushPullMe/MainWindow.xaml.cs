@@ -39,6 +39,10 @@ public partial class MainWindow : Window
     private FaceRef? _dragFace;
     private Point3D _dragStart;
     private Vector3D _dragNormal;
+    /// <summary>The end of a turned piece being dragged (it follows the turn): its axis and its middle's distance from it;
+    /// and the angle the mouse is at round it so far (to go on past half a turn).</summary>
+    private (Vec3 Point, Vec3 Dir, double Radius)? _dragTurn;
+    private double _dragTurnAngle;
     private SketchDocument? _dragBase;
     private double _dragDist;
 
@@ -77,6 +81,8 @@ public partial class MainWindow : Window
     {
         Lang.English = LoadLanguage();
         InitializeComponent();
+        LoadJoin();
+        BuildStructure();
         XamlTexts.Apply(this);
         LanguageButton.Content = Lang.English ? "🌐  EN" : "🌐  NL";
         View.EffectsManager = new HelixToolkit.SharpDX.DefaultEffectsManager();
@@ -145,9 +151,14 @@ public partial class MainWindow : Window
 
     private async Task OpenDialog()
     {
-        var dlg = new OpenFileDialog { Filter = T("3D-modellen (*.stl;*.3mf;*.rsdocx)|*.stl;*.3mf;*.rsdocx|DesignSpark (*.rsdocx)|*.rsdocx|Alle bestanden|*.*", "3D models (*.stl;*.3mf;*.rsdocx)|*.stl;*.3mf;*.rsdocx|DesignSpark (*.rsdocx)|*.rsdocx|All files|*.*") };
+        var dlg = new OpenFileDialog { Filter = T("3D-modellen (*.step;*.stp;*.rsdocx;*.stl;*.3mf)|*.step;*.stp;*.rsdocx;*.stl;*.3mf|STEP (*.step;*.stp)|*.step;*.stp|DesignSpark (*.rsdocx)|*.rsdocx|Alle bestanden|*.*", "3D models (*.step;*.stp;*.rsdocx;*.stl;*.3mf)|*.step;*.stp;*.rsdocx;*.stl;*.3mf|STEP (*.step;*.stp)|*.step;*.stp|DesignSpark (*.rsdocx)|*.rsdocx|All files|*.*") };
         if (dlg.ShowDialog(this) == true) await Open(dlg.FileName);
     }
+
+    private static bool IsStep(string path) => path.EndsWith(".step", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".stp", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A file with exact shapes (STEP or DesignSpark), opened here right away; a mesh goes through the converter.</summary>
+    private static bool IsExact(string path) => IsStep(path) || path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase);
 
     private async void Window_Drop(object sender, DragEventArgs e)
     {
@@ -158,7 +169,7 @@ public partial class MainWindow : Window
     /// best found there, with all its options), and what it hands over is taken over here, in memory.</summary>
     private async Task Open(string path)
     {
-        if (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase)) { await Load(path); return; }
+        if (IsExact(path)) { await Load(path); return; }
         StlConverter.MainWindow converter;
         StlConverter.Lang.English = Lang.English; // (the converter speaks as this app does)
         try { converter = new StlConverter.MainWindow(path) { Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner }; }
@@ -188,7 +199,7 @@ public partial class MainWindow : Window
     {
         ClearGuides();
         _doc = doc; _path = path; _plane = WorkPlane.Ground;
-        _undo.Clear(); _redo.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null;
+        _undo.Clear(); _redo.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
         UpdateUndoButtons();
         Render(zoom: true);
         FileText.Text = Path.GetFileName(path);
@@ -208,7 +219,12 @@ public partial class MainWindow : Window
         {
             SketchDocument doc;
             string? note = null;
-            if (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase))
+            if (IsStep(path))
+            {
+                BusyText.Text = T("Bestand lezen…", "Reading the file…");
+                doc = await Task.Run(() => SketchDocument.FromStep(path));
+            }
+            else if (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase))
             {
                 // exact shapes already: read as they are
                 BusyText.Text = T("Bestand lezen…", "Reading the file…");
@@ -234,7 +250,7 @@ public partial class MainWindow : Window
             }
             Adopt(doc, path, note == null ? null : (path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase) ? T("👻 Onzichtbare lichamen", "👻 Hidden bodies") : T("🧹 Eerst opgeschoond", "🧹 Cleaned up first"), note));
         }
-        catch (Exception ex) when (ex is MeshException or IOException or StlFormatException or InvalidDataException or RsDocxReadException)
+        catch (Exception ex) when (ex is MeshException or IOException or StlFormatException or InvalidDataException or RsDocxReadException or RsDocx.Core.Step.StepException)
         {
             ShowToast(T("😕 Dit bestand lukt niet", "😕 This file does not work"), ex.Message);
         }
@@ -250,11 +266,12 @@ public partial class MainWindow : Window
             return;
         }
         // (the name it has now, in its own folder: the user decides on another; Windows asks before overwriting)
-        bool stl = _path != null && _path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase);
+        // (STEP first: the main format; the kind the file has now chosen)
+        int kind = _path == null ? 1 : _path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase) ? 2 : _path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase) ? 3 : 1;
         var dlg = new SaveFileDialog
         {
-            Filter = T("DesignSpark Mechanical (*.rsdocx)|*.rsdocx|STL voor de printer (*.stl)|*.stl", "DesignSpark Mechanical (*.rsdocx)|*.rsdocx|STL for the printer (*.stl)|*.stl"),
-            FilterIndex = stl ? 2 : 1,
+            Filter = T("STEP, voor elk CAD-programma (*.step)|*.step|DesignSpark Mechanical (*.rsdocx)|*.rsdocx|STL voor de printer (*.stl)|*.stl", "STEP, for any CAD program (*.step)|*.step|DesignSpark Mechanical (*.rsdocx)|*.rsdocx|STL for the printer (*.stl)|*.stl"),
+            FilterIndex = kind,
             FileName = Path.GetFileNameWithoutExtension(_path ?? "model"),
             InitialDirectory = _path != null ? Path.GetDirectoryName(Path.GetFullPath(_path)) : null,
             OverwritePrompt = true,
@@ -268,6 +285,7 @@ public partial class MainWindow : Window
         try
         {
             if (path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase)) File.WriteAllBytes(path, _doc.ToStl());
+            else if (IsStep(path)) File.WriteAllText(path, _doc.ToStep(Path.GetFileName(path)));
             else _doc.ToRsDocx().Save(path);
             _path = path; FileText.Text = Path.GetFileName(path);
             if (_doc.Colors.Any(c => c.Count > 0) && path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase))
@@ -293,7 +311,8 @@ public partial class MainWindow : Window
     private void Commit(SketchDocument before, SketchDocument after)
     {
         _undo.Add(before); _redo.Clear();
-        _doc = after;
+        // (the bodies' names along: see CarryNames)
+        _doc = SketchDocument.CarryNames(before, after);
         _multi = null;
         _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null;
         UpdateUndoButtons();
@@ -302,7 +321,7 @@ public partial class MainWindow : Window
     private void Undo()
     {
         if (_undo.Count == 0 || _doc == null) return;
-        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null;
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
         _redo.Add(_doc); _doc = _undo[^1]; _undo.RemoveAt(_undo.Count - 1);
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         Render();
@@ -314,7 +333,7 @@ public partial class MainWindow : Window
     private void Redo()
     {
         if (_redo.Count == 0 || _doc == null) return;
-        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null;
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
         _undo.Add(_doc); _doc = _redo[^1]; _redo.RemoveAt(_redo.Count - 1);
         _last = null; _lastMove = null; _lastOffset = null; _lastRound = null; _lastRotate = null; _lastScale = null; _selected = null; _hover = null;
         Render();
@@ -367,12 +386,15 @@ public partial class MainWindow : Window
                 var face = body.Faces[f];
                 uint key = doc.ColorOf(new FaceRef(b, f)) ?? Standard;
                 if (!byColor.TryGetValue(key, out var mm)) byColor[key] = mm = (new(), new(), new List<int>());
-                foreach (var (a, bb, c) in Clipped(doc.TrianglesOf(new FaceRef(b, f))))
+                var faceTris = doc.TrianglesOf(new FaceRef(b, f));
+                // (a free-form face has no normal of its own here: the mean of its triangles round each point)
+                var smooth = face.Surface is BrepNurbsSurface ? FaceGeometry.SmoothNormals(faceTris) : null;
+                foreach (var (a, bb, c) in Clipped(faceTris))
                 {
                     foreach (var p in new[] { a, bb, c })
                     {
                         mm.Pos.Add(F(P(p)));
-                        var n = NormalAt(face, p, a, bb, c);
+                        var n = smooth?.Invoke(p) ?? NormalAt(face, p, a, bb, c);
                         mm.Nor.Add(new System.Numerics.Vector3((float)n.X, (float)n.Y, (float)n.Z));
                         x0 = Math.Min(x0, Math.Min(p.X, Math.Min(p.Y, p.Z))); x1 = Math.Max(x1, Math.Max(p.X, Math.Max(p.Y, p.Z)));
                     }
@@ -420,6 +442,7 @@ public partial class MainWindow : Window
         View.Children.Add(_edges);
         RenderSectionCut(doc);
         RenderGround(doc);
+        if (ReferenceEquals(doc, _doc) && !ReferenceEquals(doc, _treeDoc)) RefreshStructure();
         UpdateHighlight();
         if (zoom)
         {
@@ -472,6 +495,9 @@ public partial class MainWindow : Window
         else if (_hover is { } h && h != _selected) Add(h, HoverColor, 0.4);
         if (_dragFace != null && _snapBase is { } sb)
             Add(_previewMap != null && _dragValid && sb.Body == _dragFace.Value.Body && sb.Face < _previewMap.Count ? new FaceRef(sb.Body, _previewMap[sb.Face]) : sb, HoverColor, 0.45);
+        // (the structure tree shows what is picked too)
+        (int?, int?) picked = _selected is { } ps ? (ps.Body, ps.Face) : _multi is { } pm && ReferenceEquals(doc, _doc) && pm.Body < doc.Bodies.Count && pm.Faces.Count == doc.Bodies[pm.Body].Faces.Count ? (pm.Body, null) : (null, null);
+        if (picked != _treePicked) { _treePicked = picked; _structure?.Select(picked.Item1, picked.Item2); }
     }
 
     // ------------------------------------------------------------------ orbit (as in SketchUp)
@@ -750,7 +776,7 @@ public partial class MainWindow : Window
         if (!IsLoaded) return;
         PaintPanel.Visibility = PaintMode ? Visibility.Visible : Visibility.Collapsed;
         if (PaintMode) BuildPalette(); else _sampleOnce = false;
-        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndFreehand(); EndView(); EndProtractor(); EndSection(); EndDimension(); EndNoteBox(false); _axStage = 0; _grip = null; _gripHover = null; _letters = null; _unionFirst = null; HideTag(); MeasureUnit.Text = "mm";
+        EndDrag(); EndDraw(); EndOffset(); EndRound(); EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndFreehand(); EndView(); EndProtractor(); EndSection(); EndDimension(); EndNoteBox(false); _axStage = 0; _grip = null; _gripHover = null; _letters = null; _unionFirst = null; _mirrorBody = null; HideTag(); MeasureUnit.Text = "mm";
         Render();
         if (!LassoMode) EndLasso();
         StatusText.Text = MirrorMode ? T("⇋ Spiegelen: klik een plat vlak; het lichaam spiegelt erin. Ctrl+klik: een gespiegelde kopie erbij.", "⇋ Mirror: click a flat face; the body is mirrored in it. Ctrl+click: add a mirrored copy.")
@@ -1008,9 +1034,219 @@ public partial class MainWindow : Window
 
     private static Vec3 V(Point3D p) => new(p.X / Display, p.Y / Display, p.Z / Display);
 
+    // ------------------------------------------------------------------ structure tree
+
+    /// <summary>Where the structure tree is: under the tools, right of the view, or in a window of its own.</summary>
+    private enum StructurePlace { Left, Right, Loose }
+
+    private StructureTree? _structure;
+    private DockPanel? _structurePane;
+    private StructurePlace _structurePlace = StructurePlace.Right, _structureDocked = StructurePlace.Right;
+    private Window? _structureWindow;
+    private bool _structureFolded;
+    private SketchDocument? _treeDoc;
+    private (int?, int?) _treePicked;
+    private (int, int, int, int) _treeCounts = (-1, -1, -1, -1);
+    private readonly HashSet<SketchKind> _sketchHidden = new();
+
+    private static string StructureFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe", "structuur.txt");
+
+    private bool SketchVisible(SketchKind k) => !_sketchHidden.Contains(k);
+
+    /// <summary>The tree with its header (its name, and buttons: left, right, loose, fold), put where it was last.</summary>
+    private void BuildStructure()
+    {
+        _structure = new StructureTree();
+        _structure.BodyShown += (b, shown) =>
+        {
+            if (_doc == null || b >= _doc.Bodies.Count) return;
+            if (shown) _hidden.Remove(_doc.Bodies[b]); else _hidden.Add(_doc.Bodies[b]);
+            Render();
+            StatusText.Text = T($"🌲 {StructureTree.BodyName(_doc, b)} {(shown ? "weer zichtbaar" : "verborgen")}.", $"🌲 {StructureTree.BodyName(_doc, b)} {(shown ? "shown again" : "hidden")}.");
+        };
+        _structure.Renamed += (b, name) =>
+        {
+            if (_doc is not { } before || b >= before.Bodies.Count) return;
+            string old = before.BodyName(b);
+            Commit(before, before.Rename(b, name));
+            RefreshStructure();
+            StatusText.Text = T($"🌲 {old} heet nu {_doc!.BodyName(b)}.", $"🌲 {old} is now called {_doc!.BodyName(b)}.");
+            Log($"rename body {b}: {_doc.BodyName(b)}");
+        };
+        _structure.SketchShown += (k, shown) =>
+        {
+            if (shown) _sketchHidden.Remove(k); else _sketchHidden.Add(k);
+            RenderLoose(_shown ?? _doc); RenderGuides(); PlaceNotes();
+        };
+        _structure.Picked += (b, f) =>
+        {
+            if (_doc == null || b >= _doc.Bodies.Count) return;
+            if (f is int face) { _selected = new FaceRef(b, face); _multi = null; }
+            else { _selected = null; _multi = (b, Enumerable.Range(0, _doc.Bodies[b].Faces.Count).ToHashSet()); }
+            _treePicked = (b, f);
+            UpdateHighlight();
+            StatusText.Text = f is int ff ? T($"🌲 {StructureTree.BodyName(_doc, b)}, vlak {ff}.", $"🌲 {StructureTree.BodyName(_doc, b)}, face {ff}.")
+                : T($"🌲 {StructureTree.BodyName(_doc, b)} ({_doc.Bodies[b].Faces.Count} vlakken).", $"🌲 {StructureTree.BodyName(_doc, b)} ({_doc.Bodies[b].Faces.Count} faces).");
+        };
+        Button Small(string text, string tip)
+        {
+            return new Button
+            {
+                Content = text, ToolTip = tip, Width = 24, Height = 22, Margin = new Thickness(2, 0, 0, 0), Padding = new Thickness(0),
+                FontSize = 12, Background = Brushes.Transparent, BorderThickness = new Thickness(0), Cursor = Cursors.Hand, Focusable = false,
+            };
+        }
+        var head = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+        var left = Small("◧", T("Links, onder de gereedschappen", "Left, under the tools"));
+        left.Click += (_, _) => PlaceStructure(StructurePlace.Left);
+        var right = Small("◨", T("Rechts, naast het beeld", "Right, beside the view"));
+        right.Click += (_, _) => PlaceStructure(StructurePlace.Right);
+        var loose = Small("⧉", T("Los venster (overal neer te zetten; dicht: terug)", "Window of its own (put it anywhere; close: back)"));
+        loose.Click += (_, _) => PlaceStructure(StructurePlace.Loose);
+        var fold = Small("▾", T("In- of uitklappen", "Fold or unfold"));
+        fold.Click += (_, _) => { _structureFolded = !_structureFolded; fold.Content = _structureFolded ? "▸" : "▾"; ApplyFold(); SaveStructurePlace(); };
+        foreach (var b in new[] { left, right, loose, fold }) buttons.Children.Add(b);
+        DockPanel.SetDock(buttons, Dock.Right);
+        head.Children.Add(buttons);
+        head.Children.Add(new TextBlock { Text = T("STRUCTUUR", "STRUCTURE"), FontSize = 10.5, FontWeight = FontWeights.SemiBold, Foreground = (Brush)FindResource("Muted"), VerticalAlignment = VerticalAlignment.Center });
+        DockPanel.SetDock(head, Dock.Top);
+        _structurePane = new DockPanel();
+        _structurePane.Children.Add(head);
+        _structurePane.Children.Add(_structure);
+        var (place, folded) = LoadStructurePlace();
+        _structureFolded = folded; fold.Content = folded ? "▸" : "▾";
+        // (a window of its own last time: on the right, till it is set loose again)
+        PlaceStructure(place == StructurePlace.Loose ? StructurePlace.Right : place, keep: false);
+        RefreshStructure();
+    }
+
+    /// <summary>The tree moved to the left, the right or a window of its own (closing that window puts it back).</summary>
+    private void PlaceStructure(StructurePlace place, bool keep = true)
+    {
+        if (_structurePane == null) return;
+        // (out of where it is)
+        StructureLeft.Child = null; StructureRight.Child = null;
+        if (_structureWindow != null)
+        {
+            var old = _structureWindow; _structureWindow = null;
+            ((Border)old.Content).Child = null;
+            old.Close();
+        }
+        _structurePlace = place;
+        if (place != StructurePlace.Loose) _structureDocked = place;
+        StructureLeft.Visibility = place == StructurePlace.Left ? Visibility.Visible : Visibility.Collapsed;
+        StructureRight.Visibility = place == StructurePlace.Right ? Visibility.Visible : Visibility.Collapsed;
+        switch (place)
+        {
+            case StructurePlace.Left: StructureLeft.Child = _structurePane; break;
+            case StructurePlace.Right: StructureRight.Child = _structurePane; break;
+            default:
+            {
+                var w = new Window
+                {
+                    Title = T("Structuur", "Structure"), Owner = this, ShowInTaskbar = false, WindowStyle = WindowStyle.ToolWindow,
+                    Width = 280, Height = 520, Left = Left + Width - 320, Top = Top + 120, Background = (Brush)FindResource("Page"),
+                    Content = new Border { Padding = new Thickness(10, 8, 6, 8), Child = _structurePane },
+                };
+                w.Closed += (_, _) =>
+                {
+                    if (!ReferenceEquals(_structureWindow, w)) return;
+                    _structureWindow = null;
+                    ((Border)w.Content).Child = null;
+                    PlaceStructure(_structureDocked);
+                };
+                _structureWindow = w;
+                w.Show();
+                break;
+            }
+        }
+        ApplyFold();
+        if (keep) SaveStructurePlace();
+    }
+
+    /// <summary>Folded: only the header (the card no longer takes the height).</summary>
+    private void ApplyFold()
+    {
+        if (_structure == null) return;
+        _structure.Visibility = _structureFolded ? Visibility.Collapsed : Visibility.Visible;
+        StructureLeft.VerticalAlignment = _structureFolded ? VerticalAlignment.Top : VerticalAlignment.Stretch;
+        StructureRight.VerticalAlignment = _structureFolded ? VerticalAlignment.Top : VerticalAlignment.Stretch;
+        // (on the left and open: the tools three fifths of the height, scrolling when they do not fit, the tree the rest)
+        bool share = _structurePlace == StructurePlace.Left && !_structureFolded;
+        LeftColumn.RowDefinitions[0].Height = share ? new GridLength(3, GridUnitType.Star) : GridLength.Auto;
+        LeftColumn.RowDefinitions[1].Height = share ? new GridLength(2, GridUnitType.Star) : GridLength.Auto;
+    }
+
+    private (StructurePlace, bool) LoadStructurePlace()
+    {
+        try
+        {
+            if (File.Exists(StructureFile) && File.ReadAllText(StructureFile).Trim().Split(' ') is [var a, var b])
+                return (Enum.TryParse<StructurePlace>(a, out var p) ? p : StructurePlace.Left, b == "dicht");
+        }
+        catch (IOException) { } catch (UnauthorizedAccessException) { }
+        return (StructurePlace.Right, false);
+    }
+
+    private void SaveStructurePlace()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(StructureFile)!);
+            File.WriteAllText(StructureFile, $"{_structurePlace} {(_structureFolded ? "dicht" : "open")}");
+        }
+        catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
+
+    /// <summary>The tree made anew for the document as it is now.</summary>
+    private void RefreshStructure()
+    {
+        if (_structure == null) return;
+        _treeDoc = _doc;
+        _treeCounts = Counts();
+        var doc = _doc;
+        _structure.Show(doc, b => doc == null || !_hidden.Contains(doc.Bodies[b]), SketchVisible,
+            new Dictionary<SketchKind, int> { [SketchKind.Loose] = _treeCounts.Item1, [SketchKind.Guides] = _treeCounts.Item2, [SketchKind.Dimensions] = _treeCounts.Item3, [SketchKind.Notes] = _treeCounts.Item4 });
+        _treePicked = (null, null);
+    }
+
+    private (int, int, int, int) Counts() => (_doc?.Lines.Count ?? 0, _guides.Count, _dims.Count, _notes.Count);
+
+    /// <summary>Made anew when the number of drawing aids changed (cheap otherwise: this runs as the camera moves).</summary>
+    private void RefreshStructureCounts()
+    {
+        if (_structure != null && Counts() != _treeCounts) RefreshStructure();
+    }
+
     // ------------------------------------------------------------------ language
 
     private static string LanguageFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe", "taal.txt");
+
+    // ------------------------------------------------------------------ merge (samenvoegen)
+
+    private static string JoinFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PushPullMe", "samenvoegen.txt");
+
+    /// <summary>Whether ⇕ joins what it pulls against another part with it (the box bottom right; kept as set).</summary>
+    private bool Join => JoinBox.IsChecked == true;
+
+    /// <summary>The choice kept from before (on when there is none).</summary>
+    private void LoadJoin()
+    {
+        try { if (File.Exists(JoinFile)) JoinBox.IsChecked = File.ReadAllText(JoinFile).Trim() != "uit"; } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
+
+    private void JoinBox_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(JoinFile)!);
+            File.WriteAllText(JoinFile, Join ? "aan" : "uit");
+        }
+        catch (IOException) { } catch (UnauthorizedAccessException) { }
+        StatusText.Text = Join ? T("⇕ Samenvoegen aan: wat je tegen een ander deel aan trekt, wordt er één deel mee.", "⇕ Merge on: what you pull against another part becomes one part with it.")
+            : T("⇕ Samenvoegen uit: wat je trekt blijft een apart deel.", "⇕ Merge off: what you pull stays a part of its own.");
+    }
 
     /// <summary>English or Dutch: as chosen before, else as Windows speaks (Dutch for Dutch, English otherwise).</summary>
     private static bool LoadLanguage()
@@ -1843,7 +2079,8 @@ public partial class MainWindow : Window
     private void RenderGuides()
     {
         if (_guideVisual != null) { View.Children.Remove(_guideVisual); _guideVisual = null; }
-        if (_guides.Count == 0) return;
+        RefreshStructureCounts();
+        if (_guides.Count == 0 || !SketchVisible(SketchKind.Guides)) return;
         var pts = new Point3DCollection();
         double len = Math.Max(_modelSize, 10) * 1.5 / Display, dash = len / 60;
         foreach (var g in _guides)
@@ -1897,7 +2134,7 @@ public partial class MainWindow : Window
     {
         if (_looseVisual != null) { View.Children.Remove(_looseVisual); _looseVisual = null; }
         if (_looseConstruction != null) { View.Children.Remove(_looseConstruction); _looseConstruction = null; }
-        if (doc == null || doc.Lines.Count == 0) return;
+        if (doc == null || doc.Lines.Count == 0 || !SketchVisible(SketchKind.Loose)) return;
         var solid = new Point3DCollection(); var dashed = new Point3DCollection();
         foreach (var l in doc.Lines)
         {
@@ -2504,6 +2741,9 @@ public partial class MainWindow : Window
         }
         else n = FaceGeometry.Normal(face);
         _dragNormal = new Vector3D(n.X, n.Y, n.Z);
+        _dragTurn = face.Surface is BrepPlane ? PushPullMe.Core.Revolve.EndAxis(_doc.Bodies[f.Body], f.Face) : null;
+        _dragTurnAngle = 0;
+        if (_dragTurn != null) _through = [];
         _selected = null;
         _dragRadius = HasRadius(_doc, f);
         MeasureLabel.Text = _dragRadius ? T("Straal", "Radius") : T("Afstand", "Distance");
@@ -2530,6 +2770,24 @@ public partial class MainWindow : Window
     {
         var ray = Viewport3DHelper.GetRay(View.Viewport, pos);
         if (ray == null) return null;
+        if (_dragTurn is { } tn)
+        {
+            // the end of a turned piece: the angle round its axis where the mouse is (on the plane square to the axis
+            // through where it was grabbed), as the way of its middle along the turn
+            var a = tn.Dir.Normalized(); var start = V(_dragStart);
+            var org = V(ray.Origin); var rd = new Vec3(ray.Direction.X, ray.Direction.Y, ray.Direction.Z).Normalized();
+            double den = rd.Dot(a);
+            if (Math.Abs(den) < 1e-6) return null;
+            var q = org + rd * ((start - org).Dot(a) / den);
+            var foot = tn.Point + a * (start - tn.Point).Dot(a);
+            Vec3 r0 = start - foot, r1 = q - foot;
+            if (r0.Length < 1e-12 || r1.Length < 1e-12) return null;
+            double ang = Math.Atan2(r0.Cross(r1).Dot(a), r0.Dot(r1));
+            // (on from where it was: past half a turn too)
+            ang += 2 * Math.PI * Math.Round((_dragTurnAngle - ang) / (2 * Math.PI));
+            _dragTurnAngle = ang;
+            return ang * tn.Radius * Display;
+        }
         var dir = ray.Direction; dir.Normalize();
         double b = Vector3D.DotProduct(_dragNormal, dir);
         if (1 - b * b < 1e-6) return null;
@@ -2575,7 +2833,7 @@ public partial class MainWindow : Window
     /// </summary>
     private (double Mm, string Label, FaceRef Face)? FlushAt(Point pos)
     {
-        if (_dragFace is not { } f || _dragBase == null || _shown == null) return null;
+        if (_dragFace is not { } f || _dragBase == null || _shown == null || _dragTurn != null) return null;
         var baseFace = _dragBase.Bodies[f.Body].Faces[f.Face];
         if (baseFace.Surface is not BrepPlane) return null;
         var origin = ((BrepPlane)baseFace.Surface).Origin;
@@ -2711,7 +2969,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var (doc, r) = before.PushPull(f, dist);
+            var (doc, r) = before.PushPull(f, dist, join: Join);
             if (replaceLast) { _doc = doc; _redo.Clear(); UpdateUndoButtons(); }
             else Commit(before, doc);
             _last = (before, f, dist);
@@ -2732,7 +2990,7 @@ public partial class MainWindow : Window
                 StatusText.Text = T($"✅ Getrokken als apart deel ({Math.Abs(dist) * Display:0.##} mm): als deel van het blok zou het dat alleen langs een rand raken, en dat kan een massief blok niet zijn.", $"✅ Pulled as a part of its own ({Math.Abs(dist) * Display:0.##} mm): as part of the block it would touch it only along an edge, which a solid block cannot do.");
                 _selected = null;
             }
-            Log($"pushpull face {f.Face} {dist * Display:0.###} mm: ok, {doc.Bodies[f.Body].Faces.Count} faces, {doc.Bodies.Count} bodies");
+            Log($"pushpull face {f.Face} {dist * Display:0.###} mm: ok, {r.Body.Faces.Count} faces, {doc.Bodies.Count} bodies");
         }
         catch (PushPullException ex)
         {
@@ -3209,7 +3467,8 @@ public partial class MainWindow : Window
             BorderThickness = new Thickness(1.2), CornerRadius = new CornerRadius(6), Padding = new Thickness(6, 2, 6, 2),
             Child = new TextBlock { Text = text, FontSize = 12.5, FontWeight = FontWeights.SemiBold, Foreground = dim ? new SolidColorBrush(EdgeColor) : (Brush)FindResource("Accent") },
         };
-        foreach (var n in _notes)
+        RefreshStructureCounts();
+        foreach (var n in SketchVisible(SketchKind.Notes) ? _notes : [])
         {
             var at = Screen2(n.At);
             var leader = new System.Windows.Shapes.Line { X1 = at.X, Y1 = at.Y, X2 = at.X + 28, Y2 = at.Y - 28, Stroke = (Brush)FindResource("Accent"), StrokeThickness = 1.2 };
@@ -3232,7 +3491,7 @@ public partial class MainWindow : Window
             label.Opacity = final ? 1 : 0.8;
             TagLayer.Children.Add(label); _noteViews.Add(label);
         }
-        foreach (var d in _dims) Dim(d.A, d.B, d.Off, true);
+        foreach (var d in SketchVisible(SketchKind.Dimensions) ? _dims : []) Dim(d.A, d.B, d.Off, true);
         if (_dimStage == 2) Dim(_dimA, _dimB, _dimOff, false);
         if (pts.Count > 0) View.Children.Add(_dimLines = new LinesVisual3D { Points = pts, Color = EdgeColor, Thickness = 1.3 });
     }
@@ -3492,7 +3751,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                var (d, r) = doc.PushPull(faces[i], distance);
+                var (d, r) = doc.PushPull(faces[i], distance, join: Join);
                 doc = d; done++;
                 // (the other letters under their numbers now)
                 for (int j = i + 1; j < faces.Count; j++)
@@ -3576,13 +3835,13 @@ public partial class MainWindow : Window
         {
             int n = _hidden.Count;
             _hidden.Clear();
-            Render();
+            Render(); RefreshStructure();
             StatusText.Text = n == 0 ? T("🏷 Er was niets verborgen.", "🏷 Nothing was hidden.") : T($"🏷 Alles weer zichtbaar ({n} {(n == 1 ? "deel" : "delen")}).", $"🏷 Everything shown again ({n} {(n == 1 ? "part" : "parts")}).");
             return;
         }
         _hidden.Add(_doc.Bodies[h.Face.Body]);
         _selected = null; _hover = null;
-        Render();
+        Render(); RefreshStructure();
         StatusText.Text = T($"🏷 Verborgen ({_hidden.Count} in totaal). Klik op een lege plek om alles weer te tonen.", $"🏷 Hidden ({_hidden.Count} in all). Click an empty spot to show everything again.");
         Log($"hide body {h.Face.Body}");
     }
@@ -4305,22 +4564,52 @@ public partial class MainWindow : Window
 
     // ------------------------------------------------------------------ mirror
 
-    /// <summary>⇋: the body of the face clicked mirrored in that face's plane (Ctrl: a mirrored copy added).</summary>
+    /// <summary>A body whose face clicked with ⇋ was round (a free form has no flat face to mirror in): it waits for the
+    /// plane to mirror it in; and whether that is to be a copy.</summary>
+    private int? _mirrorBody;
+    private bool _mirrorCopy;
+
+    /// <summary>
+    /// ⇋: the body of the flat face clicked mirrored in that face's plane (Ctrl: a mirrored copy added). A round face
+    /// clicked: its body waits for the plane, a flat face of any body, or (arrow keys) the plane through its middle
+    /// square to red, green or blue.
+    /// </summary>
     private void MirrorAt((FaceRef Face, Point3D Point)? hit)
     {
         if (hit is not { } h || _doc is not { } before) return;
         var face = before.Bodies[h.Face.Body].Faces[h.Face.Face];
-        if (face.Surface is not BrepPlane pl) { StatusText.Text = T("⇋ Spiegelen kan in een plat vlak.", "⇋ Mirroring works in a flat face."); return; }
-        bool copy = (Mods & ModifierKeys.Control) != 0;
-        var n = FaceGeometry.Normal(face);
+        if (_mirrorBody is int waiting)
+        {
+            if (face.Surface is not BrepPlane wp) { StatusText.Text = T("⇋ Klik een plat vlak (van welk lichaam ook) om in te spiegelen. Of klap hem om door zijn eigen midden: → in de rode richting, ← in de groene, ↑ boven-onder (blauw). Esc breekt af.", "⇋ Click a flat face (of any body) to mirror in. Or flip it through its own middle: → along red, ← along green, ↑ top to bottom (blue). Esc cancels."); return; }
+            MirrorBodyIn(waiting, wp.Origin, FaceGeometry.Normal(face), $"face {h.Face.Face} of body {h.Face.Body}");
+            return;
+        }
+        if (face.Surface is not BrepPlane pl)
+        {
+            _mirrorBody = h.Face.Body; _mirrorCopy = (Mods & ModifierKeys.Control) != 0;
+            _selected = h.Face; UpdateHighlight();
+            StatusText.Text = T("⇋ Waarin spiegelen? Klik een plat vlak (van welk lichaam ook). Of klap hem om door zijn eigen midden: → in de rode richting, ← in de groene, ↑ boven-onder (blauw). Esc breekt af.", "⇋ Mirror in what? Click a flat face (of any body). Or flip it through its own middle: → along red, ← along green, ↑ top to bottom (blue). Esc cancels.");
+            return;
+        }
+        _mirrorCopy = (Mods & ModifierKeys.Control) != 0;
+        MirrorBodyIn(h.Face.Body, pl.Origin, FaceGeometry.Normal(face), $"face {h.Face.Face}");
+    }
+
+    /// <summary>A body mirrored in the plane through <paramref name="origin"/> square to <paramref name="n"/> (a copy when
+    /// that was asked for); <paramref name="what"/>: that plane, for the log.</summary>
+    private void MirrorBodyIn(int body, Vec3 origin, Vec3 n, string what)
+    {
+        if (_doc is not { } before) return;
+        bool copy = _mirrorCopy;
+        _mirrorBody = null;
         try
         {
-            var (doc, _) = before.MirrorBody(h.Face.Body, pl.Origin, n, copy);
+            var (doc, _) = before.MirrorBody(body, origin, n, copy);
             Commit(before, doc);
             _last = null; _lastMove = null; _selected = null; _hover = null;
             Render();
             StatusText.Text = copy ? T("✅ Gespiegelde kopie erbij.", "✅ Mirrored copy added.") : T("✅ Gespiegeld.", "✅ Mirrored.");
-            Log(string.Create(CultureInfo.InvariantCulture, $"mirror body {h.Face.Body}{(copy ? " (copy)" : "")} in face {h.Face.Face}: ok"));
+            Log(string.Create(CultureInfo.InvariantCulture, $"mirror body {body}{(copy ? " (copy)" : "")} in {what}: ok"));
         }
         catch (PushPullException ex)
         {
@@ -4984,7 +5273,7 @@ public partial class MainWindow : Window
 
     private void Window_TextInput(object sender, TextCompositionEventArgs e)
     {
-        if (_noteBox is { IsKeyboardFocused: true }) return;
+        if (Keyboard.FocusedElement is TextBox) return;
         if (e.Text.Length == 1 && TypeChar(e.Text[0])) e.Handled = true;
     }
 
@@ -5018,8 +5307,8 @@ public partial class MainWindow : Window
         if (ctrl && e.Key == Key.Y) { Redo(); e.Handled = true; return; }
         if (ctrl && e.Key == Key.O) { _ = OpenDialog(); e.Handled = true; return; }
         if (ctrl && e.Key == Key.S) { Save_Click(this, new RoutedEventArgs()); e.Handled = true; return; }
-        // (typing a label: the keys are the label's)
-        if (_noteBox is { IsKeyboardFocused: true }) return;
+        // (typing a label or a name in the structure tree: the keys are the box's)
+        if (Keyboard.FocusedElement is TextBox) return;
         if (ctrl) return;
         if (WalkMode && WalkKey(e.Key)) { e.Handled = true; return; }
         if (WorkPlaneMode && WorkPlaneKey(e.Key)) { e.Handled = true; return; }
@@ -5060,6 +5349,7 @@ public partial class MainWindow : Window
                 else if (_secFace != null) { EndSection(); _section = null; _typed = ""; Render(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (SectionMode && _section != null) { _section = null; Render(); StatusText.Text = T("⊟ Doorsnede weggehaald.", "⊟ Section removed."); }
                 else if (_unionFirst != null) { _unionFirst = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
+                else if (_mirrorBody != null) { _mirrorBody = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Afgebroken.", "Cancelled."); }
                 else if (_typed.Length > 0) { _typed = ""; MeasureBox.Text = ""; }
                 else if (_multi != null) { _multi = null; _selected = null; UpdateHighlight(); StatusText.Text = T("Keuze leeg.", "Selection cleared."); }
                 e.Handled = true;
@@ -5104,6 +5394,17 @@ public partial class MainWindow : Window
                 else StatusText.Text = T($"⬡ Veelhoek ({_polySides} hoeken; ↑/↓: meer/minder): klik het middelpunt op een plat vlak.", $"⬡ Polygon ({_polySides} sides; ↑/↓: more/fewer): click the centre on a flat face.");
                 e.Handled = true;
                 break;
+            case Key.Right or Key.Left or Key.Up when _mirrorBody != null:
+            {
+                // the plane through the middle of the body, square to red, green or blue
+                int body = _mirrorBody.Value;
+                var dir = Axes[e.Key switch { Key.Right => 0, Key.Left => 1, _ => 2 }].Dir;
+                var pts = _doc!.AllTriangles().Where(x => x.Face.Body == body).SelectMany(x => x.Triangles).SelectMany(t => new[] { t.A, t.B, t.C }).ToList();
+                var lo = new Vec3(pts.Min(q => q.X), pts.Min(q => q.Y), pts.Min(q => q.Z)); var hi = new Vec3(pts.Max(q => q.X), pts.Max(q => q.Y), pts.Max(q => q.Z));
+                MirrorBodyIn(body, (lo + hi) * 0.5, dir, "its middle");
+                e.Handled = true;
+                break;
+            }
             case Key.Right or Key.Left or Key.Up or Key.Down when _scStage > 0:
                 // only along the red, green or blue axis; down: all directions again
                 _scAxis = e.Key switch { Key.Right => Axes[0].Dir, Key.Left => Axes[1].Dir, Key.Up => Axes[2].Dir, _ => null };
@@ -5582,29 +5883,6 @@ public partial class MainWindow : Window
         }
     }
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hwnd);
-    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
-    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
-    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int w, int h);
-    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
-    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
-    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
-    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
-
-    /// <summary>What the screen shows where an element of this (test) window is: a copy of those pixels.</summary>
-    private static System.Windows.Media.Imaging.BitmapSource ScreenShot(FrameworkElement e)
-    {
-        var tl = e.PointToScreen(new Point(0, 0)); var br = e.PointToScreen(new Point(e.ActualWidth, e.ActualHeight));
-        int x = (int)tl.X, y = (int)tl.Y, w = Math.Max(1, (int)(br.X - tl.X)), h = Math.Max(1, (int)(br.Y - tl.Y));
-        IntPtr screen = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(screen), bmp = CreateCompatibleBitmap(screen, w, h);
-        var old = SelectObject(mem, bmp);
-        BitBlt(mem, 0, 0, w, h, screen, x, y, 0x00CC0020);
-        SelectObject(mem, old);
-        var src = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(bmp, IntPtr.Zero, Int32Rect.Empty, System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
-        DeleteObject(bmp); DeleteDC(mem); ReleaseDC(IntPtr.Zero, screen);
-        return src;
-    }
-
     private async Task RenderPng(string path)
     {
         await Task.Delay(400);
@@ -5616,8 +5894,9 @@ public partial class MainWindow : Window
         using (var dc = bg.RenderOpen()) dc.DrawRectangle(Background, null, new Rect(0, 0, w, h));
         bmp.Render(bg);
         bmp.Render(root);
-        // (the 3D view is drawn by DirectX, which a WPF render does not see: what is on the screen there, copied from it)
-        var shot = ScreenShot(View);
+        // (the 3D view is drawn by DirectX, which a WPF render does not see: rendered by it into a bitmap of its own, never
+        // copied from the screen, where another window may lie over this one)
+        var shot = View.RenderBitmap();
         var at = View.TranslatePoint(new Point(0, 0), root);
         var over = new DrawingVisual();
         using (var dc = over.RenderOpen()) dc.DrawImage(shot, new Rect(at.X + root.Margin.Left, at.Y + root.Margin.Top, View.ActualWidth, View.ActualHeight));

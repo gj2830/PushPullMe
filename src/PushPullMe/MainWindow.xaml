@@ -68,10 +68,11 @@
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto"/>
             <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
 
         <!-- ============================== top bar: name and file buttons -->
-        <DockPanel Grid.ColumnSpan="2" Margin="0,0,0,12" LastChildFill="False">
+        <DockPanel Grid.ColumnSpan="3" Margin="0,0,0,12" LastChildFill="False">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                 <Image Source="Assets/pushpullme.png" Width="34" Height="34" Margin="0,0,10,0" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
                 <TextBlock Text="PushPullMe" FontSize="26" FontWeight="Black" Foreground="{StaticResource AccentGradient}"/>
@@ -87,8 +88,13 @@
             </StackPanel>
         </DockPanel>
 
-        <!-- ============================== toolbar -->
-        <Border Grid.Row="1" Style="{StaticResource Card}" Padding="10,10,4,4" Margin="0,0,12,0" VerticalAlignment="Top">
+        <!-- ============================== toolbar, and under it the structure tree (when it is on the left) -->
+        <Grid x:Name="LeftColumn" Grid.Row="1" Margin="0,0,12,0">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Border Style="{StaticResource Card}" Padding="10,10,4,4" VerticalAlignment="Top">
             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <WrapPanel Width="215">
                 <TextBlock Style="{StaticResource ToolGroup}" Text="BASIS"/>
@@ -186,6 +192,13 @@
             </WrapPanel>
             </ScrollViewer>
         </Border>
+        <Border x:Name="StructureLeft" Grid.Row="1" Style="{StaticResource Card}" Padding="10,8,6,8" Margin="0,12,0,0" Width="229" MinHeight="44"
+                VerticalAlignment="Stretch"/>
+        </Grid>
+
+        <!-- ============================== the structure tree (when it is on the right) -->
+        <Border x:Name="StructureRight" Grid.Row="1" Grid.Column="2" Style="{StaticResource Card}" Padding="10,8,6,8" Margin="12,0,0,0" Width="250"
+                Visibility="Collapsed"/>
 
         <!-- ============================== the view -->
         <Border Grid.Row="1" Grid.Column="1" CornerRadius="22" Background="{StaticResource ViewGradient}" Effect="{StaticResource Shadow}" ClipToBounds="True">
@@ -263,9 +276,12 @@
         </Border>
 
         <!-- ============================== status bar: what to do, and the measurements box -->
-        <DockPanel Grid.Row="2" Grid.ColumnSpan="2" Margin="0,12,0,0">
+        <DockPanel Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0">
             <Border DockPanel.Dock="Right" Style="{StaticResource Card}" Padding="14,6" Margin="0">
                 <StackPanel Orientation="Horizontal">
+                    <CheckBox x:Name="JoinBox" Content="samenvoegen" IsChecked="True" VerticalAlignment="Center" Margin="0,0,16,0"
+                              Foreground="{StaticResource Muted}" Click="JoinBox_Click"
+                              ToolTip="Aan: wat je met ⇕ tegen een ander deel aan trekt, wordt er één deel mee (zoals DesignSpark). Uit: het blijft een apart deel."/>
                     <TextBlock x:Name="MeasureLabel" Text="Afstand" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Margin="0,0,10,0"/>
                     <TextBox x:Name="MeasureBox" Width="110" FontSize="15" FontWeight="SemiBold" BorderThickness="0" Background="Transparent"
                              VerticalAlignment="Center" IsReadOnly="True" Focusable="False" Foreground="{StaticResource Accent}"/>

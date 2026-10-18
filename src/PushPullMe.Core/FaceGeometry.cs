@@ -332,25 +332,23 @@ public static class FaceGeometry
         switch (f.Surface)
         {
             case BrepCylinder or BrepCone:
-                return CylinderTriangles(body, f);
-            case BrepNurbsSurface ns when ns.Helix == null && f.Loops.Count == 1:
             {
-                // (a corner piece PushPullMe made: the face is the whole surface) a grid over its parameters
-                const int n = 12;
-                double u0 = ns.UKnots[0], u1 = ns.UKnots[^1], v0 = ns.VKnots[0], v1 = ns.VKnots[^1];
-                var g = new Vec3[n + 1, n + 1];
-                for (int i = 0; i <= n; i++)
-                    for (int j = 0; j <= n; j++) g[i, j] = ns.At(u0 + (u1 - u0) * i / n, v0 + (v1 - v0) * j / n);
-                var tris = new List<(Vec3, Vec3, Vec3)>();
-                for (int i = 0; i < n; i++)
-                    for (int j = 0; j < n; j++)
-                    {
-                        // (natural normal dS/du × dS/dv; reversed: the other way round)
-                        if (!f.Reversed) { tris.Add((g[i, j], g[i + 1, j], g[i + 1, j + 1])); tris.Add((g[i, j], g[i + 1, j + 1], g[i, j + 1])); }
-                        else { tris.Add((g[i, j], g[i + 1, j + 1], g[i + 1, j])); tris.Add((g[i, j], g[i, j + 1], g[i + 1, j + 1])); }
-                    }
-                return tris.Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-18).ToList();
+                if (CylinderTriangles(body, f) is { } cyl) return cyl;
+                // (one loop over a seam, as OpenCASCADE writes a whole cylinder or cone: in its angle and height)
+                var (o, ax, x, r, slope) = f.Surface switch
+                {
+                    BrepCylinder c => (c.Origin, c.Axis.Normalized(), c.XAxis, c.Radius, 0.0),
+                    BrepCone k => (k.Origin, k.Axis.Normalized(), k.XAxis, k.Radius, Math.Tan(k.HalfAngle)),
+                    _ => default,
+                };
+                var cx = (x - ax * x.Dot(ax)).Normalized(); var cy = ax.Cross(cx);
+                return Unwrapped(body, f, true, false,
+                    p => { var q = p - o; return (Math.Atan2(q.Dot(cy), q.Dot(cx)), q.Dot(ax)); },
+                    (u, v) => o + ax * v + (cx * Math.Cos(u) + cy * Math.Sin(u)) * (r + v * slope),
+                    Math.Max(r, 1e-6), 1);
             }
+            case BrepNurbsSurface ns:
+                return NurbsTriangles(body, f, ns);
             case BrepSphere sp:
             {
                 Vec3 Outward(Vec3 p) => (p - sp.Centre).Normalized() * s;
@@ -387,6 +385,11 @@ public static class FaceGeometry
                         p => { var q = p - to.Centre; double h = q.Dot(ax); var w = q - ax * h; return (Math.Atan2(w.Dot(ty), w.Dot(tx)), Math.Atan2(h, w.Length - to.MajorRadius)); },
                         (u, v) => to.Centre + (tx * Math.Cos(u) + ty * Math.Sin(u)) * (to.MajorRadius + to.MinorRadius * Math.Cos(v)) + ax * (to.MinorRadius * Math.Sin(v)),
                         to.MajorRadius, to.MinorRadius) is { } piece) return piece;
+                // (one loop over two seams, as OpenCASCADE writes a whole ring)
+                if (Unwrapped(body, f, true, true,
+                        p => { var q = p - to.Centre; double h = q.Dot(ax); var w = q - ax * h; return (Math.Atan2(w.Dot(ty), w.Dot(tx)), Math.Atan2(h, w.Length - to.MajorRadius)); },
+                        (u, v) => to.Centre + (tx * Math.Cos(u) + ty * Math.Sin(u)) * (to.MajorRadius + to.MinorRadius * Math.Cos(v)) + ax * (to.MinorRadius * Math.Sin(v)),
+                        to.MajorRadius, to.MinorRadius) is { } whole) return whole;
                 return Projected(body, f, p => Tube(p) + (p - Tube(p)).Normalized() * to.MinorRadius, Outward, null);
             }
             default:
@@ -478,6 +481,190 @@ public static class FaceGeometry
     }
 
     /// <summary>
+    /// The triangles of a free-form (NURBS) face, from its parameters. The whole surface (no loops but single points, as
+    /// DesignSpark's revolved spline; or a loop round the edge of the parameters, as a corner piece PushPullMe makes): a
+    /// grid over the parameters. A face cut out of it: its loops taken to the parameters (<see cref="BrepNurbsSurface.Parameters"/>),
+    /// cut where a closed direction has the widest gap, triangulated there and refined with the points on the surface.
+    /// Wound along the natural normal dS/du × dS/dv (reversed: the other way). Null when that does not work.
+    /// </summary>
+    private static List<(Vec3 A, Vec3 B, Vec3 C)>? NurbsTriangles(BrepBody body, BrepFace f, BrepNurbsSurface ns)
+    {
+        double u0 = ns.UKnots[0], u1 = ns.UKnots[^1], v0 = ns.VKnots[0], v1 = ns.VKnots[^1];
+        double du = u1 - u0, dv = v1 - v0;
+        Vec3 Natural(double u, double v)
+        {
+            double hu = du * 1e-6, hv = dv * 1e-6;
+            double ua = Math.Max(u0, u - hu), ub = Math.Min(u1, u + hu), va = Math.Max(v0, v - hv), vb = Math.Min(v1, v + hv);
+            var n = (ns.At(ub, v) - ns.At(ua, v)).Cross(ns.At(u, vb) - ns.At(u, va));
+            return f.Reversed ? n * -1 : n;
+        }
+        var loops = f.Loops.Select(l => LoopPoints(body, l)).Where(l => l.Count >= 3).ToList();
+        // (each point from the last one along the loop: Newton only, the grid search only when that fails)
+        var uv = loops.Select(l =>
+        {
+            var r = new List<(double U, double V)>(l.Count);
+            foreach (var p in l) r.Add(r.Count == 0 ? ns.Parameters(p) : ns.Parameters(p, r[^1]));
+            return r;
+        }).ToList();
+        bool Border((double U, double V) q) => Math.Abs(q.U - u0) < du * 1e-6 || Math.Abs(q.U - u1) < du * 1e-6 || Math.Abs(q.V - v0) < dv * 1e-6 || Math.Abs(q.V - v1) < dv * 1e-6;
+        if (uv.Count == 0 || (uv.Count == 1 && uv[0].All(Border)))
+        {
+            // the whole surface: a grid, fine enough that the surface between its points keeps within 0.01 mm of a straight
+            // line (in each direction doubled from 4 per control point till it does; a twisted loft needs many)
+            int Steps(int start, Func<double, double, Vec3> p)
+            {
+                for (int n = start; ; n *= 2)
+                {
+                    double worst = 0;
+                    for (int k = 0; k <= 8 && worst <= 1e-5; k++)
+                        for (int i = 0; i < n; i++)
+                        {
+                            double a = (double)i / n, b = (double)(i + 1) / n, c = k / 8.0;
+                            worst = Math.Max(worst, (p((a + b) / 2, c) - (p(a, c) + p(b, c)) * 0.5).Length);
+                        }
+                    if (worst <= 1e-5 || n >= 512) return n;
+                }
+            }
+            int nu = Steps(Math.Max(12, 4 * ns.NU), (t, c) => ns.At(u0 + du * t, v0 + dv * c));
+            int nv = Steps(Math.Max(12, 4 * ns.NV), (t, c) => ns.At(u0 + du * c, v0 + dv * t));
+            var g = new Vec3[nu + 1, nv + 1];
+            for (int i = 0; i <= nu; i++)
+                for (int j = 0; j <= nv; j++) g[i, j] = ns.At(u0 + du * i / nu, v0 + dv * j / nv);
+            var grid = new List<(Vec3, Vec3, Vec3)>();
+            for (int i = 0; i < nu; i++)
+                for (int j = 0; j < nv; j++)
+                {
+                    // (natural normal dS/du × dS/dv; reversed: the other way round)
+                    if (!f.Reversed) { grid.Add((g[i, j], g[i + 1, j], g[i + 1, j + 1])); grid.Add((g[i, j], g[i + 1, j + 1], g[i, j + 1])); }
+                    else { grid.Add((g[i, j], g[i + 1, j + 1], g[i + 1, j])); grid.Add((g[i, j], g[i, j + 1], g[i + 1, j + 1])); }
+                }
+            return grid.Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-18).ToList();
+        }
+        // a closed direction: cut where the loops leave the widest gap (a face going all the way round: not this way)
+        bool uClosed = ns.Format is { UClosed: true } or { UPeriodic: true }, vClosed = ns.Format is { VClosed: true } or { VPeriodic: true };
+        static double? Cut(IEnumerable<double> values, double lo, double period)
+        {
+            var s = values.Select(x => x - lo).Order().ToList();
+            double gap = s[0] + period - s[^1], mid = s[^1] + gap / 2;
+            for (int i = 0; i + 1 < s.Count; i++)
+                if (s[i + 1] - s[i] > gap) { gap = s[i + 1] - s[i]; mid = (s[i] + s[i + 1]) / 2; }
+            return gap > period * 0.02 ? lo + mid % period : null;
+        }
+        double cu = u0, cv = v0;
+        if (uClosed) { if (Cut(uv.SelectMany(l => l.Select(q => q.U)), u0, du) is not double c) return null; cu = c; }
+        if (vClosed) { if (Cut(uv.SelectMany(l => l.Select(q => q.V)), v0, dv) is not double c) return null; cv = c; }
+        static double From(double x, double cut, double period) { double t = (x - cut) % period; return t < 0 ? t + period : t; }
+        (double U, double V) Lay((double U, double V) q) => (uClosed ? From(q.U, cu, du) : q.U - u0, vClosed ? From(q.V, cv, dv) : q.V - v0);
+        double Wrap(double x, double cut, double lo, double period, bool closed) => closed ? lo + (x + cut - lo) % period : lo + x;
+        Vec3 At((double U, double V) q) => ns.At(Wrap(q.U, cu, u0, du, uClosed), Wrap(q.V, cv, v0, dv, vClosed));
+        var laid = uv.Select(l => l.Select(Lay).ToList()).ToList();
+        // (a rectangle in the parameters, as a seam makes it: a neat grid through its own edge points)
+        if (laid.Count == 1 && Grid(laid[0], loops[0], (u, v) => At((u, v)), p => Natural(ns.Parameters(p).U, ns.Parameters(p).V)) is { } rect && rect.Count > 0) return rect;
+        // (to lengths: so the triangles are not long and thin where the parameters stretch)
+        double Len(Func<double, Vec3> c) { double s = 0; var p = c(0); for (int i = 1; i <= 16; i++) { var q = c(i / 16.0); s += (q - p).Length; p = q; } return s; }
+        double su = Math.Max(1e-12, Len(t => ns.At(u0 + du * t, v0 + dv / 2))) / du, sv = Math.Max(1e-12, Len(t => ns.At(u0 + du / 2, v0 + dv * t))) / dv;
+        double AreaOf(List<(double U, double V)> l) { double a = 0; for (int i = 0; i < l.Count; i++) a += l[i].U * l[(i + 1) % l.Count].V - l[(i + 1) % l.Count].U * l[i].V; return Math.Abs(a); }
+        int outer = Enumerable.Range(0, laid.Count).MaxBy(i => AreaOf(laid[i]));
+        var ordered = new[] { outer }.Concat(Enumerable.Range(0, laid.Count).Where(i => i != outer)).ToList();
+        var flat = ordered.SelectMany(i => laid[i]).ToList();
+        var pts3 = ordered.SelectMany(i => loops[i]).ToList();
+        var idx = Triangulator.Triangulate(ordered.Select(i => (IReadOnlyList<(double, double)>)laid[i].Select(q => (q.U * su, q.V * sv)).ToList()).ToList());
+        if (idx.Count == 0) return null;
+        var tris = idx.Select(t => ((flat[t.A], pts3[t.A]), (flat[t.B], pts3[t.B]), (flat[t.C], pts3[t.C]))).ToList();
+        ((double U, double V), Vec3) Mid(((double U, double V) Q, Vec3) a, ((double U, double V) Q, Vec3) b)
+        {
+            var q = ((a.Q.U + b.Q.U) / 2, (a.Q.V + b.Q.V) / 2);
+            return (q, At(q));
+        }
+        for (int level = 0; level < 3; level++)
+        {
+            var next = new List<(((double, double), Vec3), ((double, double), Vec3), ((double, double), Vec3))>(tris.Count * 4);
+            foreach (var (a, b, c) in tris)
+            {
+                var ab = Mid(a, b); var bc = Mid(b, c); var ca = Mid(c, a);
+                next.Add((a, ab, ca)); next.Add((ab, b, bc)); next.Add((ca, bc, c)); next.Add((ab, bc, ca));
+            }
+            tris = next;
+        }
+        return tris.Select(t =>
+        {
+            Vec3 a = t.Item1.Item2, b = t.Item2.Item2, c = t.Item3.Item2;
+            var (mu, mv) = ((t.Item1.Item1.Item1 + t.Item2.Item1.Item1 + t.Item3.Item1.Item1) / 3, (t.Item1.Item1.Item2 + t.Item2.Item1.Item2 + t.Item3.Item1.Item2) / 3);
+            var n = Natural(Wrap(mu, cu, u0, du, uClosed), Wrap(mv, cv, v0, dv, vClosed));
+            return (b - a).Cross(c - a).Dot(n) >= 0 ? (a, b, c) : (a, c, b);
+        }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
+    }
+
+    /// <summary>
+    /// A face of one loop laid out in its two parameters with the angles counted on along the loop (not jumping back at
+    /// a whole turn): a loop over a seam (the same edge both ways, as OpenCASCADE writes a whole cylinder, cone or ring)
+    /// becomes a rectangle there. Triangulated (scaled by <paramref name="su"/>, <paramref name="sv"/> to lengths),
+    /// refined three times with the points exactly on the surface, wound along the face's normal. Null when that does not
+    /// give a proper outline.
+    /// </summary>
+    private static List<(Vec3 A, Vec3 B, Vec3 C)>? Unwrapped(BrepBody body, BrepFace f, bool periodicU, bool periodicV,
+        Func<Vec3, (double U, double V)> angles, Func<double, double, Vec3> at, double su, double sv)
+    {
+        if (f.Loops.Count != 1) return null;
+        var pts = LoopPoints(body, f.Loops[0]);
+        if (pts.Count < 3) return null;
+        var uv = new List<(double U, double V)>(pts.Count);
+        foreach (var p in pts)
+        {
+            var (u, v) = angles(p);
+            if (uv.Count > 0)
+            {
+                var (pu, pv) = uv[^1];
+                if (periodicU) u += 2 * Math.PI * Math.Round((pu - u) / (2 * Math.PI));
+                if (periodicV) v += 2 * Math.PI * Math.Round((pv - v) / (2 * Math.PI));
+            }
+            uv.Add((u, v));
+        }
+        // (a rectangle there, as a seam makes it: a neat grid through its own edge points)
+        if (Grid(uv, pts, at, p => NormalAt(f, p) ?? new Vec3(0, 0, 0)) is { } grid && grid.Count > 0) return grid;
+        var idx = Triangulator.Triangulate([uv.Select(q => (q.U * su, q.V * sv)).ToList()]);
+        if (idx.Count == 0) return null;
+        var tris = idx.Select(t => ((uv[t.A], pts[t.A]), (uv[t.B], pts[t.B]), (uv[t.C], pts[t.C]))).ToList();
+        ((double U, double V), Vec3) Mid(((double U, double V) Q, Vec3) a, ((double U, double V) Q, Vec3) b)
+        {
+            var q = ((a.Q.U + b.Q.U) / 2, (a.Q.V + b.Q.V) / 2);
+            return (q, at(q.Item1, q.Item2));
+        }
+        for (int level = 0; level < 3; level++)
+        {
+            var next = new List<(((double, double), Vec3), ((double, double), Vec3), ((double, double), Vec3))>(tris.Count * 4);
+            foreach (var (a, b, c) in tris)
+            {
+                var ab = Mid(a, b); var bc = Mid(b, c); var ca = Mid(c, a);
+                next.Add((a, ab, ca)); next.Add((ab, b, bc)); next.Add((ca, bc, c)); next.Add((ab, bc, ca));
+            }
+            tris = next;
+        }
+        return tris.Select(t =>
+        {
+            Vec3 a = t.Item1.Item2, b = t.Item2.Item2, c = t.Item3.Item2;
+            var n = NormalAt(f, (a + b + c) * (1.0 / 3)) ?? (b - a).Cross(c - a);
+            return (b - a).Cross(c - a).Dot(n) >= 0 ? (a, b, c) : (a, c, b);
+        }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
+    }
+
+    /// <summary>
+    /// Smooth normals for triangles of one face whose surface gives none (a free-form face): at each point the
+    /// area-weighted mean of the normals of the triangles round it; null for a point not among them.
+    /// </summary>
+    public static Func<Vec3, Vec3?> SmoothNormals(IEnumerable<(Vec3 A, Vec3 B, Vec3 C)> tris)
+    {
+        static (long, long, long) Key(Vec3 p) => ((long)Math.Round(p.X * 1e8), (long)Math.Round(p.Y * 1e8), (long)Math.Round(p.Z * 1e8));
+        var sum = new Dictionary<(long, long, long), Vec3>();
+        foreach (var (a, b, c) in tris)
+        {
+            var n = (b - a).Cross(c - a);
+            foreach (var p in new[] { a, b, c }) sum[Key(p)] = sum.TryGetValue(Key(p), out var s) ? s + n : n;
+        }
+        return p => sum.TryGetValue(Key(p), out var s) && s.Length > 1e-30 ? s.Normalized() : null;
+    }
+
+    /// <summary>
     /// A face on a surface with two angles (u round its axis, v along its profile; v periodic for a torus) laid out in
     /// those angles (scaled by <paramref name="su"/> and <paramref name="sv"/> to lengths), each cut where the face is not
     /// (the middle of the widest gap between its edge points), triangulated there, every triangle cut in 4 three times
@@ -499,13 +686,42 @@ public static class FaceGeometry
             return gap > 3 * ArcStep ? mid : null;
         }
         static double From(double a, double cut) { double t = (a - cut) % (2 * Math.PI); return t < 0 ? t + 2 * Math.PI : t; }
-        if (Cut(raw.SelectMany(l => l.Select(q => q.U))) is not double cu) return null;
+        // (round the axis: not in a gap the face runs on into, which the widest is when its edges all go round the tube,
+        // such as a ring turned 270°: seen from outside the face lies left of its edge)
+        if (CutU() is not double cu) return null;
+        double? CutU()
+        {
+            var all = new List<(double U, double Side)>();
+            for (int li = 0; li < loops.Count; li++)
+                for (int i = 0; i < loops[li].Count; i++)
+                {
+                    var l = loops[li]; var (u, v) = raw[li][i];
+                    var t = l[(i + 1) % l.Count] - l[(i - 1 + l.Count) % l.Count];
+                    var eu = at(u + 1e-6, v) - at(u - 1e-6, v);
+                    double side = outward(l[i]).Cross(t).Normalized().Dot(eu.Normalized());
+                    all.Add((u < 0 ? u + 2 * Math.PI : u, double.IsNaN(side) ? 0 : side));
+                }
+            all.Sort((x, y) => x.U.CompareTo(y.U));
+            var gaps = new List<(double Size, double Mid, double A, double B)>();
+            for (int i = 0; i < all.Count; i++)
+            {
+                double a = all[i].U, b = i + 1 < all.Count ? all[i + 1].U : all[0].U + 2 * Math.PI;
+                if (b - a > 3 * ArcStep) gaps.Add((b - a, (a + b) / 2, a, b));
+            }
+            // the side the face goes to from the points at either end of a gap (the clearest of them)
+            double Side(double at) => all.Where(x => Math.Abs(Math.IEEERemainder(x.U - at, 2 * Math.PI)) < 1e-9).Select(x => x.Side).OrderByDescending(Math.Abs).FirstOrDefault();
+            foreach (var g in gaps.OrderByDescending(g => g.Size))
+                if (!(Side(g.A) > 0.5 || Side(g.B) < -0.5)) return g.Mid;
+            return null;
+        }
         double cv = 0;
         if (periodicV)
         {
             if (Cut(raw.SelectMany(l => l.Select(q => q.V))) is double c) cv = c;
             // all the way round the tube (a disc turned round an axis): a band between two rings, round in v
-            else return Band(raw.Select(l => l.Select(q => From(q.U, cu)).ToList()).ToList(), (u, v) => at(u + cu, v), outward);
+            else return Band(raw.Select(l => l.Select(q => From(q.U, cu)).ToList()).ToList(), (u, v) => at(u + cu, v), outward)
+                ?? RingBand(raw.Select(l => l.Select(q => (From(q.U, cu), q.V)).ToList()).ToList(), loops, (u, v) => at(u + cu, v), outward)
+                ?? WrappedBand(raw.Select(l => l.Select(q => (From(q.U, cu), q.V)).ToList()).ToList(), loops, (u, v) => at(u + cu, v), outward, su, sv);
         }
         var uv = raw.Select(l => l.Select(q => (U: From(q.U, cu), V: periodicV ? From(q.V, cv) : q.V)).ToList()).ToList();
         if (uv.Count == 1 && Grid(uv[0], loops[0], (u, v) => at(u + cu, periodicV ? v + cv : v), outward) is { } grid) return grid;
@@ -563,6 +779,134 @@ public static class FaceGeometry
         return tris.Select(t =>
         {
             var (a, b, c) = t;
+            return (b - a).Cross(c - a).Dot(outward((a + b + c) * (1.0 / 3))) >= 0 ? (a, b, c) : (a, c, b);
+        }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
+    }
+
+    /// <summary>
+    /// A band all the way round the tube between two loops that each go once round it, steadily (each point further round
+    /// than the one before): rings of points round the tube, the first and last the loops themselves with all their own
+    /// points (so it meets the faces beside it without a gap), between them rings at even steps of v whose u runs evenly
+    /// from the one loop to the other; neighbouring rings zipped into triangles. Null when the loops are not like that.
+    /// </summary>
+    private static List<(Vec3 A, Vec3 B, Vec3 C)>? RingBand(List<List<(double U, double V)>> uv, List<List<Vec3>> pts, Func<double, double, Vec3> at, Func<Vec3, Vec3> outward)
+    {
+        if (uv.Count != 2) return null;
+        const double Tau = 2 * Math.PI;
+        var rings = new List<List<(double Phi, double U, Vec3 P)>>();
+        foreach (var (l, p) in uv.Zip(pts))
+        {
+            // v unwrapped along the loop; it must go once round, always the same way
+            var un = new List<double> { l[0].V };
+            for (int i = 1; i < l.Count; i++) { double step = l[i].V - l[i - 1].V; step -= Tau * Math.Round(step / Tau); un.Add(un[^1] + step); }
+            double close = l[0].V - l[^1].V; close -= Tau * Math.Round(close / Tau);
+            double turn = un[^1] + close - un[0];
+            if (Math.Abs(Math.Abs(turn) - Tau) > 1e-6) return null;
+            for (int i = 1; i < un.Count; i++) if ((un[i] - un[i - 1]) * Math.Sign(turn) < -1e-12) return null;
+            var ring = Enumerable.Range(0, l.Count).Select(i => (Phi: ((l[i].V % Tau) + Tau) % Tau, l[i].U, P: p[i])).OrderBy(x => x.Phi).ToList();
+            ring = ring.Where((x, i) => i == 0 || x.Phi - ring[i - 1].Phi > 1e-12).ToList();
+            if (ring.Count < 3) return null;
+            rings.Add(ring);
+        }
+        double UAt(List<(double Phi, double U, Vec3 P)> r, double phi)
+        {
+            int j = r.FindIndex(x => x.Phi > phi);
+            var (a, b) = j <= 0 ? (r[^1], r[0]) : (r[j - 1], r[j]);
+            double pa = a.Phi, pb = b.Phi; if (pb <= pa) pb += Tau; double ph = phi; if (ph < pa) ph += Tau;
+            return a.U + (b.U - a.U) * (pb - pa < 1e-15 ? 0 : (ph - pa) / (pb - pa));
+        }
+        int nv = (int)Math.Round(Tau / ArcStep);
+        var vs = Enumerable.Range(0, nv).Select(j => Tau * j / nv).ToList();
+        double widest = vs.Max(v => Math.Abs(UAt(rings[1], v) - UAt(rings[0], v)));
+        int nu = Math.Max(1, (int)Math.Ceiling(widest / ArcStep));
+        var rows = new List<List<(double Phi, Vec3 P)>> { rings[0].Select(x => (x.Phi, x.P)).ToList() };
+        for (int i = 1; i < nu; i++)
+            rows.Add(vs.Select(v => { double ua = UAt(rings[0], v), ub = UAt(rings[1], v); return (v, at(ua + (ub - ua) * i / nu, v)); }).ToList());
+        rows.Add(rings[1].Select(x => (x.Phi, x.P)).ToList());
+        var tris = new List<(Vec3, Vec3, Vec3)>();
+        for (int r = 0; r + 1 < rows.Count; r++) Zip(rows[r], rows[r + 1], tris);
+        return tris.Select(t =>
+        {
+            var (a, b, c) = t;
+            return (b - a).Cross(c - a).Dot(outward((a + b + c) * (1.0 / 3))) >= 0 ? (a, b, c) : (a, c, b);
+        }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
+    }
+
+    /// <summary>
+    /// A band all the way round the tube between two loops that each go once round it, of any shape (DesignSpark's
+    /// turned ring in kubus_getrokken.rsdocx: one end where the ring leaves the block, an arc and a cut-curve; the other
+    /// a circle): both cut open where they cross one angle v* round the tube, laid one after the other into a single
+    /// outline from v* to v* + 2π and back, triangulated in the angles and refined with the points exactly on the
+    /// surface; wound along <paramref name="outward"/>. <paramref name="uv"/>: per loop the angles of its points (u already
+    /// cut open, v as it comes). Null when the loops are not two going once round the tube.
+    /// </summary>
+    private static List<(Vec3 A, Vec3 B, Vec3 C)>? WrappedBand(List<List<(double U, double V)>> uv, List<List<Vec3>> pts, Func<double, double, Vec3> at,
+        Func<Vec3, Vec3> outward, double su, double sv)
+    {
+        if (uv.Count != 2) return null;
+        // per loop: v unwrapped along it, and how far it turns round the tube
+        var paths = new List<List<(double U, double V, Vec3 P)>>();
+        double seam = uv[0][0].V + 1e-3;
+        foreach (var (l, p) in uv.Zip(pts))
+        {
+            var un = new List<double> { l[0].V };
+            for (int i = 1; i <= l.Count; i++)
+            {
+                double step = l[i % l.Count].V - l[i - 1].V;
+                step -= 2 * Math.PI * Math.Round(step / (2 * Math.PI));
+                un.Add(un[^1] + step);
+            }
+            double turn = un[^1] - un[0];
+            if (Math.Abs(Math.Abs(turn) - 2 * Math.PI) > 1e-6) return null;
+            // run it so v goes up, and start where it crosses the seam
+            var seq = Enumerable.Range(0, l.Count + 1).Select(i => (U: l[i % l.Count].U, V: un[i], P: p[i % l.Count])).ToList();
+            if (turn < 0) seq.Reverse();
+            int k = -1; double vs = 0;
+            for (int i = 0; i + 1 < seq.Count && k < 0; i++)
+            {
+                double a = seq[i].V, b = seq[i + 1].V;
+                // (the seam, shifted by whole turns into this step)
+                double lo = Math.Min(a, b), hi = Math.Max(a, b);
+                double t0 = seam + 2 * Math.PI * Math.Ceiling((lo - seam) / (2 * Math.PI));
+                if (t0 >= lo && t0 < hi) { k = i; vs = t0; }
+            }
+            if (k < 0) return null;
+            var (qa, qb) = (seq[k], seq[k + 1]);
+            double f = (vs - qa.V) / (qb.V - qa.V);
+            double us = qa.U + (qb.U - qa.U) * f;
+            var start = (U: us, V: vs, P: at(us, vs));
+            var path = new List<(double U, double V, Vec3 P)> { start };
+            for (int i = k + 1; i < seq.Count; i++) path.Add(seq[i]);
+            for (int i = 1; i <= k; i++) path.Add((seq[i].U, seq[i].V + 2 * Math.PI, seq[i].P));
+            path.Add((us, vs + 2 * Math.PI, start.P));
+            // (in the angles from the seam: 0 .. 2π, going up)
+            double v0 = path[0].V;
+            paths.Add(path.Select(q => (q.U, q.V - v0, q.P)).ToList());
+        }
+        // one outline: the first loop up from 0 to 2π, the second back down from 2π to 0
+        var outline = paths[0].Concat(Enumerable.Reverse(paths[1])).ToList();
+        double seamV = seam;
+        var idx = Triangulator.Triangulate([outline.Select(q => (q.U * su, q.V * sv)).ToList()]);
+        if (idx.Count == 0) return null;
+        var tris = idx.Select(t => ((outline[t.A].U, outline[t.A].V, outline[t.A].P), (outline[t.B].U, outline[t.B].V, outline[t.B].P), (outline[t.C].U, outline[t.C].V, outline[t.C].P))).ToList();
+        (double U, double V, Vec3 P) Mid((double U, double V, Vec3 P) a, (double U, double V, Vec3 P) b)
+        {
+            double u = (a.U + b.U) / 2, v = (a.V + b.V) / 2;
+            return (u, v, at(u, v + seamV));
+        }
+        for (int level = 0; level < 3; level++)
+        {
+            var next = new List<((double, double, Vec3), (double, double, Vec3), (double, double, Vec3))>(tris.Count * 4);
+            foreach (var (a, b, c) in tris)
+            {
+                var ab = Mid(a, b); var bc = Mid(b, c); var ca = Mid(c, a);
+                next.Add((a, ab, ca)); next.Add((ab, b, bc)); next.Add((ca, bc, c)); next.Add((ab, bc, ca));
+            }
+            tris = next;
+        }
+        return tris.Select(t =>
+        {
+            Vec3 a = t.Item1.Item3, b = t.Item2.Item3, c = t.Item3.Item3;
             return (b - a).Cross(c - a).Dot(outward((a + b + c) * (1.0 / 3))) >= 0 ? (a, b, c) : (a, c, b);
         }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
     }

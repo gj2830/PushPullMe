@@ -18,6 +18,55 @@ public static class Revolve
     public sealed record Result(BrepBody Body, int Cap, IReadOnlyList<int> Sides);
 
     /// <summary>
+    /// When a flat face is the end of a piece turned round an axis (a face turned out with ↝, a ring from DesignSpark):
+    /// that axis, which lies in the face's plane, with every face round it one of revolution round it (cylinder, cone,
+    /// sphere, torus) or a plane square to it, and at least one of them round. Its direction such that turning by a
+    /// positive angle moves the face out along its normal; and how far the face's middle is from it. Null otherwise.
+    /// Pushing or pulling such a face follows the turn, as DesignSpark does.
+    /// </summary>
+    public static (Vec3 Point, Vec3 Dir, double Radius)? EndAxis(BrepBody body, int face)
+    {
+        var f = body.Faces[face];
+        if (f.Surface is not BrepPlane pl || f.Loops.Count == 0) return null;
+        var n = FaceGeometry.Normal(f);
+        var mine = f.Loops.SelectMany(l => l).Select(c => c.Edge).ToHashSet();
+        var round = new List<BrepSurface>(); var flat = new List<BrepPlane>();
+        for (int g = 0; g < body.Faces.Count; g++)
+        {
+            if (g == face || !body.Faces[g].Loops.SelectMany(l => l).Any(c => mine.Contains(c.Edge))) continue;
+            switch (body.Faces[g].Surface)
+            {
+                case BrepCylinder or BrepCone or BrepTorus or BrepSphere: round.Add(body.Faces[g].Surface); break;
+                case BrepPlane gp: flat.Add(gp); break;
+                default: return null;
+            }
+        }
+        // the axis: of the first round face that has one (a sphere only has a centre)
+        (Vec3 P, Vec3 D)? axis = round.Select(r => r switch
+        {
+            BrepCylinder c => ((Vec3, Vec3)?)(c.Origin, c.Axis.Normalized()),
+            BrepCone k => (k.Origin, k.Axis.Normalized()),
+            BrepTorus t => (t.Centre, t.Axis.Normalized()),
+            _ => null,
+        }).FirstOrDefault(x => x != null);
+        if (axis is not { } ax) return null;
+        // in the face's plane
+        if (Math.Abs(ax.D.Dot(n)) > 1e-9 || Math.Abs((ax.P - pl.Origin).Dot(n)) > PushPull.DistanceTol) return null;
+        var turn = new BrepTransform.Turn(ax.P, ax.D, 1);
+        if (!round.All(r => PushPull.KeptByTurn(r, turn)) || !flat.All(p => PushPull.KeptByTurn(p, turn))) return null;
+        // the face's middle, and which way round moves it out
+        var tris = FaceGeometry.PlanarTriangles(body, f);
+        double area = 0; var mid = new Vec3(0, 0, 0);
+        foreach (var (a, b, c) in tris) { double w = (b - a).Cross(c - a).Length; area += w; mid += (a + b + c) * (w / 3); }
+        if (area < 1e-30) return null;
+        mid *= 1 / area;
+        var r0 = mid - ax.P; r0 -= ax.D * r0.Dot(ax.D);
+        if (r0.Length < 1e-9) return null;
+        var dir = ax.D.Cross(r0).Dot(n) > 0 ? ax.D : ax.D * -1;
+        return (ax.P, dir, r0.Length);
+    }
+
+    /// <summary>
     /// The axis direction to turn round so that a positive angle moves the face out of the body (along its normal), or
     /// throws when the face does not lie on one side of the line through <paramref name="p"/> along
     /// <paramref name="dir"/> in its plane.

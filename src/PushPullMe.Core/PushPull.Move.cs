@@ -79,6 +79,9 @@ public static partial class PushPull
             bool all = ed.Start < 0 ? movedRing.Contains(e) : movedV.Contains(ed.Start) && movedV.Contains(ed.End);
             bool some = ed.Start >= 0 && (movedV.Contains(ed.Start) || movedV.Contains(ed.End));
             if (all) edges[e] = ed with { Curve = motion.Turn is { } tc ? BrepTransform.TurnCurve(ed.Curve, tc) : Shifted(ed.Curve, offset) };
+            // (a circle round the axis of the turn: its moved end just runs on along it, as when an end of a turned
+            // piece is turned on, DesignSpark's pull on it)
+            else if (some && motion.Turn is { } tk && ed.Curve is BrepCircle kc && RoundAxis(kc.Centre, kc.Normal, tk)) continue;
             else if (some) throw new PushPullException(Lang.T("Een ronde rand kan niet meebuigen; verplaats hem helemaal (het hele vlak of beide eindpunten).", "A round edge cannot bend along; move it wholly (the whole face or both endpoints)."));
         }
 
@@ -97,6 +100,8 @@ public static partial class PushPull
             if (movedCount == vs.Count + rings.Count) { w.Surface = motion.Turn is { } ts ? BrepTransform.TurnSurface(w.Surface, ts) : ShiftedSurface(w.Surface, offset); continue; }
             // (a cylinder moved partly along its axis just gets longer or shorter: it stays as it is)
             if (motion.Turn == null && w.Surface is BrepCylinder cy && Math.Abs(cy.Axis.Normalized().Dot(offset.Normalized())) > 1 - AngleTol * AngleTol) continue;
+            // (a round face turned round its own axis stays as it is: it just grows or shrinks along the turn)
+            if (motion.Turn is { } tw && KeptByTurn(w.Surface, tw)) continue;
             if (w.Surface is not BrepPlane) throw new PushPullException(Lang.T("Een rond vlak kan niet meebuigen; zo kan het (nog) niet.", "A round face cannot bend along; that is not possible (yet)."));
             if (Replane(verts, edges, w, oldNormal[f]) is not { } fold) continue;
             // not flat any more: a four-sided face folded along a diagonal, as SketchUp does
@@ -168,6 +173,27 @@ public static partial class PushPull
             throw new PushPullException(Lang.T("Zo keert de vorm binnenstebuiten; dat kan niet.", "That way the shape turns inside out; that is not possible."));
         return new(result, Enumerable.Range(0, oldFaces).Select(Final).ToList(), changedNew);
     }
+
+    /// <summary>Whether the axis through <paramref name="c"/> along <paramref name="dir"/> is the axis of the turn.</summary>
+    internal static bool RoundAxis(Vec3 c, Vec3 dir, BrepTransform.Turn t)
+    {
+        var a = t.Axis.Normalized();
+        if (Math.Abs(Math.Abs(dir.Normalized().Dot(a)) - 1) > 1e-9) return false;
+        var d = c - t.Centre;
+        return (d - a * d.Dot(a)).Length < DistanceTol;
+    }
+
+    /// <summary>Whether a surface is the same after the turn: one of revolution round the turn's axis (a sphere: its
+    /// centre on it), or a plane square to it.</summary>
+    internal static bool KeptByTurn(BrepSurface s, BrepTransform.Turn t) => s switch
+    {
+        BrepCylinder c => RoundAxis(c.Origin, c.Axis, t),
+        BrepCone k => RoundAxis(k.Origin, k.Axis, t),
+        BrepTorus o => RoundAxis(o.Centre, o.Axis, t),
+        BrepSphere sp => RoundAxis(sp.Centre, t.Axis, t),
+        BrepPlane p => Math.Abs(Math.Abs(p.Normal.Normalized().Dot(t.Axis.Normalized())) - 1) < 1e-9,
+        _ => false,
+    };
 
     /// <summary>A surface moved over <paramref name="off"/>.</summary>
     private static BrepSurface ShiftedSurface(BrepSurface s, Vec3 off) => s switch

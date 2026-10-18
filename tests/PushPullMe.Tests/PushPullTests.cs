@@ -2616,6 +2616,34 @@ public class RevolveTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Pulling_or_pushing_the_end_of_a_turned_piece_follows_the_turn()
+    {
+        // the top turned 30° round a line beside it (x 12, as part of a ring); its end cap, in the air, pulled 3 mm and
+        // pushed 3 mm: the ring turns on or back (as DesignSpark's pull does), the cap's middle (7 from the axis) going 3 mm
+        // along it: Pappus, ±100·3
+        var doc = Cube();
+        var (d, cap) = doc.Revolve(Face(doc, new Vec3(0, 0, 1)), P(12, 0, 10), new Vec3(0, 1, 0), Math.PI / 6);
+        var end = PushPullMe.Core.Revolve.EndAxis(d.Bodies[0], cap.Face);
+        Assert.NotNull(end);
+        Assert.Equal(7, end.Value.Radius / Mm, 9);
+        var before = FaceGeometry.Normal(d.Bodies[0].Faces[cap.Face]);
+        foreach (double mm in new[] { 3.0, -3.0 })
+        {
+            var (e, r) = d.PushPull(cap, mm * Mm);
+            AssertSound(e);
+            Assert.Equal(Mm3(d) + 100 * mm, Mm3(e), 1.0);
+            Assert.Equal(2, e.Bodies[0].Faces.Count(f => f.Surface is BrepCylinder));
+            // the cap turned by 3/7 rad
+            var after = FaceGeometry.Normal(e.Bodies[0].Faces[r.FaceMap[cap.Face]]);
+            Assert.Equal(3.0 / 7, Math.Acos(Math.Clamp(after.Dot(before), -1, 1)), 9);
+        }
+        // a plain block's face is no such end
+        Assert.Null(PushPullMe.Core.Revolve.EndAxis(doc.Bodies[0], Face(doc, new Vec3(1, 0, 0)).Face));
+        // turned back past its start (30° at 7 from the axis is 3.7 mm): refused
+        Assert.ThrowsAny<PushPullException>(() => d.PushPull(cap, -5 * Mm));
+    }
+
+    [Fact]
     public void A_half_disc_turned_more_than_half_way_round_an_edge_makes_an_arch()
     {
         // a half disc r 2 round (0, 4) on the top, from the left edge; turned round the right top edge (x 10) 210°: an
@@ -3043,6 +3071,75 @@ public class SheetTests
         [new BrepLine(), new BrepLine(), new BrepLine(), new BrepLine()], Up);
 
     [Fact]
+    public void Triangles_of_a_loose_face_pulled_one_by_one_join_where_they_share_a_side()
+    {
+        // a 20 × 20 square on the ground with both diagonals: four triangles. Pulled 10 mm one after the other: front, back
+        // (touching the front only along the upright edge in the middle: a part of its own, as DesignSpark), then left and
+        // right, which lie against both with a face: in the end one block 20 × 20 × 10
+        var sq = Sheets.Face([P(0, 0, 0), P(20, 0, 0), P(20, 20, 0), P(0, 20, 0), P(0, 0, 0)], [new BrepLine(), new BrepLine(), new BrepLine(), new BrepLine()], Up);
+        var doc = SketchDocument.FromBodies([sq]);
+        (doc, _) = doc.DrawPath(new FaceRef(0, 0), [P(0, 0, 0), P(20, 20, 0)]);
+        (doc, _) = doc.DrawPath(new FaceRef(0, 0), [P(20, 0, 0), P(0, 20, 0)]);
+        Assert.Equal(4, doc.Bodies.Single(b => b.Sheet).Faces.Count);
+        FaceRef Triangle(SketchDocument d, double x, double y)
+        {
+            int b = Enumerable.Range(0, d.Bodies.Count).Single(i => d.Bodies[i].Sheet);
+            int f = Enumerable.Range(0, d.Bodies[b].Faces.Count).MinBy(g =>
+            {
+                var t = d.TrianglesOf(new FaceRef(b, g)); var c = t.Aggregate(new Vec3(0, 0, 0), (a, q) => a + q.A + q.B + q.C) * (1.0 / (3 * t.Count));
+                return (c - P(x, y, 0)).Length;
+            });
+            return new FaceRef(b, f);
+        }
+        int Solids(SketchDocument d) => d.Bodies.Count(b => !b.Sheet);
+        (doc, _) = doc.PushPull(Triangle(doc, 10, 3), 10 * Mm);
+        Assert.Equal(1, Solids(doc));
+        (doc, _) = doc.PushPull(Triangle(doc, 10, 17), 10 * Mm);
+        Assert.Equal(2, Solids(doc));
+        (doc, _) = doc.PushPull(Triangle(doc, 3, 10), 10 * Mm);
+        Assert.Equal(1, Solids(doc));
+        (doc, _) = doc.PushPull(Triangle(doc, 17, 10), 10 * Mm);
+        var block = Assert.Single(doc.Bodies);
+        Assert.False(block.Sheet);
+        Assert.Equal(6, block.Faces.Count);
+        Assert.Equal(4000, Mm3(doc), 3);
+        AssertSound(doc);
+    }
+
+    [Fact]
+    public void Triangles_on_a_block_pulled_one_by_one_end_as_one_block()
+    {
+        // a block 20 × 20 × 10 with both diagonals on its top; the triangles pulled 10 mm: front (part of the block), back
+        // (touching it only along the upright edge in the middle: a part of its own), left and right (against both with a
+        // face: the piece apart joins again): one block 20 × 20 × 20
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 20 * Mm, 20 * Mm, 10 * Mm))]);
+        var top = new FaceRef(0, Enumerable.Range(0, 6).First(f => FaceGeometry.Normal(doc.Bodies[0].Faces[f]).Dot(Up) > 0.999));
+        (doc, _) = doc.DrawPath(top, [P(0, 0, 10), P(20, 20, 10)]);
+        (doc, _) = doc.DrawPath(top, [P(20, 0, 10), P(0, 20, 10)]);
+        FaceRef Triangle(SketchDocument d, double x, double y)
+        {
+            foreach (var (fr, t) in d.AllTriangles())
+                if (d.Bodies[fr.Body].Faces[fr.Face].Surface is BrepPlane && FaceGeometry.Normal(d.Bodies[fr.Body].Faces[fr.Face]).Dot(Up) > 0.999
+                    && t.All(q => Math.Abs(q.A.Z - 10 * Mm) < 1e-9) && t.Any(q => (((q.A + q.B + q.C) * (1.0 / 3)) - P(x, y, 10)).Length < 4 * Mm))
+                    return fr;
+            throw new Exception($"no triangle at {x}, {y}");
+        }
+        (doc, _) = doc.PushPull(Triangle(doc, 10, 3), 10 * Mm);
+        Assert.Single(doc.Bodies);
+        (doc, _) = doc.PushPull(Triangle(doc, 10, 17), 10 * Mm);
+        Assert.Equal(2, doc.Bodies.Count);
+        // (with merging off: the piece against both stays apart)
+        var (apart, _) = doc.PushPull(Triangle(doc, 3, 10), 10 * Mm, join: false);
+        Assert.Equal(2, apart.Bodies.Count);
+        (doc, _) = doc.PushPull(Triangle(doc, 3, 10), 10 * Mm);
+        Assert.Single(doc.Bodies);
+        (doc, _) = doc.PushPull(Triangle(doc, 17, 10), 10 * Mm);
+        Assert.Single(doc.Bodies);
+        Assert.Equal(8000, Mm3(doc), 3);
+        AssertSound(doc);
+    }
+
+    [Fact]
     public void A_rectangle_in_the_air_is_a_sheet_and_pulled_a_block()
     {
         var doc = SketchDocument.FromBodies([Rectangle()]);
@@ -3227,5 +3324,252 @@ public class SheetTests
         var (hp, _) = SketchDocument.FromBodies([half]).PushPull(new FaceRef(0, 0), 5 * Mm);
         Assert.Equal(Math.PI * 16 / 2 * 5, Mm3(hp), 1.0);
         AssertSound(hp);
+    }
+}
+
+/// <summary>Free-form (NURBS) faces: opened, shown, worked on as a whole body and saved again.</summary>
+public class FreeFormTests(ITestOutputHelper output)
+{
+    private const double Mm = 0.001;
+
+    private static SketchDocument RoundTrip(SketchDocument d)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"ppm_{Guid.NewGuid():N}.rsdocx");
+        try { d.ToRsDocx().Save(path); return SketchDocument.FromRsDocx(path); }
+        finally { File.Delete(path); }
+    }
+
+    private static int FreeForm(SketchDocument d) => Enumerable.Range(0, d.Bodies.Count).Single(b => d.Bodies[b].Faces.Any(f => f.Surface is BrepNurbsSurface));
+
+    /// <summary>The volume inside a body's triangles, and how far they are from closing (the length of the sum of their
+    /// area vectors, which is 0 for a closed surface, against their area).</summary>
+    private static (double Volume, double Open) Shell(SketchDocument d, int body)
+    {
+        var tris = Enumerable.Range(0, d.Bodies[body].Faces.Count).SelectMany(f => d.TrianglesOf(new FaceRef(body, f))).ToList();
+        var sum = tris.Aggregate(new Vec3(0, 0, 0), (s, t) => s + (t.B - t.A).Cross(t.C - t.A));
+        double area = tris.Sum(t => (t.B - t.A).Cross(t.C - t.A).Length);
+        return (tris.Sum(t => t.A.Dot(t.B.Cross(t.C))) / 6, sum.Length / area);
+    }
+
+    [Fact]
+    public void DesignSparks_revolved_spline_opens_and_is_shown_closed()
+    {
+        var d = SketchDocument.FromRsDocx(TestFiles.Converter("kubus_getrokken.rsdocx"));
+        Assert.Equal(5, d.Bodies.Count);
+        int b = FreeForm(d);
+        var face = Assert.Single(d.Bodies[b].Faces);
+        Assert.Empty(d.Bodies[b].Edges);
+        Assert.Equal(2, face.Points.Count);
+        var (vol, open) = Shell(d, b);
+        output.WriteLine($"volume {vol / (Mm * Mm * Mm):0.#} mm³, open {open:E1}, {d.TrianglesOf(new FaceRef(b, 0)).Count} triangles");
+        Assert.True(vol > 0);
+        Assert.True(open < 1e-6);
+        // the block with its ring turned 270° (the ring's start a loop round its tube of an arc and a cut-curve): closed too
+        var (ringVol, ringOpen) = Shell(d, 0);
+        output.WriteLine($"block with ring: {ringVol / (Mm * Mm * Mm):0} mm³, open {ringOpen:E1}");
+        Assert.True(ringOpen < 1e-6);
+        // its smooth normals lean the way of its triangles
+        var tris = d.TrianglesOf(new FaceRef(b, 0));
+        var smooth = FaceGeometry.SmoothNormals(tris);
+        Assert.All(tris, t => Assert.True(smooth(t.A)!.Value.Dot((t.B - t.A).Cross(t.C - t.A).Normalized()) > 0.5));
+    }
+
+    [Fact]
+    public void The_end_of_DesignSparks_ring_follows_the_ring_when_pulled_or_pushed()
+    {
+        // the ring's end: a disc r 19.09 mm at 63.5 mm from the axis; 10 mm along the ring is π·r²·10 (Pappus)
+        var d = SketchDocument.FromRsDocx(TestFiles.Converter("kubus_getrokken.rsdocx"));
+        var b = d.Bodies[0];
+        int cap = Enumerable.Range(0, b.Faces.Count).Single(f => b.Faces[f].Surface is BrepPlane && b.Faces[f].Loops.Count == 1 && b.Faces[f].Loops[0].Count == 1
+            && b.Edges[b.Faces[f].Loops[0][0].Edge].Curve is BrepCircle);
+        var end = PushPullMe.Core.Revolve.EndAxis(b, cap);
+        Assert.NotNull(end);
+        Assert.Equal(63.5, end.Value.Radius / Mm, 3);
+        var torus = (BrepTorus)b.Faces.Single(f => f.Surface is BrepTorus).Surface;
+        double disc = Math.PI * torus.MinorRadius * torus.MinorRadius;
+        foreach (double mm in new[] { 10.0, -10.0 })
+        {
+            var (e, _) = d.PushPull(new FaceRef(0, cap), mm * Mm);
+            Assert.Null(XtBrepBuilder.TopologyError(e.Bodies[0]));
+            Assert.Equal(d.Volume() + disc * mm * Mm, e.Volume(), disc * 10 * Mm * 0.005); // (the round faces in triangles)
+            Assert.Single(e.Bodies[0].Faces, f => f.Surface is BrepTorus);
+            Assert.True(Shell(e, 0).Open < 1e-6);
+            e.ToRsDocx();
+        }
+    }
+
+    [Fact]
+    public void A_free_form_body_is_saved_and_read_back_the_same()
+    {
+        var d = SketchDocument.FromRsDocx(TestFiles.Converter("kubus_getrokken.rsdocx"));
+        var back = RoundTrip(d);
+        Assert.Equal(d.Bodies.Count, back.Bodies.Count);
+        int b = FreeForm(d), bb = FreeForm(back);
+        var ns = (BrepNurbsSurface)d.Bodies[b].Faces[0].Surface; var nb = (BrepNurbsSurface)back.Bodies[bb].Faces[0].Surface;
+        Assert.Equal(ns.Format, nb.Format);
+        Assert.Equal(d.Bodies[b].Faces[0].Reversed, back.Bodies[bb].Faces[0].Reversed);
+        Assert.Equal(2, back.Bodies[bb].Faces[0].Points.Count);
+        Assert.Equal(Shell(d, b).Volume, Shell(back, bb).Volume, 1e-15);
+        foreach (var body in back.Bodies) Assert.Null(XtBrepBuilder.TopologyError(body));
+    }
+
+    [Fact]
+    public void A_free_form_body_is_moved_turned_scaled_and_mirrored_whole()
+    {
+        var d = SketchDocument.FromRsDocx(TestFiles.Converter("kubus_getrokken.rsdocx"));
+        int b = FreeForm(d);
+        double vol = Shell(d, b).Volume;
+        var (moved, _) = d.Move(b, new MoveSelection([], [], [], MoveWhole.Body), new Vec3(5 * Mm, 0, 2 * Mm), checkCrossing: false);
+        // (picking its one face moves the whole of it: it has no edges to move by)
+        var (byFace, _) = d.Move(b, MoveSelection.Face(0), new Vec3(5 * Mm, 0, 2 * Mm), checkCrossing: false);
+        Assert.Equal(Shell(moved, b).Volume, Shell(byFace, b).Volume, 1e-15);
+        Assert.Equal(moved.Bodies[b].Vertices, byFace.Bodies[b].Vertices);
+        var (turned, tb) = d.RotateBody(b, new Vec3(0, 0, 0), new Vec3(0, 0, 1), Math.PI / 3, copy: false);
+        var (scaled, sb) = d.ScaleBody(b, new Vec3(0, 0, 0), 2, null, copy: false);
+        var (mirrored, mb) = d.MirrorBody(b, new Vec3(0, 0, 0), new Vec3(1, 0, 0), copy: false);
+        foreach (var (doc, body, factor) in new[] { (moved, b, 1.0), (turned, tb, 1.0), (scaled, sb, 8.0), (mirrored, mb, 1.0) })
+        {
+            Assert.Equal(2, doc.Bodies[body].Faces[0].Points.Count);
+            var (v, open) = Shell(doc, body);
+            Assert.Equal(vol * factor, v, vol * factor * 1e-3); // (a larger body gets a finer grid of triangles)
+            Assert.True(open < 1e-6);
+            doc.ToRsDocx();
+        }
+    }
+
+    [Fact]
+    public void A_block_with_free_form_corners_reads_back()
+    {
+        // a rounded block whose one upright rounding is made larger: its two corners become NURBS patches (as in
+        // RoundingTests), which a file used not to open with
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm))]);
+        var (d, faces) = doc.RoundEdges(0, Enumerable.Range(0, 12).ToList(), 2 * Mm);
+        var b = d.Bodies[0];
+        var upright = faces.Single(f => b.Faces[f.Face].Surface is BrepCylinder c && Math.Abs(Math.Abs(c.Axis.Z) - 1) < 1e-9 && c.Origin.X > 5 * Mm && c.Origin.Y > 5 * Mm);
+        var (d4, _) = d.PushPull(upright, PushPullMe.Core.PushPull.DistanceForRadius(b, upright.Face, 4 * Mm));
+        int nurbs = d4.Bodies[0].Faces.Count(f => f.Surface is BrepNurbsSurface);
+        output.WriteLine($"{nurbs} NURBS faces");
+        var back = RoundTrip(d4);
+        Assert.Equal(d4.Bodies[0].Faces.Count, back.Bodies[0].Faces.Count);
+        Assert.Equal(nurbs, back.Bodies[0].Faces.Count(f => f.Surface is BrepNurbsSurface));
+        Assert.Equal(d4.Volume(), back.Volume(), d4.Volume() * 1e-4);
+    }
+
+    [Theory]
+    [InlineData("helix.rsdocx")]
+    [InlineData("yubikey.rsdocx")]
+    public void DesignSpark_files_with_free_forms_open_or_say_why_not(string name)
+    {
+        try
+        {
+            // (its free-form faces shown; a cylinder whose helical edges wind round it more than once is not yet)
+            var d = SketchDocument.FromRsDocx(TestFiles.Converter(name));
+            int free = 0, shown = 0;
+            for (int b = 0; b < d.Bodies.Count; b++)
+                for (int f = 0; f < d.Bodies[b].Faces.Count; f++)
+                    if (d.Bodies[b].Faces[f].Surface is BrepNurbsSurface) { free++; if (d.TrianglesOf(new FaceRef(b, f)).Count > 0) shown++; }
+            output.WriteLine($"{name}: {d.Bodies.Count} bodies, {free} free-form faces, {shown} shown");
+            Assert.True(free > 0);
+            Assert.Equal(free, shown);
+        }
+        catch (RsDocxReadException e) { output.WriteLine($"{name}: {e.Message}"); Assert.False(string.IsNullOrWhiteSpace(e.Message)); }
+    }
+}
+
+/// <summary>STEP, the main format: opened (also from another CAD program) and saved.</summary>
+public class StepFileTests(ITestOutputHelper output)
+{
+    private const double Mm = 0.001;
+
+    private static double Mm3(SketchDocument d, int body) => Enumerable.Range(0, d.Bodies[body].Faces.Count)
+        .SelectMany(f => d.TrianglesOf(new FaceRef(body, f))).Sum(t => t.A.Dot(t.B.Cross(t.C))) / 6 / (Mm * Mm * Mm);
+
+    [Fact]
+    public void A_STEP_file_from_FreeCAD_opens_and_every_face_is_shown()
+    {
+        // testdata/freecad_proef.step: a rounded block with a hole, a ball, a cone, a ring and a loft; the volumes FreeCAD gave
+        var d = SketchDocument.FromStep(TestFiles.Converter("freecad_proef.step"));
+        double[] freecad = [20587.658, 4188.79, 2911.209, 3789.928, 3884.023];
+        Assert.Equal(freecad.Length, d.Bodies.Count);
+        var missing = new List<string>();
+        for (int b = 0; b < d.Bodies.Count; b++)
+            for (int f = 0; f < d.Bodies[b].Faces.Count; f++)
+                if (d.TrianglesOf(new FaceRef(b, f)).Count == 0)
+                    missing.Add($"body {b} face {f} ({d.Bodies[b].Faces[f].Surface.GetType().Name}, loops {string.Join("/", d.Bodies[b].Faces[f].Loops.Select(l => l.Count))}, points {d.Bodies[b].Faces[f].Points.Count})");
+        Assert.True(missing.Count == 0, "not shown: " + string.Join("; ", missing));
+        for (int b = 0; b < d.Bodies.Count; b++)
+        {
+            output.WriteLine($"{d.BodyName(b)}: {Mm3(d, b):0.###} mm³ (FreeCAD {freecad[b]})");
+            Assert.Equal(freecad[b], Mm3(d, b), freecad[b] * 0.01);
+        }
+        Assert.Equal(0xFF2663EBu, d.Colors[0][0]);
+    }
+
+    [Fact]
+    public void A_model_is_saved_as_STEP_and_opened_the_same()
+    {
+        var d = SketchDocument.FromRsDocx(TestFiles.Converter("kubus_getrokken.rsdocx"));
+        d = d.Paint([new FaceRef(1, 0), new FaceRef(1, 2)], 0xFF2563EB);
+        d = d.AddLines([new SketchLine(new Vec3(0, 0, 0), new Vec3(50 * Mm, 0, 0)), new SketchLine(new Vec3(10 * Mm, 0, 0), new Vec3(0, 10 * Mm, 0), new Vec3(0, 0, 0), new Vec3(0, 0, 1))]);
+        string path = Path.Combine(Path.GetTempPath(), $"ppm_{Guid.NewGuid():N}.step");
+        try
+        {
+            File.WriteAllText(path, d.ToStep(Path.GetFileName(path)));
+            var back = SketchDocument.FromStep(path);
+            Assert.Equal(d.Bodies.Count, back.Bodies.Count);
+            for (int b = 0; b < d.Bodies.Count; b++)
+            {
+                Assert.Equal(d.Bodies[b].Faces.Count, back.Bodies[b].Faces.Count);
+                Assert.Equal(Mm3(d, b), Mm3(back, b), Math.Abs(Mm3(d, b)) * 1e-6 + 1e-6);
+            }
+            Assert.Equal(0xFF2563EBu, back.Colors[1][2]);
+            Assert.Equal(d.Lines.Count(l => !l.Construction), back.Lines.Count);
+            Assert.True(back.Lines[^1].IsArc);
+            // and as DesignSpark file still sound
+            back.ToRsDocx();
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Body_names_come_from_files_go_into_them_and_stay_with_their_bodies()
+    {
+        // FreeCAD's parts by name
+        var d = SketchDocument.FromStep(TestFiles.Converter("freecad_proef.step"));
+        Assert.Equal(["Blok", "Bol", "Kegel", "Torus", "Loft"], Enumerable.Range(0, d.Bodies.Count).Select(d.BodyName));
+        // through STEP and through DesignSpark's file and back: the same names
+        string step = Path.Combine(Path.GetTempPath(), $"ppm_{Guid.NewGuid():N}.step"), rs = Path.ChangeExtension(step, ".rsdocx");
+        try
+        {
+            File.WriteAllText(step, d.ToStep());
+            Assert.Equal(d.Names, SketchDocument.FromStep(step).Names);
+            d.ToRsDocx().Save(rs);
+            Assert.Equal(d.Names, SketchDocument.FromRsDocx(rs).Names);
+        }
+        finally { File.Delete(step); File.Delete(rs); }
+        // DesignSpark's own "Vaste vorm" is no name of its own: numbered as before
+        var ds = SketchDocument.FromRsDocx(TestFiles.Converter("kubus_getrokken.rsdocx"));
+        Assert.All(ds.Names, n => Assert.Null(n));
+        Assert.Equal("Vaste vorm 2", ds.BodyName(1).Replace("Solid", "Vaste vorm"));
+        // after work on a body, or painting, each keeps its name; a body joined into another loses its own
+        int block = 0;
+        var top = new FaceRef(block, Enumerable.Range(0, d.Bodies[block].Faces.Count).First(f => d.Bodies[block].Faces[f].Surface is BrepPlane && FaceGeometry.Normal(d.Bodies[block].Faces[f]).Z > 0.999));
+        var (pulled, _) = d.PushPull(top, 2 * Mm);
+        var kept = SketchDocument.CarryNames(d, pulled);
+        Assert.Equal(d.Names, kept.Names);
+        var painted = SketchDocument.CarryNames(kept, kept.Paint([new FaceRef(2, 0)], 0xFF00FF00));
+        Assert.Equal(d.Names, painted.Names);
+        var raw = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm)), BrepShapes.FromPolyhedron(Polyhedron.Box(5 * Mm, 0, 0, 15 * Mm, 10 * Mm, 10 * Mm))]);
+        var two = new SketchDocument { Bodies = raw.Bodies, Curved = raw.Curved, Names = ["Links", "Rechts"] };
+        var (joined, _) = two.Combine(0, 1, Booleans.Op.Union);
+        Assert.Equal("Links", SketchDocument.CarryNames(two, joined).BodyName(0));
+        Assert.True(SketchDocument.IsStandardName("Vaste vorm 12") && SketchDocument.IsStandardName("Oppervlak") && !SketchDocument.IsStandardName("Blok"));
+        // renamed (in the structure tree): kept after the next change; a standard name typed is no name of its own again
+        var renamed = SketchDocument.CarryNames(two, two.Rename(1, "  Steun "));
+        Assert.Equal("Steun", renamed.BodyName(1));
+        var moved = SketchDocument.CarryNames(renamed, renamed.Paint([new FaceRef(1, 0)], 0xFFFF0000));
+        Assert.Equal(["Links", "Steun"], moved.Names);
+        Assert.Null(moved.Rename(0, "Vaste vorm").Names[0]);
+        Assert.Equal("Vaste vorm 1", moved.Rename(0, "").BodyName(0).Replace("Solid", "Vaste vorm"));
     }
 }

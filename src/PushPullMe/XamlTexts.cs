@@ -117,6 +117,9 @@ internal static class XamlTexts
         ["Vormen herkennen…"] = "Recognising shapes…",
         ["🎨 Verf"] = "🎨 Paint",
         ["Afstand"] = "Distance",
+        ["samenvoegen"] = "merge",
+        ["Aan: wat je met ⇕ tegen een ander deel aan trekt, wordt er één deel mee (zoals DesignSpark). Uit: het blijft een apart deel."] =
+            "On: what you pull with ⇕ against another part becomes one part with it (as in DesignSpark). Off: it stays a part of its own.",
         ["Open een model om te beginnen."] = "Open a model to begin.",
     };
 

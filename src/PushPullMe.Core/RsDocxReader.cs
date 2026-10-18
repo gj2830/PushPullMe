@@ -23,7 +23,11 @@ public static class RsDocxReader
 
     /// <summary>As <see cref="Read(string, out int)"/>, with the colours DesignSpark gave the faces (per body, by face
     /// index; a body's colour on every face that has none of its own).</summary>
-    public static List<BrepBody> Read(string path, out int hidden, out List<Dictionary<int, uint>> colors)
+    public static List<BrepBody> Read(string path, out int hidden, out List<Dictionary<int, uint>> colors) => Read(path, out hidden, out colors, out _);
+
+    /// <summary>As <see cref="Read(string, out int, out List{Dictionary{int, uint}})"/>, with each body's name as DesignSpark
+    /// shows it (its caption; null for DesignSpark's own "Vaste vorm" or "Oppervlak").</summary>
+    public static List<BrepBody> Read(string path, out int hidden, out List<Dictionary<int, uint>> colors, out List<string?> bodyNames)
     {
         hidden = 0;
         RsDocxPackage pkg;
@@ -42,6 +46,16 @@ public static class RsDocxReader
         var map = xt.ByIndex();
         var faceNames = nodes.Select(n => (IReadOnlyList<string?>)RsDocxColors.Faces(map, n).Select(f => XtTopology.NameOf(map, f)).ToList()).ToList();
         colors = RsDocxColors.ForFaces(pkg, names, faceNames);
+        // the names in DesignSpark's structure tree: the captions of the bodies
+        var captions = new Dictionary<string, string>();
+        try
+        {
+            foreach (var c in pkg.GetXml("SpaceClaim/document.xml").Descendants().Where(e => e.Name.LocalName == "CaptionDef"))
+                if (c.Elements().FirstOrDefault(e => e.Name.LocalName == "subjectId")?.Value is { } subject && c.Elements().FirstOrDefault(e => e.Name.LocalName == "name")?.Value is { } nm)
+                    captions[subject.Trim()] = nm;
+        }
+        catch (System.Xml.XmlException) { }
+        bodyNames = names.Select(n => n != null && captions.TryGetValue(n, out var c) && !SketchDocument.IsStandardName(c) ? c : null).ToList();
         return all;
     }
 
@@ -117,6 +131,12 @@ public static class RsDocxReader
         }
         int Vx(int node) => node == 0 ? -1 : vIndex[node];
 
+        // (a kind of face that cannot be read: said at once, before the edges, which can take long)
+        foreach (var region in XtTopology.Chain(map, body.Ptr("region"), "next"))
+            foreach (var shell in XtTopology.Chain(map, region.Ptr("shell"), "next"))
+                foreach (var f in XtTopology.Chain(map, shell.Ptr("face"), "next").Concat(shell.Has("front_face") ? XtTopology.Chain(map, shell.Ptr("front_face"), "next_front") : []))
+                    if (map[f.Ptr("surface")].NodeType is not (XtNodeTypes.Plane or XtNodeTypes.Cylinder or XtNodeTypes.Cone or XtNodeTypes.Sphere or XtNodeTypes.Torus or XtNodeTypes.BSurface) and var t)
+                        throw new RsDocxReadException(Lang.T($"Dit bestand heeft vlakken van een soort die PushPullMe nog niet kan openen ({SurfaceName(t)}).", $"This file has faces of a kind PushPullMe cannot open yet ({SurfaceName(t)})."));
         var edges = new List<BrepEdge>();
         var eIndex = new Dictionary<int, int>();
         bool sheet = false;
@@ -143,18 +163,19 @@ public static class RsDocxReader
                 var fs = XtTopology.Chain(map, shell.Ptr("face"), "next").ToList();
                 if (shell.Has("front_face")) fs.AddRange(XtTopology.Chain(map, shell.Ptr("front_face"), "next_front"));
                 foreach (var f in fs)
-                    if (seen.Add(f.Index)) faces.Add(Face(map, f, eIndex));
+                    if (seen.Add(f.Index)) faces.Add(Face(map, f, eIndex, vIndex));
             }
         if (faces.Count == 0) throw new RsDocxReadException(Lang.T("Een lichaam zonder vlakken; dat kan PushPullMe niet openen.", "A body without faces; PushPullMe cannot open that."));
         return new BrepBody { Vertices = verts, Edges = edges, Faces = faces, Sheet = sheet };
     }
 
-    private static BrepFace Face(Dictionary<int, XtNode> map, XtNode f, Dictionary<int, int> eIndex)
+    private static BrepFace Face(Dictionary<int, XtNode> map, XtNode f, Dictionary<int, int> eIndex, Dictionary<int, int> vIndex)
     {
         var sn = map[f.Ptr("surface")];
-        var (surface, flipped) = Surface(sn);
+        var (surface, flipped) = Surface(sn, map);
         bool reversed = (f.Byte("sense") == '-') != flipped;
         var loops = new List<IReadOnlyList<BrepCoedge>>();
+        var points = new List<int>();
         foreach (var loop in XtTopology.Chain(map, f.Ptr("loop"), "next"))
         {
             var coedges = new List<BrepCoedge>();
@@ -162,16 +183,18 @@ public static class RsDocxReader
             do
             {
                 var fin = map[cur];
-                coedges.Add(new BrepCoedge(eIndex[fin.Ptr("edge")], fin.Byte("sense") == '+'));
+                // (a fin without an edge: a loop that is one point, where a closed free-form face comes to a point)
+                if (fin.Ptr("edge") == 0) { if (fin.Ptr("vertex") is int pv and not 0) points.Add(vIndex[pv]); }
+                else coedges.Add(new BrepCoedge(eIndex[fin.Ptr("edge")], fin.Byte("sense") == '+'));
                 cur = fin.Ptr("forward");
             } while (cur != first && cur != 0 && ++guard < 1_000_000);
-            loops.Add(coedges);
+            if (coedges.Count > 0) loops.Add(coedges);
         }
-        return new BrepFace(surface, reversed, loops);
+        return new BrepFace(surface, reversed, loops) { Points = points };
     }
 
     /// <summary>The surface, and whether its sense is '-' (its normal the other way round).</summary>
-    private static (BrepSurface, bool Flipped) Surface(XtNode s)
+    private static (BrepSurface, bool Flipped) Surface(XtNode s, Dictionary<int, XtNode> map)
     {
         bool flipped = s.Has("sense") && s.Byte("sense") == '-';
         BrepSurface surface = s.NodeType switch
@@ -182,10 +205,15 @@ public static class RsDocxReader
                 Math.Atan2(s.Double("sin_half_angle"), s.Double("cos_half_angle"))),
             XtNodeTypes.Sphere => new BrepSphere(V(s.Vec("centre")), s.Double("radius"), V(s.Vec("axis")), V(s.Vec("x_axis"))),
             XtNodeTypes.Torus => new BrepTorus(V(s.Vec("centre")), V(s.Vec("axis")), V(s.Vec("x_axis")), s.Double("major_radius"), s.Double("minor_radius")),
-            _ => throw new RsDocxReadException(Lang.T("Dit bestand heeft vrije-vormvlakken; die kan PushPullMe nog niet openen.", "This file has free-form faces; PushPullMe cannot open those yet.")),
+            // a free-form face: as the converter reads it, with how it is stored (written back the same)
+            XtNodeTypes.BSurface => XtGeometry.ReadBSurface(s, map),
+            _ => throw new RsDocxReadException(Lang.T($"Dit bestand heeft vlakken van een soort die PushPullMe nog niet kan openen ({SurfaceName(s.NodeType)}).", $"This file has faces of a kind PushPullMe cannot open yet ({SurfaceName(s.NodeType)}).")),
         };
         return (surface, flipped);
     }
+
+    /// <summary>The name of a kind of surface as the XT schema has it (OFFSET_SURF, SWEPT_SURF, ...), or its number.</summary>
+    private static string SurfaceName(int type) => XtBaseSchema.Types.TryGetValue(type, out var t) ? t.Name : type.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private static BrepCurve Curve(Dictionary<int, XtNode> map, XtNode c, Vec3 start, Vec3 end)
     {
@@ -233,11 +261,11 @@ public static class RsDocxReader
     /// <summary>
     /// An intersection curve (XT node 38, as DesignSpark writes where two roundings cut each other: kubus_bewerkt_bewerkt):
     /// the curve where its two surfaces meet, stored as a coarse chart of points. Made into a B-spline from start to end:
-    /// the chart spread evenly over 97 points, each put exactly on both surfaces (Newton), and a curve through them.
+    /// the chart spread evenly over a point every quarter millimetre (at least 97), each put exactly on both surfaces (Newton), and a curve through them.
     /// </summary>
     private static BrepCurve Intersection(Dictionary<int, XtNode> map, XtNode c, Vec3 start, Vec3 end)
     {
-        var surfs = c.Array("surface").Select(x => Convert.ToInt32(x)).Where(map.ContainsKey).Select(i => Surface(map[i]).Item1).ToList();
+        var surfs = c.Array("surface").Select(x => Convert.ToInt32(x)).Where(map.ContainsKey).Select(i => Surface(map[i], map).Item1).ToList();
         if (surfs.Count != 2) throw new RsDocxReadException(Lang.T("Een snijkromme zonder twee vlakken; die kan PushPullMe nog niet lezen.", "An intersection curve without two faces; PushPullMe cannot read that yet."));
         // two cylinders (roundings that cut each other): exactly, round the thinner one
         if (surfs[0] is BrepCylinder ca && surfs[1] is BrepCylinder cb)
@@ -262,12 +290,15 @@ public static class RsDocxReader
                 for (int i = 0; i + 2 < raw.Length; i += dim) guide.Add(new Vec3(raw[i], raw[i + 1], raw[i + 2]));
             }
         }
-        if (guide.Count > 0 && (guide[0] - end).Length < (guide[0] - start).Length) guide.Reverse();
+        // only the part of the chart the edge runs along (a closed chart, kubus_getrokken.rsdocx: the whole cross-section
+        // of a torus with a plane, of which the edge uses a part, run against the curve's sense)
+        if (guide.Count >= 2) guide = Between(guide, start, end, c.Has("sense") && c.Byte("sense") == '-');
         guide.Insert(0, start); guide.Add(end);
         // spread evenly along it
         var len = new List<double> { 0 };
         for (int i = 1; i < guide.Count; i++) len.Add(len[^1] + (guide[i] - guide[i - 1]).Length);
-        const int n = 96;
+        // (a point every quarter millimetre, at least 96: close enough between them to stay within Parasolid's 1e-8 m)
+        int n = Math.Clamp((int)Math.Ceiling(len[^1] / 2.5e-4), 96, 4000);
         var pts = new List<Vec3> { start };
         for (int k = 1; k < n; k++)
         {
@@ -278,6 +309,41 @@ public static class RsDocxReader
         }
         pts.Add(end);
         return BSpline.Interpolate(pts, false);
+    }
+
+    /// <summary>
+    /// The points of a chart (a polyline along a curve) strictly between where <paramref name="start"/> and
+    /// <paramref name="end"/> lie on it, in the edge's order. An open chart: from the one to the other. A closed one
+    /// (its ends meet): along the chart, or against it when the curve's sense is reversed (<paramref name="against"/>),
+    /// round past its ends where needed; all the way round when start and end are the same point.
+    /// </summary>
+    private static List<Vec3> Between(List<Vec3> chart, Vec3 start, Vec3 end, bool against)
+    {
+        var len = new List<double> { 0 };
+        for (int i = 1; i < chart.Count; i++) len.Add(len[^1] + (chart[i] - chart[i - 1]).Length);
+        double total = len[^1];
+        double At(Vec3 q)
+        {
+            double best = double.MaxValue, at = 0;
+            for (int i = 0; i + 1 < chart.Count; i++)
+            {
+                var ab = chart[i + 1] - chart[i]; double l2 = ab.Dot(ab);
+                double t = l2 < 1e-30 ? 0 : Math.Clamp((q - chart[i]).Dot(ab) / l2, 0, 1);
+                double d = (chart[i] + ab * t - q).Length;
+                if (d < best) { best = d; at = len[i] + t * (len[i + 1] - len[i]); }
+            }
+            return at;
+        }
+        double a = At(start), b = At(end);
+        bool closed = total > 0 && (chart[0] - chart[^1]).Length < total * 1e-9;
+        if (!closed)
+            return a <= b ? Enumerable.Range(0, chart.Count).Where(i => len[i] > a && len[i] < b).Select(i => chart[i]).ToList()
+                : Enumerable.Range(0, chart.Count).Where(i => len[i] > b && len[i] < a).Select(i => chart[i]).Reverse().ToList();
+        // (closed: the chart's points by their distance from start along the way the edge goes)
+        var ring = Enumerable.Range(0, chart.Count - 1).Select(i => (P: chart[i], S: len[i])).ToList();
+        double Ahead(double s) { double d = against ? a - s : s - a; d %= total; return d < 0 ? d + total : d; }
+        double span = Ahead(b); if (span < total * 1e-9) span = total;
+        return ring.Select(x => (x.P, D: Ahead(x.S))).Where(x => x.D > total * 1e-9 && x.D < span - total * 1e-9).OrderBy(x => x.D).Select(x => x.P).ToList();
     }
 
     /// <summary>The point near p on both surfaces: Newton steps of least length on their two distances.</summary>
@@ -305,7 +371,7 @@ public static class RsDocxReader
             Dist(s, p + new Vec3(0, 0, h)) - Dist(s, p - new Vec3(0, 0, h))) * (1 / (2 * h));
     }
 
-    /// <summary>Signed distance from p to a surface (plane, cylinder, sphere, torus).</summary>
+    /// <summary>Signed distance from p to a surface (plane, cylinder, sphere, torus, free form: along its natural normal).</summary>
     private static double Dist(BrepSurface s, Vec3 p)
     {
         switch (s)
@@ -320,9 +386,24 @@ public static class RsDocxReader
                 var ring = t.Centre + radial.Normalized() * t.MajorRadius;
                 return (p - ring).Length - t.MinorRadius;
             }
+            case BrepNurbsSurface ns:
+            {
+                // (from the parameters of the point found last on it: the points come along the curve)
+                _near ??= new();
+                var (u, v) = _near.TryGetValue(ns, out var near) ? ns.Parameters(p, near, double.MaxValue) : ns.Parameters(p);
+                _near[ns] = (u, v);
+                var q = ns.At(u, v);
+                double du = (ns.UKnots[^1] - ns.UKnots[0]) * 1e-6, dv = (ns.VKnots[^1] - ns.VKnots[0]) * 1e-6;
+                double ua = Math.Max(ns.UKnots[0], u - du), ub = Math.Min(ns.UKnots[^1], u + du), va = Math.Max(ns.VKnots[0], v - dv), vb = Math.Min(ns.VKnots[^1], v + dv);
+                var n = (ns.At(ub, v) - ns.At(ua, v)).Cross(ns.At(u, vb) - ns.At(u, va));
+                return n.Length < 1e-30 ? (p - q).Length : (p - q).Dot(n.Normalized());
+            }
             default: throw new RsDocxReadException(Lang.T("Een snijkromme op een vlak dat PushPullMe nog niet kent.", "An intersection curve on a face that PushPullMe does not know yet."));
         }
     }
+
+    /// <summary>Per free-form surface the parameters of the point last found on it (see <see cref="Dist"/>).</summary>
+    [ThreadStatic] private static Dictionary<BrepNurbsSurface, (double U, double V)>? _near;
 
     private static Vec3 V(double[] a) => new(a[0], a[1], a[2]);
 }

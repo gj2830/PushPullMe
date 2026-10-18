@@ -117,7 +117,7 @@ public static class BrepTransform
             {
                 var (surface, flip) = S(f.Surface);
                 var loops = f.Loops.Select(l => (IReadOnlyList<BrepCoedge>)l.Reverse().Select(c => new BrepCoedge(c.Edge, !c.Forward)).ToList()).ToList();
-                return new BrepFace(surface, f.Reversed != flip, loops);
+                return f with { Surface = surface, Reversed = f.Reversed != flip, Loops = loops };
             }).ToList(),
         };
     }
