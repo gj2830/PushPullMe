@@ -33,7 +33,7 @@ public interface IEditorWindow
     bool HasConverter { get; }
 
     /// <summary>A yes/no question (the AI assistant asks before it throws work away).</summary>
-    bool Ask(string question);
+    Task<bool> Ask(string question);
 
     void ShowToast(string title, string text);
 
@@ -50,7 +50,7 @@ public interface IEditorWindow
     Task Idle();
 
     /// <summary>The view as a PNG (the assistant's screenshot), or null.</summary>
-    byte[]? Snapshot();
+    Task<byte[]?> Snapshot();
 
     /// <summary>The whole window as a PNG file (the test aid), rendered by the window itself, not copied from the screen.</summary>
     Task SaveWindowPng(string path);
@@ -129,8 +129,8 @@ public sealed class ViewHost
     public double ActualWidth { get; set; } = 1000;
     public double ActualHeight { get; set; } = 700;
 
-    /// <summary>Whether the angle of view is across the view (else up it): as the window's renderer draws.</summary>
-    public bool FieldOfViewAcross { get; set; } = true;
+    /// <summary>Whether the angle of view is across the view (else up it, as HelixToolkit draws and every window follows).</summary>
+    public bool FieldOfViewAcross { get; set; }
 
     /// <summary>The lines and highlights shown beside the model.</summary>
     public SceneItems Children { get; } = new();

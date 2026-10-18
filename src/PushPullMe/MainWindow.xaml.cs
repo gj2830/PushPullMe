@@ -466,8 +466,8 @@ public partial class MainWindow : Window, IEditorWindow
         return (doc, r.Note);
     }
 
-    public bool Ask(string question) =>
-        MessageBox.Show(this, question, "PushPullMe – " + T("AI-assistent", "AI assistant"), MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+    public Task<bool> Ask(string question) =>
+        Task.FromResult(MessageBox.Show(this, question, "PushPullMe – " + T("AI-assistent", "AI assistant"), MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes);
 
     private DispatcherTimer? _toastTimer;
 
@@ -493,13 +493,13 @@ public partial class MainWindow : Window, IEditorWindow
 
     public async Task Idle() => await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
 
-    public byte[]? Snapshot()
+    public Task<byte[]?> Snapshot()
     {
         var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
         enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(View.RenderBitmap()));
         using var ms = new MemoryStream();
         enc.Save(ms);
-        return ms.ToArray();
+        return Task.FromResult<byte[]?>(ms.ToArray());
     }
 
     public async Task SaveWindowPng(string path)

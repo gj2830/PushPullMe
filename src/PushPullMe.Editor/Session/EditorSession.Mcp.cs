@@ -393,7 +393,7 @@ public sealed partial class EditorSession
             {
                 string path = a["path"]?.GetValue<string>() ?? throw new McpRefusal("'path' is missing.");
                 if (!File.Exists(path)) throw new McpRefusal($"There is no file {path}.");
-                if (Unsaved && !Ask(T($"{client} wil {Path.GetFileName(path)} openen. Wat je nu hebt is niet opgeslagen en gaat dan weg (ongedaan maken kan niet meer). Doorgaan?", $"{client} wants to open {Path.GetFileName(path)}. What you have now is not saved and will be gone (no undo). Go ahead?")))
+                if (Unsaved && !await Ask(T($"{client} wil {Path.GetFileName(path)} openen. Wat je nu hebt is niet opgeslagen en gaat dan weg (ongedaan maken kan niet meer). Doorgaan?", $"{client} wants to open {Path.GetFileName(path)}. What you have now is not saved and will be gone (no undo). Go ahead?")))
                     throw new McpRefusal("The user did not want that: there is unsaved work.");
                 await Load(path);
                 if (!ReferenceEquals(_doc, _savedDoc) || _path != path) throw new McpRefusal("The file could not be opened (the app shows why).");
@@ -403,7 +403,7 @@ public sealed partial class EditorSession
             case "save_file":
             {
                 string path = a["path"]?.GetValue<string>() ?? throw new McpRefusal("'path' is missing.");
-                if (File.Exists(path) && !Ask(T($"{client} wil {Path.GetFileName(path)} overschrijven. Doorgaan?", $"{client} wants to overwrite {Path.GetFileName(path)}. Go ahead?")))
+                if (File.Exists(path) && !await Ask(T($"{client} wil {Path.GetFileName(path)} overschrijven. Doorgaan?", $"{client} wants to overwrite {Path.GetFileName(path)}. Go ahead?")))
                     throw new McpRefusal("The user did not want the file overwritten.");
                 var stamp = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
                 Save(path);
@@ -433,7 +433,7 @@ public sealed partial class EditorSession
     }
 
     /// <summary>A yes/no question to the user (the assistant waits for it).</summary>
-    private bool Ask(string question) => _window.Ask(question);
+    private Task<bool> Ask(string question) => _window.Ask(question);
 
     private static JsonArray Mm3(Vec3 v) => new(Math.Round(v.X * Display, 3), Math.Round(v.Y * Display, 3), Math.Round(v.Z * Display, 3));
 
@@ -534,6 +534,6 @@ public sealed partial class EditorSession
     {
         await Task.Delay(300);
         await _window.Idle();
-        return _window.Snapshot() ?? throw new InvalidOperationException("The view could not be rendered.");
+        return await _window.Snapshot() ?? throw new InvalidOperationException("The view could not be rendered.");
     }
 }

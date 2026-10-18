@@ -5693,7 +5693,7 @@ public sealed partial class EditorSession
                 case "zoomall": ZoomAll(0); break;
                 case "camera?":
                     if (View.Camera is ProjectionCamera qc)
-                        report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  camera ok {CameraOk()}: at ({qc.Position.X:0.#},{qc.Position.Y:0.#},{qc.Position.Z:0.#}) look ({qc.LookDirection.X:0.###},{qc.LookDirection.Y:0.###},{qc.LookDirection.Z:0.###}) up ({qc.UpDirection.X:0.###},{qc.UpDirection.Y:0.###},{qc.UpDirection.Z:0.###})"));
+                        report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  camera ok {CameraOk()} (angle of view {(View.FieldOfViewAcross ? "across" : "up")}): at ({qc.Position.X:0.#},{qc.Position.Y:0.#},{qc.Position.Z:0.#}) look ({qc.LookDirection.X:0.###},{qc.LookDirection.Y:0.###},{qc.LookDirection.Z:0.###}) up ({qc.UpDirection.X:0.###},{qc.UpDirection.Y:0.###},{qc.UpDirection.Z:0.###})"));
                     break;
                 case "pan":
                 {

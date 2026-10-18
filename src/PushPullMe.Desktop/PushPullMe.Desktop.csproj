@@ -11,6 +11,8 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <!-- (vertex data handed to OpenGL by pointer) -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- (the MCP server comes along through the editor layer, built with and without a runtime: the same two small files) -->
+    <ErrorOnDuplicatePublishOutputFiles>false</ErrorOnDuplicatePublishOutputFiles>
   </PropertyGroup>
 
   <ItemGroup>

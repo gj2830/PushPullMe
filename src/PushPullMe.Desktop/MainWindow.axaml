@@ -2,30 +2,107 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:PushPullMe.Desktop"
         x:Class="PushPullMe.Desktop.MainWindow"
-        Title="PushPullMe" Width="1200" Height="800" Background="#F0F4F9"
-        Icon="/Assets/pushpullme.png">
-  <DockPanel Margin="12">
-    <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,Auto,*,Auto" Margin="4,0,4,10">
-      <Image Source="/Assets/pushpullme.png" Width="32" Height="32" />
-      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0" Spacing="10">
-        <TextBlock Text="PushPullMe" FontSize="22" FontWeight="Bold" Foreground="#2563EB" />
-        <TextBlock x:Name="FileText" FontSize="13" Foreground="#64748B" VerticalAlignment="Bottom" Margin="0,0,0,3" />
+        Title="PushPullMe" Width="1320" Height="860" Background="{StaticResource Page}"
+        Icon="/Assets/pushpullme.png" DragDrop.AllowDrop="True">
+  <Grid Margin="16" RowDefinitions="Auto,*,Auto" ColumnDefinitions="Auto,*,Auto">
+
+    <!-- ============================== top bar: name and file buttons -->
+    <DockPanel Grid.ColumnSpan="3" Margin="0,0,0,12" LastChildFill="False">
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <Image Source="/Assets/pushpullme.png" Width="34" Height="34" Margin="0,0,10,0"/>
+        <TextBlock Text="PushPullMe" FontSize="26" FontWeight="Black" Foreground="{StaticResource AccentGradient}"/>
+        <TextBlock x:Name="FileText" FontSize="14" Foreground="{StaticResource Muted}" VerticalAlignment="Bottom" Margin="14,0,0,4"/>
       </StackPanel>
-      <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="8">
-        <Button x:Name="ZoomButton" Click="Zoom_Click" CornerRadius="16" Padding="14,6" />
-        <Button x:Name="OpenButton" Click="Open_Click" CornerRadius="16" Padding="14,6" Background="#2563EB" Foreground="White" />
+      <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+        <Button x:Name="LanguageButton" Classes="pill" Content="🌐  NL" ToolTip.Tip="Taal / language: Nederlands · English"/>
+        <Button x:Name="UndoButton" Classes="pill" Content="↩  ongedaan" IsEnabled="False" ToolTip.Tip="Ctrl+Z"/>
+        <Button x:Name="RedoButton" Classes="pill" Content="↪  opnieuw" IsEnabled="False" ToolTip.Tip="Ctrl+Y"/>
+        <Button x:Name="OpenButton" Classes="pill" Content="📂  openen" ToolTip.Tip="STL, 3MF of .rsdocx (Ctrl+O)"/>
+        <Button x:Name="SaveButton" Classes="pill primary" Content="💾  opslaan" IsEnabled="False" Margin="0"
+                ToolTip.Tip="Als .rsdocx (voor je tekenpakket) of .stl (voor de printer) (Ctrl+S)"/>
       </StackPanel>
+    </DockPanel>
+
+    <!-- ============================== tool bar, and under it the structure tree (when it is on the left) -->
+    <Grid x:Name="LeftColumn" Grid.Row="1" Margin="0,0,12,0" RowDefinitions="Auto,Auto">
+      <Border Classes="card" Padding="10,10,4,4" VerticalAlignment="Top">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <WrapPanel x:Name="Tools" Width="215"/>
+        </ScrollViewer>
+      </Border>
+      <Border x:Name="StructureLeft" Grid.Row="1" Classes="card" Padding="10,8,6,8" Margin="0,12,0,0" Width="229" MinHeight="44" IsVisible="False"/>
     </Grid>
-    <Border DockPanel.Dock="Bottom" Background="White" CornerRadius="12" Padding="14,8" Margin="0,10,0,0">
-      <TextBlock x:Name="StatusText" TextWrapping="Wrap" />
-    </Border>
-    <Border CornerRadius="14" ClipToBounds="True" BorderBrush="#E2E8F0" BorderThickness="1">
+
+    <!-- ============================== the structure tree (when it is on the right) -->
+    <Border x:Name="StructureRight" Grid.Row="1" Grid.Column="2" Classes="card" Padding="10,8,6,8" Margin="12,0,0,0" Width="250"/>
+
+    <!-- ============================== the view -->
+    <Border Grid.Row="1" Grid.Column="1" Classes="card" Padding="6" ClipToBounds="True">
       <Grid>
-        <local:ModelView x:Name="View" />
-        <Border x:Name="Busy" IsVisible="False" Background="#B0FFFFFF">
-          <TextBlock x:Name="BusyText" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" />
+        <local:ModelView x:Name="View"/>
+
+        <!-- while a work plane is set: back to the ground in one click -->
+        <Button x:Name="GroundButton" Classes="pill" Content="⊞  grond" IsVisible="False" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="18"
+                ToolTip.Tip="Werkvlak terug op de grond (net als ⊞ en klikken op een lege plek)"/>
+
+        <StackPanel x:Name="EmptyHint" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
+          <TextBlock Text="🧊" FontSize="64" HorizontalAlignment="Center"/>
+          <TextBlock Text="Sleep een STL, 3MF of .rsdocx hierheen" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+          <TextBlock Text="middelste knop = draaien · Shift + middelste knop = schuiven · wiel = zoomen" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" Margin="0,6,0,0"/>
+        </StackPanel>
+
+        <!-- the labels, the tag next to the mouse, the lasso, the box a label is typed in -->
+        <Canvas x:Name="TagLayer">
+          <Polyline x:Name="LassoLine" Stroke="{StaticResource Accent}" StrokeThickness="2" StrokeDashArray="4,3" IsVisible="False" IsHitTestVisible="False"/>
+          <Border x:Name="RadiusTag" IsVisible="False" Background="White" BorderBrush="{StaticResource Accent}" BorderThickness="1.5"
+                  CornerRadius="8" Padding="8,3" IsHitTestVisible="False">
+            <TextBlock x:Name="RadiusTagText" FontWeight="SemiBold" FontSize="13" Foreground="{StaticResource Accent}"/>
+          </Border>
+        </Canvas>
+
+        <!-- the paint bucket's palette -->
+        <Border x:Name="PaintPanel" IsVisible="False" Classes="card" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="16" Padding="12,10" Width="232">
+          <StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+              <TextBlock Text="🎨 Verf" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
+              <TextBlock x:Name="PaintName" Margin="8,0,0,0" Foreground="{StaticResource Muted}"/>
+            </StackPanel>
+            <WrapPanel x:Name="Swatches"/>
+          </StackPanel>
+        </Border>
+
+        <!-- toast -->
+        <Border x:Name="Toast" IsVisible="False" Classes="card" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,16,0,0" Padding="18,12" MaxWidth="560">
+          <StackPanel>
+            <TextBlock x:Name="ToastTitle" FontWeight="Bold" FontSize="14"/>
+            <TextBlock x:Name="ToastText" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,4,0,0"/>
+          </StackPanel>
+        </Border>
+
+        <!-- busy -->
+        <Border x:Name="BusyCover" IsVisible="False" Background="#AAF3F6FB">
+          <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock Text="⏳" FontSize="44" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="BusyText" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,6,0,0"/>
+          </StackPanel>
         </Border>
       </Grid>
     </Border>
-  </DockPanel>
+
+    <!-- ============================== status bar: what to do, and the measurements box -->
+    <DockPanel Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0">
+      <Border DockPanel.Dock="Right" Classes="card" Padding="14,6">
+        <StackPanel Orientation="Horizontal">
+          <CheckBox x:Name="AssistantBox" Content="🤖 AI-assistent mag meewerken" VerticalAlignment="Center" Margin="0,0,16,0" Foreground="{StaticResource Muted}" Focusable="False"
+                    ToolTip.Tip="Aan: een AI-assistent (via MCP, bijvoorbeeld Claude Code, Claude Desktop of VS Code) mag in dit venster meewerken: het model bekijken en bewerken. Alles wat hij doet zie je hier en kun je ongedaan maken. Zie de README voor het koppelen."/>
+          <CheckBox x:Name="JoinBox" Content="samenvoegen" IsChecked="True" VerticalAlignment="Center" Margin="0,0,16,0" Foreground="{StaticResource Muted}" Focusable="False"
+                    ToolTip.Tip="Aan: wat je met ⇕ tegen een ander deel aan trekt, wordt er één deel mee (zoals DesignSpark). Uit: het blijft een apart deel."/>
+          <TextBlock x:Name="MeasureLabel" Text="Afstand" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Margin="0,0,10,0"/>
+          <TextBlock x:Name="MeasureBox" Width="110" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{StaticResource Accent}"/>
+          <TextBlock x:Name="MeasureUnit" Text="mm" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+        </StackPanel>
+      </Border>
+      <TextBlock x:Name="StatusText" VerticalAlignment="Center" FontSize="13.5" TextWrapping="Wrap" Margin="4,0,16,0" Text="Open een model om te beginnen."/>
+    </DockPanel>
+  </Grid>
 </Window>
