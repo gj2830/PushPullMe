@@ -35,6 +35,8 @@ public partial class MainWindow
     /// <summary>The choice kept from before (off when there is none); PPM_MCP=1 turns it on for a test window.</summary>
     private void LoadAssistant()
     {
+        // (the tools of this build, for the MCP server while this window does not listen)
+        PipeProtocol.WriteToolsFile(ToolCatalog.ToJson());
         bool on = Environment.GetEnvironmentVariable("PPM_MCP") == "1";
         try { if (!on && File.Exists(AssistantFile)) on = File.ReadAllText(AssistantFile).Trim() == "aan"; } catch (IOException) { } catch (UnauthorizedAccessException) { }
         AssistantBox.IsChecked = on;
@@ -88,6 +90,12 @@ public partial class MainWindow
                     await pipe.WaitForConnectionAsync(ct);
                     var req = await PipeProtocol.ReadAsync(pipe, ct) as JsonObject;
                     if (req == null) continue;
+                    // (the MCP server asking which tools there are: no call, nothing shown)
+                    if (req["list"]?.GetValue<bool>() == true)
+                    {
+                        await PipeProtocol.WriteAsync(pipe, new JsonObject { ["ok"] = true, ["tools"] = ToolCatalog.ToJson() }, ct);
+                        continue;
+                    }
                     var answer = await await Dispatcher.InvokeAsync(() => McpCall(req["client"]?.GetValue<string>() ?? "?", req["tool"]?.GetValue<string>() ?? "", req["args"] as JsonObject ?? new JsonObject()));
                     await PipeProtocol.WriteAsync(pipe, answer, ct);
                 }

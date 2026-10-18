@@ -1,14 +1,22 @@
 using System.Text.Json.Nodes;
 
-namespace PushPullMe.Mcp;
+namespace PushPullMe.Core;
 
 /// <summary>A tool as an MCP client sees it: its name, what it does (for the language model, in English) and the JSON
 /// schema of its arguments.</summary>
 public sealed record Tool(string Name, string Description, JsonObject InputSchema);
 
-/// <summary>The tools PushPullMe offers (a fixed set: each goes through the app's own functions and can be undone).</summary>
+/// <summary>The tools PushPullMe offers (a fixed set: each goes through the app's own functions and can be undone). The
+/// app hands them to the MCP server (over the pipe, and in <c>mcp-tools.json</c> for when it is not running), so a new or
+/// changed tool needs only the app rebuilt: the server itself stays as it is.</summary>
 public static class ToolCatalog
 {
+    /// <summary>The tools as MCP's tools/list gives them: [{name, description, inputSchema}, …].</summary>
+    public static JsonArray ToJson() => new(Tools.Select(t => (JsonNode)new JsonObject
+    {
+        ["name"] = t.Name, ["description"] = t.Description, ["inputSchema"] = t.InputSchema.DeepClone(),
+    }).ToArray());
+
     private static JsonObject Int(string d) => new() { ["type"] = "integer", ["description"] = d };
     private static JsonObject Num(string d) => new() { ["type"] = "number", ["description"] = d };
     private static JsonObject Str(string d) => new() { ["type"] = "string", ["description"] = d };

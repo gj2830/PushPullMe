@@ -79,6 +79,12 @@ The MCP server is `PushPullMe.Mcp.exe`, next to `PushPullMe.exe` (stdio transpor
 - **VS Code** (`.vscode/mcp.json`):
   `{"servers": {"pushpullme": {"type": "stdio", "command": "C:\\path\\to\\PushPullMe.Mcp.exe"}}}`.
 
+The tools come from the app, not from the server: a rebuilt PushPullMe brings its new or changed tools as soon as it
+starts (the server looks every two seconds and tells the client, which fetches them again), without restarting the
+server or the client's session. While PushPullMe does not run, the server offers the tools the app last wrote down
+(`%LOCALAPPDATA%\PushPullMe\mcp-tools.json`). Only a change to the server itself (`src/PushPullMe.Mcp`) needs it
+restarted (in Claude Code: `/mcp`, reconnect); building is fine while it runs, as long as the server did not change.
+
 ## Nederlands
 
 Een speels tekenprogramma voor 3D-vormen in de stijl van SketchUp, met de gewoontes van DesignSpark Mechanical. Het
