@@ -1039,7 +1039,20 @@ public partial class MainWindow : Window
     /// <summary>A whole-body change (turn, scale, mirror, move; with whether to copy) of body <paramref name="body"/>: of
     /// its whole group when it lies in a closed one.</summary>
     private SketchDocument Whole(SketchDocument d, int body, bool copy, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op) =>
-        d.UnitOf(body, _openGroup) is { Group: { } g } ? d.TransformGroup(g, op, copy).Doc : op(d, body, copy).Doc;
+        WholeOf(d, body, copy, op).Doc;
+
+    /// <summary>As <see cref="Whole"/>, with what was changed: the group (the copy of it) when a closed group was taken,
+    /// else the body (the copy of it).</summary>
+    private (SketchDocument Doc, GroupUnit Unit) WholeOf(SketchDocument d, int body, bool copy, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op)
+    {
+        if (d.UnitOf(body, _openGroup) is { Group: { } g })
+        {
+            var (doc, ng) = d.TransformGroup(g, op, copy);
+            return (doc, GroupUnit.OfGroup(ng));
+        }
+        var (bd, nb) = op(d, body, copy);
+        return (bd, GroupUnit.OfBody(nb));
+    }
 
     /// <summary>The group a body is taken with (it lies in a closed one), or null.</summary>
     private int? GroupTaken(int body) => _doc?.UnitOf(body, _openGroup)?.Group;

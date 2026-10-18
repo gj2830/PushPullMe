@@ -4,7 +4,12 @@ using RsDocx.Core.Stl;
 namespace PushPullMe.Core;
 
 /// <summary>Why a push/pull cannot be done (shown to the user as it is).</summary>
-public class PushPullException(string message) : Exception(message);
+public class PushPullException(string message) : Exception(message)
+{
+    /// <summary>The same in English, whatever the app's language (for the AI assistant: its tools speak English); the
+    /// message itself when it was not made with <see cref="Lang.T"/> right there.</summary>
+    public string English { get; } = Lang.EnglishOf(message) ?? message;
+}
 
 /// <summary>The body would touch itself only along an edge (four faces round it): no solid. The piece can be made a body
 /// of its own instead (as DesignSpark does).</summary>

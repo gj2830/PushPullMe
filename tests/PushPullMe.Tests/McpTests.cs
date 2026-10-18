@@ -78,6 +78,19 @@ public class McpTests
     }
 
     [Fact]
+    public void A_refusal_from_the_core_is_also_there_in_English_for_the_assistant()
+    {
+        // (whichever language the app speaks: the English along)
+        var ex = new PushPullException(Lang.T("Dat kan niet.", "That is not possible."));
+        Assert.Equal(Lang.English ? "That is not possible." : "Dat kan niet.", ex.Message);
+        Assert.Equal("That is not possible.", ex.English);
+        // a message not just made with Lang.T: as it is
+        Assert.Equal("plain", new PushPullException("plain").English);
+        Lang.T("Iets anders.", "Something else.");
+        Assert.Equal("Dat kan niet.", new PushPullException("Dat kan niet.").English);
+    }
+
+    [Fact]
     public async Task Without_PushPullMe_listening_a_tool_call_says_how_to_turn_it_on()
     {
         var r = await McpServer.CallApp("test", "get_model", new JsonObject(), pipeName: "PushPullMe.mcp.test." + Guid.NewGuid().ToString("N"));

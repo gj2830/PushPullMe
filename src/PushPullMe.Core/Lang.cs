@@ -11,5 +11,17 @@ public static class Lang
     public static bool English { get; set; }
 
     /// <summary>The text in the language chosen.</summary>
-    public static string T(string nl, string en) => English ? en : nl;
+    public static string T(string nl, string en)
+    {
+        string said = English ? en : nl;
+        _last = (said, en);
+        return said;
+    }
+
+    /// <summary>The last text <see cref="T"/> gave on this thread, with its English.</summary>
+    [ThreadStatic] private static (string Said, string En)? _last;
+
+    /// <summary>The English of <paramref name="text"/> when it is what <see cref="T"/> gave last on this thread (as in
+    /// <c>throw new PushPullException(Lang.T(…, …))</c>), else null.</summary>
+    public static string? EnglishOf(string text) => _last is { } l && l.Said == text ? l.En : null;
 }

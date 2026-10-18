@@ -835,6 +835,24 @@ public sealed partial class SketchDocument
         Curved = Curved.Append(new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>()).ToList(),
     };
 
+    /// <summary>
+    /// Bodies taken out; the others keep their order (so their numbers go down past the ones taken) and, through
+    /// <see cref="CarryMeta"/>, their names and groups (a group left empty goes).
+    /// </summary>
+    public SketchDocument RemoveBodies(IReadOnlyCollection<int> bodies)
+    {
+        if (bodies.Count == 0) throw new PushPullException(Lang.T("Kies wat er weg moet.", "Pick what is to go."));
+        foreach (int b in bodies)
+            if (b < 0 || b >= Bodies.Count) throw new PushPullException(Lang.T($"Er is geen deel {b}.", $"There is no part {b}."));
+        return new SketchDocument
+        {
+            Lines = Lines,
+            Bodies = Bodies.Where((_, i) => !bodies.Contains(i)).ToList(),
+            Curved = Curved.Where((_, i) => !bodies.Contains(i)).ToList(),
+            Colors = Colors.Where((_, i) => !bodies.Contains(i)).ToList(),
+        };
+    }
+
     /// <summary>Whether a closed run of pieces lies outside every face of the plane: none of its pieces runs over a face,
     /// and no corner of a face lies inside it.</summary>
     private static bool OutsideFaces(BrepBody body, List<int> plane, IReadOnlyList<LoosePiece> pieces, IReadOnlyList<int> ring, Vec3 n,

@@ -101,6 +101,13 @@ public partial class MainWindow
                 }
                 catch (OperationCanceledException) { return; }
                 catch (IOException) { }
+                // (whatever else went wrong with this one call: said to the client if it still listens, and the next one
+                // is taken; the loop never stops on it, or the assistant would be gone without a word)
+                catch (Exception ex)
+                {
+                    try { await PipeProtocol.WriteAsync(pipe, Answer(false, $"PushPullMe could not do that ({ex.GetType().Name}): {ex.Message}"), ct); }
+                    catch (Exception) { }
+                }
             }
         }
     }
@@ -123,17 +130,26 @@ public partial class MainWindow
         {
             if (AssistantBox.IsChecked != true) throw new McpRefusal("The user turned 'AI assistant may work along' off.");
             bool reads = tool is "get_model" or "get_body" or "screenshot";
-            if (!reads && ActionBusy) throw new McpRefusal(T("De gebruiker is midden in een bewerking; probeer het zo opnieuw.", "The user is in the middle of an action; try again in a moment."));
-            if (!reads && tool is not ("open_file" or "undo" or "redo") && _doc == null) throw new McpRefusal(T("Er is geen model open.", "No model is open."));
+            if (!reads && ActionBusy) throw new McpRefusal("The user is in the middle of an action; try again in a moment.");
+            if (!reads && tool is not ("open_file" or "undo" or "redo") && _doc == null) throw new McpRefusal("No model is open.");
             var r = await McpDo(client, tool, args);
             return r;
         }
         catch (McpRefusal ex) { return Answer(false, ex.Message); }
-        catch (PushPullException ex) { Render(); return Answer(false, ex.Message); }
+        // (in English, as the tools speak it, also when the app speaks Dutch)
+        catch (PushPullException ex) { Render(); return Answer(false, ex.English); }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or FormatException or IOException or KeyNotFoundException)
         {
             Render();
             return Answer(false, ex.Message);
+        }
+        // (anything else, e.g. a null in an argument array or a fault deep in the geometry: said, never the end of the
+        // pipe server)
+        catch (Exception ex)
+        {
+            Log($"mcp {tool} failed: {ex}");
+            Render();
+            return Answer(false, $"{tool} failed ({ex.GetType().Name}): {ex.Message}");
         }
     }
 
@@ -145,7 +161,7 @@ public partial class MainWindow
             : v is JsonValue s && s.TryGetValue(out string? text) ? double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) ? d : throw new McpRefusal($"'{n}' must be a number.")
             : v.GetValue<double>();
         bool Flag(string n) => a[n]?.GetValue<bool>() == true;
-        Vec3 Pt(string n) => a[n] is JsonArray { Count: 3 } p ? new Vec3(p[0]!.GetValue<double>() / Display, p[1]!.GetValue<double>() / Display, p[2]!.GetValue<double>() / Display) : throw new McpRefusal($"'{n}' must be [x, y, z] in mm.");
+        Vec3 Pt(string n) => a[n] is JsonArray { Count: 3 } p && p.All(x => x is JsonValue) ? new Vec3(p[0]!.GetValue<double>() / Display, p[1]!.GetValue<double>() / Display, p[2]!.GetValue<double>() / Display) : throw new McpRefusal($"'{n}' must be [x, y, z] in mm.");
         Vec3 Dir(string n) { var v = Pt(n) * Display; return v.Length < 1e-12 ? throw new McpRefusal($"'{n}' has no length.") : v.Normalized(); }
         int Body(string n = "body")
         {
@@ -154,9 +170,9 @@ public partial class MainWindow
             if (Outside(b)) throw new McpRefusal($"Body {b} lies outside the open group {_doc.GroupName(_openGroup!.Value)}; close it first (open_group without group).");
             return b;
         }
-        FaceRef Face(int b)
+        FaceRef Face(int b, string n = "face")
         {
-            int f = Int("face");
+            int f = Int(n);
             if (f < 0 || f >= _doc!.Bodies[b].Faces.Count) throw new McpRefusal($"Body {b} has no face {f} (it has {_doc.Bodies[b].Faces.Count}).");
             return new FaceRef(b, f);
         }
@@ -223,30 +239,97 @@ public partial class MainWindow
                 var nfr = faces.Count > 0 ? faces[^1] : new FaceRef(made.Bodies.Count - 1, 0);
                 return Changed(before, made, "tekent een rechthoek op het werkvlak.", "drew a rectangle on the work plane (a surface body: push_pull its face to make a block).", new JsonObject { ["body"] = nfr.Body, ["face"] = nfr.Face });
             }
+            case "draw_circle":
+            {
+                var c = Pt("centre"); double r = Num("radius") / Display;
+                if (r <= 0) throw new McpRefusal("The radius must be above 0.");
+                if (a["body"] != null)
+                {
+                    int b = Body(); var f = Face(b);
+                    if (before.Bodies[b].Faces[f.Face].Surface is not BrepPlane) throw new McpRefusal("Circles go on flat faces only.");
+                    var (doc, nf) = before.DrawCircle(f, c, r);
+                    return Changed(before, doc, $"tekent een cirkel op vlak {f.Face} van {before.BodyName(b)}.", $"drew a circle on face {f.Face} of body {b}.", new JsonObject { ["new_face"] = nf.Face, ["body"] = nf.Body });
+                }
+                // on the work plane, as draw_rectangle
+                var o = _plane.Origin;
+                var on = _plane.At((c - o).Dot(_plane.X), (c - o).Dot(_plane.Y));
+                var (made, faces) = before.AddShape([on + _plane.X * r, on + _plane.X * r], [new BrepCircle(on, GroundUp, _plane.X, r)], GroundUp, o);
+                var nfr = faces.Count > 0 ? faces[^1] : new FaceRef(made.Bodies.Count - 1, 0);
+                return Changed(before, made, "tekent een cirkel op het werkvlak.", "drew a circle on the work plane (a surface body: push_pull its face to make a cylinder).", new JsonObject { ["body"] = nfr.Body, ["face"] = nfr.Face });
+            }
+            case "draw_line":
+            {
+                var pts = a["points"] is JsonArray ps && ps.Count >= 2 && ps.All(p => p is JsonArray { Count: 3 } c && c.All(x => x is JsonValue))
+                    ? ps.Select(p => new Vec3(p![0]!.GetValue<double>() / Display, p[1]!.GetValue<double>() / Display, p[2]!.GetValue<double>() / Display)).ToList()
+                    : throw new McpRefusal("'points' must be two or more [x, y, z] in mm.");
+                if (a["body"] != null)
+                {
+                    int b = Body(); var f = Face(b);
+                    if (before.Bodies[b].Faces[f.Face].Surface is not BrepPlane) throw new McpRefusal("Lines go on flat faces only.");
+                    var (doc, nf) = before.DrawPath(f, pts);
+                    return Changed(before, doc, $"tekent lijnen op vlak {f.Face} van {before.BodyName(b)}.", $"drew lines on face {f.Face} of body {b}.", new JsonObject { ["new_face"] = nf.Face, ["body"] = nf.Body, ["faces_now"] = doc.Bodies[b].Faces.Count });
+                }
+                // on the work plane (the points brought onto it): loose lines, closing what they can, as the line tool there
+                var o = _plane.Origin;
+                var on = pts.Select(p => _plane.At((p - o).Dot(_plane.X), (p - o).Dot(_plane.Y))).ToList();
+                var (made, faces) = before.AddLines(on.Zip(on.Skip(1), (p, q) => new SketchLine(p, q))).CloseLooseLinesOnPlane(GroundUp, o);
+                return Changed(before, made, faces.Count > 0 ? "tekent lijnen op het werkvlak: ze sluiten een vlak." : "tekent losse lijnen op het werkvlak.",
+                    faces.Count > 0 ? "drew lines on the work plane; they close a shape (a surface body: push_pull its face)." : "drew loose lines on the work plane (no closed shape yet).",
+                    new JsonObject { ["faces_made"] = new JsonArray(faces.Select(x => (JsonNode)new JsonObject { ["body"] = x.Body, ["face"] = x.Face }).ToArray()), ["loose_lines"] = made.Lines.Count });
+            }
+            case "offset":
+            {
+                int b = Body(); var f = Face(b); double d = Num("distance");
+                if (before.Bodies[b].Faces[f.Face].Surface is not BrepPlane) throw new McpRefusal("Offset works on flat faces only.");
+                var (doc, inner) = before.Offset(f, d / Display);
+                return Changed(before, doc, $"verschuift de rand van vlak {f.Face} van {before.BodyName(b)} {Mm(d / Display)} mm.", $"offset face {f.Face} of body {b} by {Mm(d / Display)} mm.", new JsonObject { ["new_face"] = inner.Face, ["body"] = inner.Body });
+            }
+            case "revolve":
+            {
+                int b = Body(); var f = Face(b); var p = Pt("axis_point"); var ax = Dir("axis"); double deg = Num("degrees");
+                if (before.Bodies[b].Faces[f.Face].Surface is not BrepPlane) throw new McpRefusal("Only a flat face can be turned out.");
+                var (doc, cap) = before.Revolve(f, p, ax, deg * Math.PI / 180);
+                return Changed(before, doc, $"draait vlak {f.Face} van {before.BodyName(b)} {deg.ToString("0.#", CultureInfo.CurrentCulture)}° rond.", $"turned face {f.Face} of body {b} round by {deg.ToString("0.#", CultureInfo.InvariantCulture)}°.", new JsonObject { ["end_face"] = cap.Face, ["body"] = cap.Body });
+            }
+            case "follow_me":
+            {
+                int pb = Body("profile_body"); var pf = Face(pb, "profile_face");
+                int qb = Body("path_body"); var qf = Face(qb, "path_face");
+                var (doc, made) = before.FollowPath(pf, qf);
+                bool cut = doc.Volume() < before.Volume();
+                return Changed(before, doc, cut ? "volgt de rand en snijdt weg." : "volgt de rand (een lijst rondom).", cut ? "followed the edge and cut away (a chamfer or groove)." : "followed the edge (a rim added).",
+                    new JsonObject { ["bodies_made"] = new JsonArray(made.Select(m => (JsonNode)m).ToArray()) });
+            }
+            case "delete_body":
+            {
+                int b = Body();
+                var gone = GroupTaken(b) is { } g ? before.Members(g).ToList() : [b];
+                return Changed(before, before.RemoveBodies(gone), $"verwijdert {Thing(b)}.", $"deleted {ThingEn(b)}.", new JsonObject { ["deleted_bodies"] = new JsonArray(gone.Select(x => (JsonNode)x).ToArray()) });
+            }
             case "move":
             {
-                int b = Body(); bool copy = Flag("copy");
-                var doc = MoveDoc(before, b, copy ? MoveSelection.Copy() : MoveSelection.WholeBody(), Pt("offset"), GroupTaken(b), checkCrossing: true);
-                return Changed(before, doc, copy ? $"kopieert {Thing(b)}." : $"verplaatst {Thing(b)}.", copy ? $"copied {ThingEn(b)}." : $"moved {ThingEn(b)}.");
+                int b = Body(); bool copy = Flag("copy"); var off = Pt("offset");
+                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.MoveBody(bb, off, cp));
+                return Changed(before, doc, copy ? $"kopieert {Thing(b)}." : $"verplaatst {Thing(b)}.", copy ? $"copied {ThingEn(b)}." : $"moved {ThingEn(b)}.", Copied(doc, made, copy));
             }
             case "rotate":
             {
-                int b = Body(); var c = Pt("centre"); var ax = Dir("axis"); double rad = Num("degrees") * Math.PI / 180;
-                var doc = Whole(before, b, Flag("copy"), (x, bb, cp) => x.RotateBody(bb, c, ax, rad, cp));
-                return Changed(before, doc, $"draait {Thing(b)}.", $"turned {ThingEn(b)}.");
+                int b = Body(); bool copy = Flag("copy"); var c = Pt("centre"); var ax = Dir("axis"); double rad = Num("degrees") * Math.PI / 180;
+                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.RotateBody(bb, c, ax, rad, cp));
+                return Changed(before, doc, $"draait {Thing(b)}.", $"turned {ThingEn(b)}.", Copied(doc, made, copy));
             }
             case "scale":
             {
-                int b = Body(); var fp = Pt("fixed_point"); double k = Num("factor");
+                int b = Body(); bool copy = Flag("copy"); var fp = Pt("fixed_point"); double k = Num("factor");
                 if (k <= 0) throw new McpRefusal("The factor must be above 0.");
-                var doc = Whole(before, b, Flag("copy"), (x, bb, cp) => x.ScaleBody(bb, fp, k, null, cp));
-                return Changed(before, doc, $"schaalt {Thing(b)}.", $"scaled {ThingEn(b)}.");
+                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.ScaleBody(bb, fp, k, null, cp));
+                return Changed(before, doc, $"schaalt {Thing(b)}.", $"scaled {ThingEn(b)}.", Copied(doc, made, copy));
             }
             case "mirror":
             {
-                int b = Body(); var o = Pt("origin"); var n = Dir("normal");
-                var doc = Whole(before, b, Flag("copy"), (x, bb, cp) => x.MirrorBody(bb, o, n, cp));
-                return Changed(before, doc, $"spiegelt {Thing(b)}.", $"mirrored {ThingEn(b)}.");
+                int b = Body(); bool copy = Flag("copy"); var o = Pt("origin"); var n = Dir("normal");
+                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.MirrorBody(bb, o, n, cp));
+                return Changed(before, doc, $"spiegelt {Thing(b)}.", $"mirrored {ThingEn(b)}.", Copied(doc, made, copy));
             }
             case "paint":
             {
@@ -346,6 +429,12 @@ public partial class MainWindow
         // assistant)
         string Thing(int b) => GroupTaken(b) is { } g ? $"groep {before.GroupName(g)}" : before.BodyName(b);
         string ThingEn(int b) => GroupTaken(b) is { } g ? $"group {g} ({before.GroupName(g)})" : $"body {b}";
+
+        // (a copy made: its body number, or its group and the bodies in it, for the assistant's next call)
+        static JsonObject? Copied(SketchDocument doc, GroupUnit made, bool copy) =>
+            !copy ? null
+            : made.Group is { } g ? new JsonObject { ["copy_group"] = g, ["copy_bodies"] = new JsonArray(doc.Members(g).Select(m => (JsonNode)m).ToArray()) }
+            : new JsonObject { ["copy_body"] = made.Body };
     }
 
     /// <summary>A yes/no question to the user (the assistant waits for it).</summary>
@@ -381,6 +470,13 @@ public partial class MainWindow
         m["loose_lines"] = d.Lines.Count;
         m["volume_mm3"] = Math.Round(d.Volume() * 1e9, 3);
         m["join_after_pull"] = Join;
+        // (where draw_rectangle without a face draws: the ground unless the user set another plane)
+        static JsonArray Dir3(Vec3 v) => new(Math.Round(v.X, 6), Math.Round(v.Y, 6), Math.Round(v.Z, 6));
+        m["work_plane"] = new JsonObject
+        {
+            ["ground"] = _plane == WorkPlane.Ground,
+            ["origin_mm"] = Mm3(_plane.Origin), ["x"] = Dir3(_plane.X), ["y"] = Dir3(_plane.Y), ["normal"] = Dir3(_plane.N),
+        };
         return m;
     }
 

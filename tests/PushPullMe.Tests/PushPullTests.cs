@@ -3588,6 +3588,26 @@ public class GroupTests
         new(body, Enumerable.Range(0, d.Bodies[body].Faces.Count).First(f => d.Bodies[body].Faces[f].Surface is BrepPlane && FaceGeometry.Normal(d.Bodies[body].Faces[f]).Dot(n) > 0.999));
 
     [Fact]
+    public void Bodies_taken_out_leave_the_others_with_their_names_and_groups()
+    {
+        var d = Blocks(4);
+        var (g, pair) = d.MakeGroup([GroupUnit.OfBody(1), GroupUnit.OfBody(2)], "Paar");
+        g = SketchDocument.CarryMeta(g, g.Rename(3, "Laatste"));
+        // the first block gone: the rest one number down, names and group along
+        var one = SketchDocument.CarryMeta(g, g.RemoveBodies([0]));
+        Assert.Equal(3, one.Bodies.Count);
+        Assert.Same(g.Bodies[3], one.Bodies[2]);
+        Assert.Equal("Laatste", one.BodyName(2));
+        Assert.Equal([0, 1], one.Members(pair));
+        // the whole group gone: the group too
+        var both = SketchDocument.CarryMeta(one, one.RemoveBodies(one.Members(pair).ToList()));
+        Assert.Single(both.Bodies);
+        Assert.Null(both.Group(pair));
+        Assert.Equal("Laatste", both.BodyName(0));
+        Assert.Throws<PushPullException>(() => both.RemoveBodies([5]));
+    }
+
+    [Fact]
     public void A_group_is_made_nested_and_taken_away_again()
     {
         var d = Blocks(3);
