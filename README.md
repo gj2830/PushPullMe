@@ -5,7 +5,8 @@
 *[Nederlands hieronder](#nederlands)*
 
 A playful 3D modelling app in the spirit of SketchUp, with the habits of DesignSpark Mechanical. It works with exact
-geometry (planes, cylinders, cones, spheres, tori) and reads and writes DesignSpark files (`.rsdocx`) through
+geometry (planes, cylinders, cones, spheres, tori, free forms), saves as **STEP** (its main format, read by nearly every
+CAD program, and opened again from them) and reads and writes DesignSpark files (`.rsdocx`) through
 [StlConverter](https://github.com/gj2830/StlConverter), which comes along as a submodule. STL and 3MF can be imported
 too. The interface is in English or Dutch; switch with the 🌐 button.
 
@@ -62,7 +63,8 @@ Tests: `dotnet test tests/PushPullMe.Tests`.
 
 Een speels tekenprogramma voor 3D-vormen in de stijl van SketchUp, met de gewoontes van DesignSpark Mechanical. Het
 werkt met exacte vormen (vlakken, cilinders, kegels, bollen, ringen) en leest en schrijft DesignSpark-bestanden
-(`.rsdocx`) via [StlConverter](https://github.com/gj2830/StlConverter), dat als submodule meekomt. Ook STL en 3MF
+(`.rsdocx`) via [StlConverter](https://github.com/gj2830/StlConverter), dat als submodule meekomt. Het hoofdformaat is
+**STEP**: dat lezen vrijwel alle CAD-programma's, en STEP uit andere programma's opent PushPullMe ook. Ook STL en 3MF
 kunnen worden ingelezen. Het programma is in het Engels en het Nederlands (🌐-knop).
 
 Wat er kan: meteen tekenen op een leeg werkblad (rechthoeken, cirkels en lijnen op de grond worden vlakken, ⇕ maakt er
@@ -81,4 +83,9 @@ uitpakken en `PushPullMe.exe` starten. **Zelf bouwen:** Windows en de .NET 10 SD
 
 ## License / Licentie
 
-MIT, see [LICENSE](LICENSE).
+[PolyForm Noncommercial 1.0.0](LICENSE): free to use, change and share for any noncommercial purpose, and
+contributions are welcome; using it in a commercial product is not allowed. Versions up to and including v0.4 were
+released under MIT.
+
+Nederlands: vrij te gebruiken, aan te passen en te delen voor niet-commerciële doelen, en meewerken is welkom; gebruik in
+een commercieel product mag niet. Versies tot en met v0.4 zijn onder MIT uitgebracht.
