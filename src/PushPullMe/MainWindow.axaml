@@ -1,7 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:local="clr-namespace:PushPullMe.Desktop"
-        x:Class="PushPullMe.Desktop.MainWindow"
+        xmlns:local="clr-namespace:PushPullMe"
+        x:Class="PushPullMe.MainWindow"
         Title="PushPullMe" Width="1320" Height="860" Background="{StaticResource Page}"
         Icon="/Assets/pushpullme.png" FontSize="12" DragDrop.AllowDrop="True">
   <Grid Margin="16" RowDefinitions="Auto,*,Auto" ColumnDefinitions="Auto,*,Auto">

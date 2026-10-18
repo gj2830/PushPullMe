@@ -60,11 +60,10 @@ You need the .NET 10 SDK, on Windows, Linux or macOS.
 ```
 git clone --recursive https://github.com/gj2830/PushPullMe.git
 cd PushPullMe
-dotnet run --project src/PushPullMe.Desktop -c Release
+dotnet run --project src/PushPullMe -c Release
 ```
 
-Cloned without `--recursive`? Fetch the converter with `git submodule update --init`. (`src/PushPullMe` is the earlier
-window, WPF and DirectX, Windows only; it runs on the same editor layer and goes away in time.)
+Cloned without `--recursive`? Fetch the converter with `git submodule update --init`.
 
 Tests: `dotnet test tests/PushPullMe.Tests`.
 

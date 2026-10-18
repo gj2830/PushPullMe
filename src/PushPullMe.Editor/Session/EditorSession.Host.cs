@@ -16,7 +16,7 @@ public enum Tool
 }
 
 /// <summary>What only a window can do for the editor: ask for a file, open the converter, show a message, wait for the
-/// screen. Every window (WPF, Avalonia) gives one to its <see cref="EditorSession"/>.</summary>
+/// screen. The window gives one to its <see cref="EditorSession"/>.</summary>
 public interface IEditorWindow
 {
     /// <summary>A model to open, chosen by the user (null: none).</summary>

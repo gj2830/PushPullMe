@@ -15,7 +15,7 @@ using EditorMods = PushPullMe.Editor.Session.ModifierKeys;
 using Point = Avalonia.Point;
 using Rect = Avalonia.Rect;
 
-namespace PushPullMe.Desktop;
+namespace PushPullMe;
 
 /// <summary>
 /// The model in 3D through OpenGL (on Windows through ANGLE, on Linux GLX/EGL, on macOS OpenGL), as the editor describes

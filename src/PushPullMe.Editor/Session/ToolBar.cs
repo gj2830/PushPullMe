@@ -10,7 +10,7 @@ public enum ToolAction { OuterShell, Sample, ZoomExtents }
 /// English through <see cref="UiTexts"/>).</summary>
 public sealed record ToolBarItem(ToolBarItemKind Kind, Tool? Tool, ToolAction? Action, string Icon, string Tip);
 
-/// <summary>The tool bar as every window shows it, in order (as the WPF window has it).</summary>
+/// <summary>The tool bar as the window shows it, in order.</summary>
 public static class ToolBar
 {
     public static readonly IReadOnlyList<ToolBarItem> Items =

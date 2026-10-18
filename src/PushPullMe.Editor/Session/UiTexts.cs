@@ -3,8 +3,8 @@ using PushPullMe.Core;
 namespace PushPullMe.Editor.Session;
 
 /// <summary>
-/// The window's own texts (buttons, labels, tooltips) as written in Dutch, with their English: every window (WPF,
-/// Avalonia) looks them up here when the language is chosen or switched.
+/// The window's own texts (buttons, labels, tooltips) as written in Dutch, with their English: the window looks
+/// them up here when the language is chosen or switched.
 /// </summary>
 public static class UiTexts
 {

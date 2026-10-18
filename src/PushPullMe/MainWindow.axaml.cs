@@ -25,12 +25,12 @@ using Rect = Avalonia.Rect;
 using Vector = Avalonia.Vector;
 using Tool = PushPullMe.Editor.Session.Tool;
 
-namespace PushPullMe.Desktop;
+namespace PushPullMe;
 
 /// <summary>
-/// The window for every system (Avalonia): its buttons and panels as the WPF window has them, and the model drawn through
-/// OpenGL (<see cref="ModelView"/>). What the tools do is the editor's (<see cref="EditorSession"/>, the same as in the
-/// WPF window); this window passes the mouse and the keys on, shows what the editor sets and draws what it describes.
+/// The window for every system (Avalonia): its buttons and panels, and the model drawn through
+/// OpenGL (<see cref="ModelView"/>). What the tools do is the editor's (<see cref="EditorSession"/>, the same on every
+/// system); this window passes the mouse and the keys on, shows what the editor sets and draws what it describes.
 /// </summary>
 public partial class MainWindow : Window, IEditorWindow
 {
@@ -60,7 +60,7 @@ public partial class MainWindow : Window, IEditorWindow
             if (open is { Length: > 0 } && Environment.GetEnvironmentVariable("PPM_OPEN") is not { Length: > 0 }) await _s.Open(open);
         };
         Closed += (_, _) => _s.Closed();
-        // (the test aid: the view as large as asked, PPM_VIEWSIZE=759x679, to compare with the WPF window pixel for pixel)
+        // (the test aid: the view as large as asked, PPM_VIEWSIZE=759x679, so runs on different screens compare pixel for pixel)
         if (Environment.GetEnvironmentVariable("PPM_VIEWSIZE")?.Split('x') is [var vw, var vh] && double.TryParse(vw, out double w) && double.TryParse(vh, out double h))
         {
             View.Width = w; View.Height = h;
@@ -112,7 +112,7 @@ public partial class MainWindow : Window, IEditorWindow
         AssistantBox.Click += (_, _) => _s.AssistantBox.On = AssistantBox.IsChecked == true;
     }
 
-    /// <summary>The tool bar, from the editor's table (as the WPF window has it).</summary>
+    /// <summary>The tool bar, from the editor's table.</summary>
     private void BuildTools()
     {
         foreach (var item in ToolBar.Items)
@@ -338,7 +338,7 @@ public partial class MainWindow : Window, IEditorWindow
     public async Task<(SketchDocument Doc, string Note)?> OpenInConverter(string path)
     {
         StlConverter.Lang.English = Lang.English; // (the converter speaks as this app does)
-        var converter = new StlConverter.Desktop.ConverterWindow(path) { WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var converter = new StlConverter.ConverterWindow(path) { WindowStartupLocation = WindowStartupLocation.CenterOwner };
         if (!await converter.ShowDialog<bool>(this) || converter.Result is not { } r) return null;
         var doc = await Task.Run(() => SketchDocument.FromRecognized(r.Bodies, r.Labels));
         return (doc, r.Note);

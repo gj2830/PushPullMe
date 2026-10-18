@@ -1,6 +1,6 @@
 using Avalonia;
 
-namespace PushPullMe.Desktop;
+namespace PushPullMe;
 
 internal static class Program
 {

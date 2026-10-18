@@ -7,8 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # everything without a window (core, editor, MCP server) and its tests, and the window for every system (Avalonia):
-  # on every system the app is to run on
+  # everything (the core, the editor layer, the MCP server, the window) and the tests, on every system it is to run on
   test:
     strategy:
       fail-fast: false
@@ -22,19 +21,5 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet build src/PushPullMe.Editor -c Release
-      - run: dotnet build src/PushPullMe.Mcp -c Release
-      - run: dotnet build src/PushPullMe.Desktop -c Release
-      - run: dotnet test tests/PushPullMe.Tests -c Release
-
-  # the WPF window (Windows only)
-  app:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
       - run: dotnet build src/PushPullMe -c Release
+      - run: dotnet test tests/PushPullMe.Tests -c Release

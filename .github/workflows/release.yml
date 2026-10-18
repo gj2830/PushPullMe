@@ -1,7 +1,7 @@
 name: Release
 
 # a tag such as v0.5 makes a release with the app ready to run on Windows, Linux and macOS (no .NET needed): the
-# Avalonia window (src/PushPullMe.Desktop) with the converter and the MCP server beside it
+# window (src/PushPullMe) with the converter and the MCP server beside it
 on:
   push:
     tags: ['v*']
@@ -31,7 +31,7 @@ jobs:
       - name: Publish
         shell: bash
         run: |
-          dotnet publish src/PushPullMe.Desktop -c Release -r ${{ matrix.rid }} --self-contained true -o publish
+          dotnet publish src/PushPullMe -c Release -r ${{ matrix.rid }} --self-contained true -o publish
           # the MCP server on its own runtime as well (beside the app it would look for an installed .NET)
           dotnet publish src/PushPullMe.Mcp -c Release -r ${{ matrix.rid }} --self-contained true -o publish
           # (the Windows launcher of the MCP server comes along from the build: not on the other systems)
