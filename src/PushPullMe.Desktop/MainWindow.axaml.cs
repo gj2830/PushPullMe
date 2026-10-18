@@ -332,10 +332,17 @@ public partial class MainWindow : Window, IEditorWindow
         return file?.TryGetLocalPath();
     }
 
-    /// <summary>(the converter's window is WPF, Windows only: a mesh is recognised here)</summary>
-    public bool HasConverter => false;
+    public bool HasConverter => true;
 
-    public Task<(SketchDocument Doc, string Note)?> OpenInConverter(string path) => Task.FromResult<(SketchDocument, string)?>(null);
+    /// <summary>The converter's window (shapes are best found there, with all its options); what it hands over taken over.</summary>
+    public async Task<(SketchDocument Doc, string Note)?> OpenInConverter(string path)
+    {
+        StlConverter.Lang.English = Lang.English; // (the converter speaks as this app does)
+        var converter = new StlConverter.Desktop.ConverterWindow(path) { WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        if (!await converter.ShowDialog<bool>(this) || converter.Result is not { } r) return null;
+        var doc = await Task.Run(() => SketchDocument.FromRecognized(r.Bodies, r.Labels));
+        return (doc, r.Note);
+    }
 
     public async Task<bool> Ask(string question)
     {
@@ -495,7 +502,7 @@ public partial class MainWindow : Window, IEditorWindow
         _structure.SketchShown += _s.SetSketchShown;
         _structure.Picked += _s.PickInTree;
         var pane = new DockPanel();
-        var head = new TextBlock { Text = "STRUCTUUR", FontSize = 10.5, FontWeight = FontWeight.SemiBold, Foreground = (IBrush)this.FindResource("Muted")!, Margin = new Thickness(0, 0, 0, 4) };
+        var head = new TextBlock { Text = T("STRUCTUUR", "STRUCTURE"), FontSize = 10.5, FontWeight = FontWeight.SemiBold, Foreground = (IBrush)this.FindResource("Muted")!, Margin = new Thickness(0, 0, 0, 4) };
         DockPanel.SetDock(head, Dock.Top);
         pane.Children.Add(head);
         pane.Children.Add(_structure);

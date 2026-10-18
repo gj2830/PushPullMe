@@ -29,6 +29,8 @@
   <ItemGroup>
     <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
     <ProjectReference Include="..\PushPullMe.Editor\PushPullMe.Editor.csproj" />
+    <!-- the converter's window (Avalonia), opened here for a mesh (STL/3MF); its result is taken over in memory -->
+    <ProjectReference Include="$(RsConverterDir)tools\StlConverter.Desktop\StlConverter.Desktop.csproj" />
   </ItemGroup>
 
 </Project>
