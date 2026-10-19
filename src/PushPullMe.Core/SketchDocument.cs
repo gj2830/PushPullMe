@@ -1194,10 +1194,20 @@ public sealed partial class SketchDocument
         void Add(int? parent) { foreach (var g in GroupsIn(parent)) { order.Add(g); Add(g.Id); } }
         Add(null);
         var index = order.Select((g, k) => (g.Id, k)).ToDictionary(x => x.Id, x => x.k);
+        // a component's instances one part placed more than once, where each stands from the first; only when they differ
+        // by a turn and a move (a file cannot place a part mirrored or larger: then each written as a group of its own)
+        var places = new Dictionary<int, StepPlace>();
+        foreach (var c in Groups.Where(g => g.Component != null).GroupBy(g => g.Component!.Value))
+        {
+            var back = (c.First().Place ?? Placement.Identity).Inverse();
+            var rel = c.Select(g => (g.Id, P: back.Then(g.Place ?? Placement.Identity))).ToList();
+            if (rel.Count > 1 && rel.All(x => x.P.Rigid))
+                foreach (var (id, p) in rel) places[id] = new StepPlace(p.O, p.X, p.Y, p.Z);
+        }
         return StepWriter.Write(new StepModel(
             Bodies.Select((b, i) => new StepBody(b, BodyName(i), i < Colors.Count && Colors[i].Count > 0 ? Colors[i] : null, GroupOf(i) is { } g ? index[g] : null)).ToList(),
             Lines.Where(l => !l.Construction).Select(l => new StepCurve(l.Start, l.End, l.Circle)).ToList(),
-            order.Select(g => new StepGroup(GroupName(g.Id), g.Parent is { } p ? index[p] : null)).ToList()), fileName);
+            order.Select(g => new StepGroup(GroupName(g.Id), g.Parent is { } p ? index[p] : null, places.ContainsKey(g.Id) ? g.Component : null, places.TryGetValue(g.Id, out var pl) ? pl : null)).ToList()), fileName);
     }
 
     /// <summary>A body's name: its own (<see cref="Names"/>), or as DesignSpark gives it, numbered: "Vaste vorm 1",
@@ -1235,8 +1245,10 @@ public sealed partial class SketchDocument
             Colors = m.Bodies.Select(b => (IReadOnlyDictionary<int, uint>)(b.FaceColors ?? new Dictionary<int, uint>())).ToList(),
             Lines = m.Curves.Select(c => c.Arc is { } a ? new SketchLine(c.Start, c.End, a.Centre, a.Normal) : new SketchLine(c.Start, c.End)).ToList(),
             Names = m.Bodies.Select(b => IsStandardName(b.Name) ? null : b.Name).ToList(),
-            // (the file's groups numbered from 1, in its order; a name that is only "Groep n" is none of its own)
-            Groups = m.Groups.Select((g, k) => new SketchGroup(k + 1, IsStandardGroupName(g.Name) ? null : g.Name, g.Parent + 1)).ToList(),
+            // (the file's groups numbered from 1, in its order; a name that is only "Groep n" is none of its own; a part
+            // placed more than once: a component)
+            Groups = m.Groups.Select((g, k) => new SketchGroup(k + 1, IsStandardGroupName(g.Name) ? null : g.Name, g.Parent + 1, g.Shared + 1,
+                g.Shared != null && g.Place is { } p ? new Placement(p.Origin, p.X, p.Y, p.Z) : null)).ToList(),
             BodyGroups = m.Groups.Count > 0 ? m.Bodies.Select(b => b.Group + 1).ToList() : [],
         };
     }

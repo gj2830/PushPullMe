@@ -304,26 +304,26 @@ public sealed partial class EditorSession
             case "move":
             {
                 int b = Body(); bool copy = Flag("copy"); var off = Pt("offset");
-                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.MoveBody(bb, off, cp));
+                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.MoveBody(bb, off, cp), Placement.Move(off));
                 return Changed(before, doc, copy ? $"kopieert {Thing(b)}." : $"verplaatst {Thing(b)}.", copy ? $"copied {ThingEn(b)}." : $"moved {ThingEn(b)}.", Copied(doc, made, copy));
             }
             case "rotate":
             {
                 int b = Body(); bool copy = Flag("copy"); var c = Pt("centre"); var ax = Dir("axis"); double rad = Num("degrees") * Math.PI / 180;
-                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.RotateBody(bb, c, ax, rad, cp));
+                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.RotateBody(bb, c, ax, rad, cp), Placement.Turn(c, ax, rad));
                 return Changed(before, doc, $"draait {Thing(b)}.", $"turned {ThingEn(b)}.", Copied(doc, made, copy));
             }
             case "scale":
             {
                 int b = Body(); bool copy = Flag("copy"); var fp = Pt("fixed_point"); double k = Num("factor");
                 if (k <= 0) throw new McpRefusal("The factor must be above 0.");
-                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.ScaleBody(bb, fp, k, null, cp));
+                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.ScaleBody(bb, fp, k, null, cp), Placement.Scaled(fp, k));
                 return Changed(before, doc, $"schaalt {Thing(b)}.", $"scaled {ThingEn(b)}.", Copied(doc, made, copy));
             }
             case "mirror":
             {
                 int b = Body(); bool copy = Flag("copy"); var o = Pt("origin"); var n = Dir("normal");
-                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.MirrorBody(bb, o, n, cp));
+                var (doc, made) = WholeOf(before, b, copy, (x, bb, cp) => x.MirrorBody(bb, o, n, cp), Placement.Mirror(o, n));
                 return Changed(before, doc, $"spiegelt {Thing(b)}.", $"mirrored {ThingEn(b)}.", Copied(doc, made, copy));
             }
             case "paint":
@@ -353,8 +353,15 @@ public sealed partial class EditorSession
                 var units = new List<GroupUnit>();
                 if (a["bodies"] is JsonArray bs) foreach (var x in bs) { int b = x!.GetValue<int>(); if (b < 0 || b >= before.Bodies.Count) throw new McpRefusal($"There is no body {b}."); units.Add(GroupUnit.OfBody(b)); }
                 if (a["groups"] is JsonArray gs) foreach (var x in gs) { int g = x!.GetValue<int>(); if (before.Group(g) == null) throw new McpRefusal($"There is no group {g}."); units.Add(GroupUnit.OfGroup(g)); }
-                var (doc, id) = before.MakeGroup(units, a["name"]?.GetValue<string>());
-                return Changed(before, doc, $"maakt {doc.GroupName(id)}.", $"made group {id}.", new JsonObject { ["group"] = id });
+                bool component = a["component"]?.GetValue<bool>() == true;
+                var (doc, id) = component ? before.MakeComponent(units, a["name"]?.GetValue<string>()) : before.MakeGroup(units, a["name"]?.GetValue<string>());
+                return Changed(before, doc, $"maakt {doc.GroupName(id)}.", component ? $"made component instance {id}." : $"made group {id}.", new JsonObject { ["group"] = id });
+            }
+            case "make_unique":
+            {
+                int g = Int("group");
+                if (before.Group(g) == null) throw new McpRefusal($"There is no group {g}.");
+                return Changed(before, before.MakeUnique(g), $"maakt {before.GroupName(g)} uniek.", $"made group {g} unique.");
             }
             case "explode_group":
             {
@@ -459,7 +466,7 @@ public sealed partial class EditorSession
             bodies.Add(o);
         }
         m["bodies"] = bodies;
-        m["groups"] = new JsonArray(d.Groups.Select(g => (JsonNode)new JsonObject { ["group"] = g.Id, ["name"] = d.GroupName(g.Id), ["parent"] = g.Parent }).ToArray());
+        m["groups"] = new JsonArray(d.Groups.Select(g => (JsonNode)new JsonObject { ["group"] = g.Id, ["name"] = d.GroupName(g.Id), ["parent"] = g.Parent, ["component"] = g.Component }).ToArray());
         m["open_group"] = _openGroup;
         m["loose_lines"] = d.Lines.Count;
         m["volume_mm3"] = Math.Round(d.Volume() * 1e9, 3);

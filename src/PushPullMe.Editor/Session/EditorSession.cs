@@ -813,16 +813,21 @@ public sealed partial class EditorSession
             return false;
         }
         string name = doc.GroupName(g);
+        bool instance = doc.Group(g)?.Component != null;
         if (select)
         {
             _pickedUnits.Clear(); _pickedUnits.Add(unit.Value);
             _selected = null; _multi = null; UpdateHighlight();
-            StatusText.Text = T($"📦 {name} ({doc.Members(g).Count} lichamen): dubbelklik om erin te werken · Ctrl+Shift+G heft de groep op.", $"📦 {name} ({doc.Members(g).Count} bodies): double click to work in it · Ctrl+Shift+G explodes the group.");
+            StatusText.Text = instance
+                ? T($"{InstanceLabel(doc, g)}: dubbelklik om erin te werken (alle exemplaren veranderen mee) · Ctrl+Shift+G maakt er losse lichamen van.", $"{InstanceLabel(doc, g)}: double click to work in it (all instances change along) · Ctrl+Shift+G makes it loose bodies.")
+                : T($"📦 {name} ({doc.Members(g).Count} lichamen): dubbelklik om erin te werken · Ctrl+Shift+G heft de groep op.", $"📦 {name} ({doc.Members(g).Count} bodies): double click to work in it · Ctrl+Shift+G explodes the group.");
             return true;
         }
         if (EditsFaces)
         {
-            StatusText.Text = T($"📦 {name} is een groep: dubbelklik erop met ↖ om erin te werken.", $"📦 {name} is a group: double click it with ↖ to work in it.");
+            StatusText.Text = instance
+                ? T($"🧩 {name} is een component: dubbelklik erop met ↖ om erin te werken.", $"🧩 {name} is a component: double click it with ↖ to work in it.")
+                : T($"📦 {name} is een groep: dubbelklik erop met ↖ om erin te werken.", $"📦 {name} is a group: double click it with ↖ to work in it.");
             return true;
         }
         return false;
@@ -845,7 +850,11 @@ public sealed partial class EditorSession
         Render();
         // (in the structure tree: unfolded to it)
         _treeGroup = g; _window.StructurePickGroup(g);
-        StatusText.Text = T($"📦 In {_doc!.GroupName(g)}: wat je nu maakt komt erin. Esc of dubbelklik ernaast sluit hem.", $"📦 In {_doc!.GroupName(g)}: what you make now goes into it. Esc or a double click beside it closes it.");
+        int? ig = _doc!.InstanceAround(g);
+        int copies = ig is { } i0 ? _doc.Instances(_doc.Group(i0)!.Component!.Value).Count : 0;
+        StatusText.Text = copies > 1
+            ? T($"🧩 In {_doc.GroupName(g)}: wat je verandert, verandert in alle {copies} exemplaren van {_doc.GroupName(ig!.Value)}. Esc of dubbelklik ernaast sluit hem.", $"🧩 In {_doc.GroupName(g)}: what you change, changes in all {copies} instances of {_doc.GroupName(ig!.Value)}. Esc or a double click beside it closes it.")
+            : T($"📦 In {_doc.GroupName(g)}: wat je nu maakt komt erin. Esc of dubbelklik ernaast sluit hem.", $"📦 In {_doc.GroupName(g)}: what you make now goes into it. Esc or a double click beside it closes it.");
         Log($"open group {g}");
     }
 
@@ -856,27 +865,52 @@ public sealed partial class EditorSession
         _openGroup = _doc.Group(g)?.Parent;
         _pickedUnits.Clear(); _pickedUnits.Add(GroupUnit.OfGroup(g)); _selected = null; _multi = null; _hover = null;
         Render();
-        StatusText.Text = _openGroup is { } up ? T($"📦 Terug in {_doc.GroupName(up)}.", $"📦 Back in {_doc.GroupName(up)}.") : T("📦 Groep gesloten.", "📦 Group closed.");
+        string icon = _doc.Group(g)?.Component != null ? "🧩" : "📦";
+        StatusText.Text = _openGroup is { } up ? T($"{icon} Terug in {_doc.GroupName(up)}.", $"{icon} Back in {_doc.GroupName(up)}.")
+            : icon == "🧩" ? T($"🧩 {_doc.GroupName(g)} gesloten.", $"🧩 {_doc.GroupName(g)} closed.") : T("📦 Groep gesloten.", "📦 Group closed.");
         Log($"close group {g}");
     }
 
-    /// <summary>Ctrl+G: a group of what is picked (or of the body picked).</summary>
-    private void MakeGroupOfPicked()
+    /// <summary>Ctrl+G: a group of what is picked (or of the body picked); Ctrl+K (<paramref name="component"/>): a
+    /// component.</summary>
+    private void MakeGroupOfPicked(bool component = false)
     {
         if (_doc is not { } before) return;
         var units = _pickedUnits.ToList();
         if (units.Count == 0 && (_selected?.Body ?? _multi?.Body) is int b && before.UnitOf(b, _openGroup) is { } u) units.Add(u);
         try
         {
-            var (doc, g) = before.MakeGroup(units);
+            var (doc, g) = component ? before.MakeComponent(units) : before.MakeGroup(units);
             Commit(before, doc);
             _pickedUnits.Clear(); _pickedUnits.Add(GroupUnit.OfGroup(g)); _selected = null; _multi = null;
             Render();
-            StatusText.Text = T($"📦 {doc.GroupName(g)} gemaakt ({doc.Members(g).Count} lichamen). Dubbelklik om erin te werken.", $"📦 {doc.GroupName(g)} made ({doc.Members(g).Count} bodies). Double click to work in it.");
-            Log($"make group {g} of {string.Join(",", units.Select(x => x.Group is { } gg ? $"group {gg}" : $"body {x.Body}"))}");
+            StatusText.Text = component
+                ? T($"🧩 {doc.GroupName(g)} gemaakt ({doc.Members(g).Count} lichamen). Kopieer hem (✥ met Ctrl): wat je in één exemplaar verandert, verandert in alle.", $"🧩 {doc.GroupName(g)} made ({doc.Members(g).Count} bodies). Copy it (✥ with Ctrl): what you change in one instance changes in all.")
+                : T($"📦 {doc.GroupName(g)} gemaakt ({doc.Members(g).Count} lichamen). Dubbelklik om erin te werken.", $"📦 {doc.GroupName(g)} made ({doc.Members(g).Count} bodies). Double click to work in it.");
+            Log($"make {(component ? "component" : "group")} {g} of {string.Join(",", units.Select(x => x.Group is { } gg ? $"group {gg}" : $"body {x.Body}"))}");
         }
         catch (PushPullException ex) { StatusText.Text = "⛔ " + ex.Message; }
     }
+
+    /// <summary>A component instance made unique: a component of its own, no longer changing with the others.</summary>
+    private void MakeUnique(int g)
+    {
+        if (_doc is not { } before) return;
+        try
+        {
+            string name = before.GroupName(g);
+            var doc = before.MakeUnique(g);
+            Commit(before, doc);
+            Render();
+            StatusText.Text = T($"🧩 Dit exemplaar van {name} is nu {doc.GroupName(g)}: het verandert niet meer met de andere mee.", $"🧩 This instance of {name} is now {doc.GroupName(g)}: it no longer changes with the others.");
+            Log($"make unique {g}");
+        }
+        catch (PushPullException ex) { StatusText.Text = "⛔ " + ex.Message; }
+    }
+
+    /// <summary>What the status bar says of a component instance: "🧩 Poot (3 exemplaren)".</summary>
+    private string InstanceLabel(SketchDocument doc, int g) =>
+        $"🧩 {doc.GroupName(g)} ({T($"{doc.Instances(doc.Group(g)!.Component!.Value).Count} exemplaren", $"{doc.Instances(doc.Group(g)!.Component!.Value).Count} instances")})";
 
     /// <summary>Ctrl+Shift+G: the group picked (or else the open one) taken away; what was in it stays, picked.</summary>
     private void UngroupPicked()
@@ -896,17 +930,18 @@ public sealed partial class EditorSession
     }
 
     /// <summary>A whole-body change (turn, scale, mirror, move; with whether to copy) of body <paramref name="body"/>: of
-    /// its whole group when it lies in a closed one.</summary>
-    private SketchDocument Whole(SketchDocument d, int body, bool copy, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op) =>
-        WholeOf(d, body, copy, op).Doc;
+    /// its whole group when it lies in a closed one. <paramref name="motion"/>: the same change as a placement, for the
+    /// component instances in the group (null: none, such as scaling along one axis).</summary>
+    private SketchDocument Whole(SketchDocument d, int body, bool copy, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op, Placement? motion) =>
+        WholeOf(d, body, copy, op, motion).Doc;
 
     /// <summary>As <see cref="Whole"/>, with what was changed: the group (the copy of it) when a closed group was taken,
     /// else the body (the copy of it).</summary>
-    private (SketchDocument Doc, GroupUnit Unit) WholeOf(SketchDocument d, int body, bool copy, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op)
+    private (SketchDocument Doc, GroupUnit Unit) WholeOf(SketchDocument d, int body, bool copy, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op, Placement? motion)
     {
         if (d.UnitOf(body, _openGroup) is { Group: { } g })
         {
-            var (doc, ng) = d.TransformGroup(g, op, copy);
+            var (doc, ng) = d.TransformGroup(g, op, copy, motion);
             return (doc, GroupUnit.OfGroup(ng));
         }
         var (bd, nb) = op(d, body, copy);
@@ -1150,14 +1185,17 @@ public sealed partial class EditorSession
                 _pickedUnits.Clear(); _pickedUnits.Add(GroupUnit.OfGroup(eg));
                 UngroupPicked();
                 break;
-            case GroupAction.Make:
+            case GroupAction.Make or GroupAction.MakeComponent:
                 // (the body the menu was on, with what is picked when it lies in the same group)
                 if (b is int mb && mb < _doc.Bodies.Count)
                 {
                     var unit = GroupUnit.OfBody(mb);
                     if (!_pickedUnits.Contains(unit)) { if (_pickedUnits.Any(u => (u.Group is { } ug ? _doc.Group(ug)?.Parent : _doc.GroupOf(u.Body!.Value)) != _doc.GroupOf(mb))) _pickedUnits.Clear(); _pickedUnits.Add(unit); }
                 }
-                MakeGroupOfPicked();
+                MakeGroupOfPicked(what == GroupAction.MakeComponent);
+                break;
+            case GroupAction.MakeUnique when g is { } ug:
+                MakeUnique(ug);
                 break;
         }
     }
@@ -1982,7 +2020,7 @@ public sealed partial class EditorSession
     /// <summary>A move (see <see cref="SketchDocument.Move(int, MoveSelection, Vec3, bool)"/>), of a whole group when
     /// <paramref name="group"/> is set.</summary>
     private static SketchDocument MoveDoc(SketchDocument d, int body, MoveSelection pick, Vec3 offset, int? group, bool checkCrossing) =>
-        group is { } g ? d.TransformGroup(g, (x, b, c) => x.MoveBody(b, offset, c), pick.Whole == MoveWhole.Copy).Doc
+        group is { } g ? d.TransformGroup(g, (x, b, c) => x.MoveBody(b, offset, c), pick.Whole == MoveWhole.Copy, Placement.Move(offset)).Doc
             : d.Move(body, pick, offset, checkCrossing).Doc;
 
     private void ApplyMove(SketchDocument before, int body, MoveSelection pick, Vec3 offset, bool replaceLast, int? group = null)
@@ -4485,7 +4523,7 @@ public sealed partial class EditorSession
         _mirrorBody = null;
         try
         {
-            var doc = Whole(before, body, copy, (md, mb, mc) => md.MirrorBody(mb, origin, n, mc));
+            var doc = Whole(before, body, copy, (md, mb, mc) => md.MirrorBody(mb, origin, n, mc), Placement.Mirror(origin, n));
             Commit(before, doc);
             _last = null; _lastMove = null; _selected = null; _hover = null;
             Render();
@@ -4668,7 +4706,7 @@ public sealed partial class EditorSession
         ShowSketch([_scFixed, _scFixed + (_scGrab - _scFixed) * f], default, color: axisColor);
         try
         {
-            var doc = Whole(_scBase, _scBody, _scCopy, (sd, sb, sc) => sd.ScaleBody(sb, _scFixed, f, _scAxis, sc));
+            var doc = Whole(_scBase, _scBody, _scCopy, (sd, sb, sc) => sd.ScaleBody(sb, _scFixed, f, _scAxis, sc), _scAxis == null ? Placement.Scaled(_scFixed, f) : null);
             _scOk = true;
             Render(doc);
             StatusText.Text = T($"⇲ {f.ToString("0.##", CultureInfo.CurrentCulture)}×{(axisName != null ? " langs de " + axisName : "")} · klik om vast te zetten, of typ de factor + Enter. Pijltjes: langs één as. Esc breekt af.", $"⇲ {f.ToString("0.##", CultureInfo.CurrentCulture)}×{(axisName != null ? " along the " + axisName : "")} · click to set it, or type the factor + Enter. Arrow keys: along one axis. Esc cancels.");
@@ -4696,7 +4734,7 @@ public sealed partial class EditorSession
     {
         try
         {
-            var doc = Whole(before, body, copy, (sd, sb, sc) => sd.ScaleBody(sb, fixedPoint, factor, along, sc));
+            var doc = Whole(before, body, copy, (sd, sb, sc) => sd.ScaleBody(sb, fixedPoint, factor, along, sc), along == null ? Placement.Scaled(fixedPoint, factor) : null);
             if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
             _lastScale = (before, body, fixedPoint, along, copy);
@@ -4835,7 +4873,7 @@ public sealed partial class EditorSession
         try
         {
             var doc = _rotTilt is { } tf ? _rotBase.Tilt(tf, _rotCentre, _rotAxis, _rotAngle, checkCrossing: false).Doc
-                : Whole(_rotBase, _rotBody, _rotCopy, (rd, rb, rc) => rd.RotateBody(rb, _rotCentre, _rotAxis, _rotAngle, rc));
+                : Whole(_rotBase, _rotBody, _rotCopy, (rd, rb, rc) => rd.RotateBody(rb, _rotCentre, _rotAxis, _rotAngle, rc), Placement.Turn(_rotCentre, _rotAxis, _rotAngle));
             _rotOk = true;
             Render(doc);
             StatusText.Text = T($"↻ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 && deg != 0 ? " · 🎯 15°-stap" : "")} · klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.", $"↻ {deg.ToString("0.#", CultureInfo.CurrentCulture)}°{(Math.Abs(deg - snapped) < 1e-9 && deg != 0 ? " · 🎯 15° step" : "")} · click to set it, or type the angle + Enter. Esc cancels.");
@@ -4866,7 +4904,7 @@ public sealed partial class EditorSession
         double deg = angle * 180 / Math.PI;
         try
         {
-            var doc = tilt is { } tf ? before.Tilt(tf, centre, axis, angle).Doc : Whole(before, body, copy, (rd, rb, rc) => rd.RotateBody(rb, centre, axis, angle, rc));
+            var doc = tilt is { } tf ? before.Tilt(tf, centre, axis, angle).Doc : Whole(before, body, copy, (rd, rb, rc) => rd.RotateBody(rb, centre, axis, angle, rc), Placement.Turn(centre, axis, angle));
             if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
             _lastRotate = (before, body, centre, axis, copy, Math.Sign(angle) == 0 ? 1 : Math.Sign(angle), tilt);
@@ -5192,6 +5230,7 @@ public sealed partial class EditorSession
             if ((Mods & ModifierKeys.Shift) != 0) UngroupPicked(); else MakeGroupOfPicked();
             return true;
         }
+        if (ctrl && key == Key.K && !inTextBox) { MakeGroupOfPicked(component: true); return true; }
         // (typing a label or a name in the structure tree: the keys are the box's)
         if (inTextBox) return handled;
         if (ctrl) return false;

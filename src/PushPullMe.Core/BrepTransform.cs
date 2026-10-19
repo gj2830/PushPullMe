@@ -154,6 +154,49 @@ public static class BrepTransform
         _ => throw new PushPullException(Lang.T("Dit lichaam heeft een vlak dat (nog) niet gedraaid kan worden.", "This body has a face that cannot be rotated (yet).")),
     };
 
+    /// <summary>
+    /// The body put where <paramref name="m"/> says (turned, moved, mirrored and scaled at once; see
+    /// <see cref="Placement"/>). A mirror runs every loop the other way, as <see cref="Mirrored"/> does.
+    /// </summary>
+    public static BrepBody Placed(BrepBody body, Placement m)
+    {
+        if (m.OnlyMoves) return Translated(body, m.O);
+        double s = m.Scale;
+        bool flip = m.Mirrors;
+        Vec3 P(Vec3 p) => m.Point(p);
+        Vec3 D(Vec3 v) => m.Dir(v) * (1 / s);
+        BrepCurve C(BrepCurve c) => c switch
+        {
+            BrepLine => c,
+            BrepCircle ci => ci with { Centre = P(ci.Centre), Normal = D(ci.Normal) * (flip ? -1 : 1), XAxis = D(ci.XAxis), Radius = ci.Radius * s },
+            BrepEllipse el => el with { Centre = P(el.Centre), Normal = D(el.Normal) * (flip ? -1 : 1), XAxis = D(el.XAxis), MajorRadius = el.MajorRadius * s, MinorRadius = el.MinorRadius * s },
+            BrepBSpline bs => bs with { ControlPoints = bs.ControlPoints.Select(P).ToList(), Helix = null },
+            _ => throw new PushPullException(Lang.T("Dit lichaam heeft een rand die (nog) niet verplaatst kan worden.", "This body has an edge that cannot be moved (yet).")),
+        };
+        (BrepSurface, bool Flip) S(BrepSurface sf) => sf switch
+        {
+            BrepPlane p => (p with { Origin = P(p.Origin), Normal = D(p.Normal), XAxis = D(p.XAxis) }, false),
+            BrepCylinder c => (c with { Origin = P(c.Origin), Axis = D(c.Axis), XAxis = D(c.XAxis), Radius = c.Radius * s }, false),
+            BrepCone c => (c with { Origin = P(c.Origin), Axis = D(c.Axis), XAxis = D(c.XAxis), Radius = c.Radius * s }, false),
+            BrepSphere sp => (sp with { Centre = P(sp.Centre), Axis = D(sp.Axis), XAxis = D(sp.XAxis), Radius = sp.Radius * s }, false),
+            BrepTorus t => (t with { Centre = P(t.Centre), Axis = D(t.Axis), XAxis = D(t.XAxis), MajorRadius = t.MajorRadius * s, MinorRadius = t.MinorRadius * s }, false),
+            BrepNurbsSurface n when n.Helix == null => (n with { Points = n.Points.Select(P).ToList() }, flip),
+            _ => throw new PushPullException(Lang.T("Dit lichaam heeft een vlak dat (nog) niet verplaatst kan worden.", "This body has a face that cannot be moved (yet).")),
+        };
+        return new BrepBody
+        {
+            Sheet = body.Sheet,
+            Vertices = body.Vertices.Select(P).ToList(),
+            Edges = body.Edges.Select(e => e with { Curve = C(e.Curve) }).ToList(),
+            Faces = body.Faces.Select(f =>
+            {
+                var (surface, turn) = S(f.Surface);
+                IReadOnlyList<IReadOnlyList<BrepCoedge>> loops = flip ? f.Loops.Select(l => (IReadOnlyList<BrepCoedge>)l.Reverse().Select(c => new BrepCoedge(c.Edge, !c.Forward)).ToList()).ToList() : f.Loops;
+                return f with { Surface = surface, Reversed = f.Reversed != turn, Loops = loops };
+            }).ToList(),
+        };
+    }
+
     public static BrepBody Translated(BrepBody body, Vec3 d) => new()
     {
         Sheet = body.Sheet,

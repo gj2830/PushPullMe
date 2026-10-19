@@ -16,18 +16,19 @@ public sealed class History
 
     /// <summary>A change made: <paramref name="before"/> kept to go back to, what was undone gone. Returns the document
     /// to work on from now on (the bodies' names and groups carried along, a new body into the open group: see
-    /// <see cref="SketchDocument.CarryMeta"/>).</summary>
+    /// <see cref="SketchDocument.CarryMeta"/>; what changed in a component instance made in its other instances too:
+    /// see <see cref="SketchDocument.SyncChanged"/>).</summary>
     public SketchDocument Commit(SketchDocument before, SketchDocument after, int? openGroup)
     {
         _undo.Add(before); _redo.Clear();
-        return SketchDocument.CarryMeta(before, after, openGroup);
+        return SketchDocument.CarryMeta(before, after, openGroup).SyncChanged(before);
     }
 
     /// <summary>The last change made over (a distance typed after it): the step back stays the one before it.</summary>
     public SketchDocument Replace(SketchDocument before, SketchDocument after, int? openGroup)
     {
         _redo.Clear();
-        return SketchDocument.CarryMeta(before, after, openGroup);
+        return SketchDocument.CarryMeta(before, after, openGroup).SyncChanged(before);
     }
 
     /// <summary>The document before <paramref name="current"/>, or null when there is none.</summary>

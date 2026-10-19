@@ -4,8 +4,11 @@ using RsDocx.Core.Stl;
 namespace PushPullMe.Core;
 
 /// <summary>A group of bodies (as SketchUp's): <paramref name="Id"/> stays the same through every change,
-/// <paramref name="Name"/> its own name (null: "Groep n"), <paramref name="Parent"/> the group it is in (null: none).</summary>
-public sealed record SketchGroup(int Id, string? Name, int? Parent);
+/// <paramref name="Name"/> its own name (null: "Groep n"), <paramref name="Parent"/> the group it is in (null: none).
+/// A component instance (SketchUp's Component) has <paramref name="Component"/>: the groups with the same one are copies of
+/// each other, each where its <paramref name="Place"/> puts the component's own shape (see
+/// <see cref="SketchDocument.SyncComponent"/>).</summary>
+public sealed record SketchGroup(int Id, string? Name, int? Parent, int? Component = null, Placement? Place = null);
 
 /// <summary>What a click takes: a body on its own, or a whole group.</summary>
 public readonly record struct GroupUnit(int? Body, int? Group)
@@ -28,7 +31,12 @@ public sealed partial class SketchDocument
     public SketchGroup? Group(int id) => Groups.FirstOrDefault(g => g.Id == id);
 
     /// <summary>A group's name: its own, or "Groep n" (n its id).</summary>
-    public string GroupName(int id) => Group(id)?.Name is { Length: > 0 } n ? n : Lang.T("Groep", "Group") + $" {id}";
+    public string GroupName(int id) => Group(id) switch
+    {
+        { Name: { Length: > 0 } n } => n,
+        { Component: { } c } => "Component " + c,
+        _ => Lang.T("Groep", "Group") + $" {id}",
+    };
 
     /// <summary>Whether group <paramref name="inner"/> is <paramref name="outer"/> or lies (deeper) inside it; any group
     /// lies inside null (the model itself).</summary>
@@ -107,25 +115,35 @@ public sealed partial class SketchDocument
 
     /// <summary>Whether a group name is only the standard one ("Groep 3", "Group"): no name of its own.</summary>
     public static bool IsStandardGroupName(string? name) => string.IsNullOrWhiteSpace(name)
-        || System.Text.RegularExpressions.Regex.IsMatch(name.Trim(), @"^(groep|group)( \d+)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        || System.Text.RegularExpressions.Regex.IsMatch(name.Trim(), @"^(groep|group|component)( \d+)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-    /// <summary>A group given another name (empty, or the standard "Groep n": none of its own any more).</summary>
+    /// <summary>A group given another name (empty, or the standard "Groep n": none of its own any more); a component
+    /// instance with all the others of its component.</summary>
     public SketchDocument RenameGroup(int group, string? name)
     {
         string? own = IsStandardGroupName(name) ? null : name!.Trim();
-        return WithMeta(OwnNames(), Groups.Select(g => g.Id == group ? g with { Name = own } : g).ToList(), OwnGroups());
+        int? component = Group(group)?.Component;
+        return WithMeta(OwnNames(), Groups.Select(g => g.Id == group || component != null && g.Component == component ? g with { Name = own } : g).ToList(), OwnGroups());
     }
 
     /// <summary>
     /// Every body of a group changed by <paramref name="op"/> (one of the whole-body changes: <see cref="RotateBody"/>,
     /// <see cref="ScaleBody"/>, <see cref="MirrorBody"/>, <see cref="MoveBody"/>; given the document, the body and whether
     /// to copy), or (<paramref name="copy"/>) a changed copy of the group added: a new group, with the groups inside it
-    /// copied too and the copies of the bodies in them. Returns the group changed (the copy).
+    /// copied too and the copies of the bodies in them. Returns the group changed (the copy). <paramref name="motion"/>:
+    /// the same change as a placement, for the component instances in the group (null: it is none, such as scaling along
+    /// one axis; refused when the group holds an instance). A copied instance is another instance of its component.
     /// </summary>
-    public (SketchDocument Doc, int Group) TransformGroup(int group, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op, bool copy)
+    public (SketchDocument Doc, int Group) TransformGroup(int group, Func<SketchDocument, int, bool, (SketchDocument Doc, int Body)> op, bool copy, Placement? motion = null)
     {
         var members = Members(group);
-        var names = OwnNames(); var bodyGroups = OwnGroups(); var groups = Groups.ToList();
+        var names = OwnNames(); var bodyGroups = OwnGroups();
+        if (motion == null && Groups.Any(g => g.Component != null && IsInside(g.Id, group)))
+            throw new PushPullException(Lang.T("Een component kan zo niet veranderen (alle exemplaren hebben dezelfde vorm); schaal hem in alle richtingen, of maak hem eerst uniek.",
+                "A component cannot change like this (all its instances have the same shape); scale it in all directions, or make it unique first."));
+        // (the instances in it placed anew)
+        SketchGroup Moved(SketchGroup g) => g.Component != null ? g with { Place = (g.Place ?? Placement.Identity).Then(motion!.Value) } : g;
+        var groups = Groups.Select(g => !copy && IsInside(g.Id, group) ? Moved(g) : g).ToList();
         var doc = this;
         if (!copy)
         {
@@ -137,7 +155,7 @@ public sealed partial class SketchDocument
         var ids = new Dictionary<int, int>();
         foreach (var g in Groups.Where(g => IsInside(g.Id, group))) ids[g.Id] = next++;
         foreach (var g in Groups.Where(g => ids.ContainsKey(g.Id)))
-            groups.Add(new SketchGroup(ids[g.Id], g.Name, g.Id == group ? g.Parent : ids[g.Parent!.Value]));
+            groups.Add(Moved(g) with { Id = ids[g.Id], Parent = g.Id == group ? g.Parent : ids[g.Parent!.Value] });
         foreach (int b in members)
         {
             (doc, int nb) = op(doc, b, true);

@@ -81,13 +81,22 @@ internal sealed class StructureTree : UserControl
         {
             int group = g.Id;
             var members = doc.Members(group);
-            var item = Line("📦 " + doc.GroupName(group), members.All(_bodyShown), shown => { foreach (int m in members) BodyShown?.Invoke(m, shown); });
+            // (a component instance: 🧩, with how many there are)
+            int instances = g.Component is { } c ? doc.Instances(c).Count : 0;
+            string icon = g.Component != null ? "🧩" : "📦";
+            var item = Line($"{icon} {doc.GroupName(group)}" + (instances > 1 ? $" (×{instances})" : ""), members.All(_bodyShown), shown => { foreach (int m in members) BodyShown?.Invoke(m, shown); });
             item.Tag = new GroupLine(group);
             if (item.Header is StackPanel { Children: [_, TextBlock name] })
-                name.DoubleTapped += (_, e) => { BeginRename(item, n => GroupRenamed?.Invoke(group, n.StartsWith("📦", StringComparison.Ordinal) ? n[2..].Trim() : n)); e.Handled = true; };
-            item.ContextMenu = Menu((Lang.T("Openen om erin te werken", "Open to work in it"), GroupAction.Open, group, null),
-                (Lang.T("Groep opheffen", "Explode group"), GroupAction.Explode, group, null),
-                (Lang.T("Groep maken van wat gekozen is", "Make a group of what is picked"), GroupAction.Make, null, null));
+                name.DoubleTapped += (_, e) => { BeginRename(item, n => GroupRenamed?.Invoke(group, NameOnly(n, icon))); e.Handled = true; };
+            var actions = new List<(string, GroupAction, int?, int?)>
+            {
+                (Lang.T("Openen om erin te werken", "Open to work in it"), GroupAction.Open, group, null),
+                g.Component != null ? (Lang.T("Opheffen: losse lichamen", "Explode: loose bodies"), GroupAction.Explode, group, null) : (Lang.T("Groep opheffen", "Explode group"), GroupAction.Explode, group, null),
+            };
+            if (instances > 1) actions.Add((Lang.T("Uniek maken (verandert niet meer mee)", "Make unique (no longer changes along)"), GroupAction.MakeUnique, group, null));
+            actions.Add((Lang.T("Groep maken van wat gekozen is", "Make a group of what is picked"), GroupAction.Make, null, null));
+            actions.Add((Lang.T("Component maken van wat gekozen is", "Make a component of what is picked"), GroupAction.MakeComponent, null, null));
+            item.ContextMenu = Menu([.. actions]);
             Fill(item.Items, doc, group, open);
             items.Add(item);
             if (open.Contains(item.Tag)) item.IsExpanded = true;
@@ -99,7 +108,8 @@ internal sealed class StructureTree : UserControl
             var item = Line(doc.BodyName(b), _bodyShown(b), shown => BodyShown?.Invoke(body, shown));
             item.Tag = new Pick(b, null);
             if (item.Header is StackPanel { Children: [_, TextBlock name] }) name.DoubleTapped += (_, e) => { BeginRename(item, n => Renamed?.Invoke(body, n)); e.Handled = true; };
-            item.ContextMenu = Menu((Lang.T("Groep maken (Ctrl+G)", "Make group (Ctrl+G)"), GroupAction.Make, null, body));
+            item.ContextMenu = Menu((Lang.T("Groep maken (Ctrl+G)", "Make group (Ctrl+G)"), GroupAction.Make, null, body),
+                (Lang.T("Component maken (Ctrl+K)", "Make component (Ctrl+K)"), GroupAction.MakeComponent, null, body));
             // (its faces when unfolded: a placeholder till then)
             item.Items.Add(new TreeViewItem { Header = "…" });
             item.PropertyChanged += (_, e) => { if (e.Property == TreeViewItem.IsExpandedProperty && item.IsExpanded) Faces(item, body); };
@@ -107,6 +117,14 @@ internal sealed class StructureTree : UserControl
             _bodyItems[b] = item;
             if (open.Contains(item.Tag)) item.IsExpanded = true;
         }
+    }
+
+    /// <summary>A group's name as typed in the tree: without its icon, nor the number of instances shown after it.</summary>
+    private static string NameOnly(string n, string icon)
+    {
+        n = n.Trim();
+        if (n.StartsWith(icon, StringComparison.Ordinal)) n = n[icon.Length..].Trim();
+        return System.Text.RegularExpressions.Regex.Replace(n, @"\s*\(×\d+\)$", "");
     }
 
     private ContextMenu Menu(params (string Text, GroupAction What, int? Group, int? Body)[] entries)

@@ -26,6 +26,10 @@ The birdhouse is in [examples/birdhouse.rsdocx](examples/birdhouse.rsdocx): open
   freehand, 3D text, loose lines that close into faces.
 - **Edit**: offset, round edges, move, rotate, scale, mirror, Follow Me (round an axis, also a whole turn, or along a
   path), union / subtract / intersect / trim / split (also with round faces), outer shell.
+- **Groups and components**: Ctrl+G makes a group, Ctrl+K a component. Copy a component (move or rotate it with Ctrl)
+  and whatever you change inside one instance (double click to open it) changes in all of them, each where it stands:
+  turned, mirrored or scaled. In STEP a component is one part placed more than once, so the link survives saving and
+  opening, also in other CAD programs.
 - **Measure and annotate**: tape measure and guides, protractor, dimensions, text labels, axes, section plane, hiding
   parts, paint and the colour picker.
 - **Look around**: orbit freely all the way round, pan, zoom to the mouse, zoom window, position camera, look around,
@@ -110,7 +114,8 @@ Wat er kan: meteen tekenen op een leeg werkblad (rechthoeken, cirkels en lijnen 
 blokken van; overlappende vormen delen elkaar), een werkvlak (⊞) dat je gelijk legt met een vlak of verschuift en draait
 met de greep, duwen/trekken (ook cilinders, afrondingen en vlakken zonder dikte), alle tekengereedschappen van
 SketchUp, offset, afronden, verplaatsen, draaien, schalen, spiegelen, Follow Me (rond een as of langs een pad),
-verenigen/aftrekken/doorsnede/wegsnijden/splitsen (ook met ronde vlakken), meten, maatlijnen, tekst, doorsnedevlak,
+verenigen/aftrekken/doorsnede/wegsnijden/splitsen (ook met ronde vlakken), groepen (Ctrl+G) en componenten (Ctrl+K: wat je
+in één exemplaar verandert, verandert in alle; in STEP één onderdeel dat vaker geplaatst is), meten, maatlijnen, tekst, doorsnedevlak,
 verbergen, verven, vrij draaien, zoomen naar de muis en lopen. Alles werkt met slepen en met klik-beweeg-klik; maten en
 hoeken kun je typen. Het draait op Windows, Linux en macOS.
 
