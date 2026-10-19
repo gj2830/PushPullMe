@@ -2611,33 +2611,31 @@ public sealed partial class EditorSession
     public void ZoomExtents() => ZoomAll(300);
 
     /// <summary>The view cube clicked: the model seen from <paramref name="from"/> (a side, an edge or a corner of the
-    /// cube: x right, y back, z up), all of it in view.</summary>
+    /// cube: x right, y back, z up): the camera turned round the point it looks at, as far from it as it was (the zoom
+    /// left as it is).</summary>
     public void ViewFrom(Vector3D from, string name)
     {
         if (from.Length < 1e-9) return;
         from.Normalize();
-        if (Picking.Bounds(_meshes) is null && View.Camera is { } cam)
-        {
-            // (nothing shown: the camera turned round the point it looks at)
-            var target = cam.Position + cam.LookDirection;
-            var look = from * -cam.LookDirection.Length;
-            SetCamera(target - look, look, Math.Abs(from.Z) > 0.999 ? new Vector3D(0, from.Z > 0 ? 1 : -1, 0) : new Vector3D(0, 0, 1));
-        }
-        else ZoomAll(0, from * -1);
+        var cam = View.Camera;
+        var target = cam.Position + cam.LookDirection;
+        var look = from * -cam.LookDirection.Length;
+        // (up the z axis, unless looking straight down or up: then the front at the bottom, or at the top from below)
+        SetCamera(target - look, look, Math.Abs(from.Z) > 0.999 ? new Vector3D(0, from.Z > 0 ? 1 : -1, 0) : new Vector3D(0, 0, 1));
         StatusText.Text = T($"🧊 Aanzicht: {name}.", $"🧊 View: {name}.");
         Log($"view from {name}");
     }
 
-    /// <summary>Everything shown in view, looking the way the camera looks (or <paramref name="look"/>): the camera put
-    /// back along its look until the corners of the box round the model just fit (90 % of the narrower side).</summary>
-    private void ZoomAll(double ms, Vector3D? look = null)
+    /// <summary>Everything shown in view, looking the way the camera looks: the camera put back along its look until the
+    /// corners of the box round the model just fit (90 % of the narrower side).</summary>
+    private void ZoomAll(double ms)
     {
         if (Picking.Bounds(_meshes) is not { } box || View.Camera is not PerspectiveCamera cam) return;
         var lo = new Point3D(box.Min.X, box.Min.Y, box.Min.Z);
         var hi = new Point3D(box.Max.X, box.Max.Y, box.Max.Z);
         var centre = lo + (hi - lo) * 0.5;
         // (the way the camera looks; from the front left, a little above, when it has none that can be used)
-        var f = look ?? (CameraOk() ? cam.LookDirection : new Vector3D(1, 1.4, -0.9)); f.Normalize();
+        var f = CameraOk() ? cam.LookDirection : new Vector3D(1, 1.4, -0.9); f.Normalize();
         var r = Vector3D.CrossProduct(f, new Vector3D(0, 0, 1)); if (r.Length < 1e-9) r = new Vector3D(1, 0, 0); r.Normalize();
         var u = Vector3D.CrossProduct(r, f);
         var (tx, ty) = ViewReach(cam);
