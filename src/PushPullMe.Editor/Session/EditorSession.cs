@@ -144,7 +144,6 @@ public sealed partial class EditorSession
         // (the snap marks were put a little toward the eye as it was: away, the next mouse move brings them back)
         ShowMarks([]);
         if (_doc == null) return;
-        UpdateHighlight();
         if (_sketchShown is { } sk) ShowSketch(sk.Pts, default, sk.Closed, sk.Color);
         RenderLoose(_doc);
         PlaceNotes();
@@ -485,7 +484,11 @@ public sealed partial class EditorSession
     private static System.Numerics.Vector3 F(Point3D p) => new((float)p.X, (float)p.Y, (float)p.Z);
 
     /// <summary>The highlights shown now (in <see cref="ViewHost.Children"/>).</summary>
-    private readonly List<FaceSet> _highlights = new();
+    private readonly List<object> _highlights = new();
+
+    /// <summary>A picked group of more faces than this gets a frame round it instead of a tint (as in SketchUp): a
+    /// building's worth of faces tinted anew at every mouse move would hold up the view.</summary>
+    private const int TintedFaces = 20_000;
 
     private void ClearHighlight()
     {
@@ -498,23 +501,39 @@ public sealed partial class EditorSession
         ClearHighlight();
         if (_doc == null) return;
         var doc = _dragFace != null && _dragValid ? _preview ?? _doc : _doc;
+        // (the faces tinted, all of one colour in one set; on the faces themselves: the view draws the model's faces a
+        // little behind, so the tint lies in front from wherever it is seen, and the camera moving changes nothing)
+        var tints = new Dictionary<(Color, double), List<Point3D>>();
         void Add(FaceRef f, Color color, double opacity)
         {
             if (f.Body >= doc.Bodies.Count || f.Face < 0 || f.Face >= doc.Bodies[f.Body].Faces.Count) return;
-            var pos = new List<Point3D>();
-            foreach (var (a, b, c) in doc.TrianglesOf(f))
-            {
-                pos.Add(TowardEye(P(a), 1e-3)); pos.Add(TowardEye(P(b), 1e-3)); pos.Add(TowardEye(P(c), 1e-3));
-            }
-            if (pos.Count == 0) return;
-            var set = new FaceSet { Triangles = pos, Color = color, Opacity = opacity };
-            _highlights.Add(set);
-            View.Children.Add(set);
+            if (!tints.TryGetValue((color, opacity), out var pos)) tints[(color, opacity)] = pos = new List<Point3D>();
+            foreach (var (a, b, c) in doc.TrianglesOf(f)) { pos.Add(P(a)); pos.Add(P(b)); pos.Add(P(c)); }
         }
         if (_selected is { } s) Add(s, SelectColor, 0.35);
-        foreach (var u in _pickedUnits)
-            foreach (int pb in _doc.BodiesOf(u))
-                if (pb < doc.Bodies.Count) for (int pf2 = 0; pf2 < doc.Bodies[pb].Faces.Count; pf2++) Add(new FaceRef(pb, pf2), SelectColor, 0.25);
+        // (a picked group or part: its faces tinted, or a frame round it when they are very many)
+        var pickedBodies = _pickedUnits.SelectMany(u => _doc.BodiesOf(u)).Where(pb => pb < doc.Bodies.Count).Distinct().ToList();
+        if (pickedBodies.Sum(pb => (long)doc.Bodies[pb].Faces.Count) > TintedFaces)
+        {
+            var lo = new Vec3(double.MaxValue, double.MaxValue, double.MaxValue); var hi = new Vec3(double.MinValue, double.MinValue, double.MinValue);
+            foreach (int pb in pickedBodies)
+                foreach (var v in doc.Bodies[pb].Vertices)
+                {
+                    lo = new Vec3(Math.Min(lo.X, v.X), Math.Min(lo.Y, v.Y), Math.Min(lo.Z, v.Z));
+                    hi = new Vec3(Math.Max(hi.X, v.X), Math.Max(hi.Y, v.Y), Math.Max(hi.Z, v.Z));
+                }
+            var frame = new Point3DCollection();
+            Vec3 Corner(int k) => new((k & 1) == 0 ? lo.X : hi.X, (k & 2) == 0 ? lo.Y : hi.Y, (k & 4) == 0 ? lo.Z : hi.Z);
+            for (int k = 0; k < 8; k++)
+                foreach (int bit in new[] { 1, 2, 4 })
+                    if ((k & bit) == 0) { frame.Add(P(Corner(k))); frame.Add(P(Corner(k | bit))); }
+            var box = new LineSet { Points = frame, Color = SelectColor, Thickness = 2 };
+            _highlights.Add(box);
+            View.Children.Add(box);
+        }
+        else
+            foreach (int pb in pickedBodies)
+                for (int pf2 = 0; pf2 < doc.Bodies[pb].Faces.Count; pf2++) Add(new FaceRef(pb, pf2), SelectColor, 0.25);
         if (_multi is { } mu) foreach (int mf in mu.Faces) if (_selected is not { } sel || sel != new FaceRef(mu.Body, mf)) Add(new FaceRef(mu.Body, mf), SelectColor, 0.35);
         if (_dragFace is { } dfc && _dragValid && _previewFace is { } pf) Add(pf, SelectColor, 0.3);
         else if (_drawFace is { } df) Add(df, SelectColor, 0.15);
@@ -522,6 +541,13 @@ public sealed partial class EditorSession
         else if (_hover is { } h && h != _selected) Add(h, HoverColor, 0.4);
         if (_dragFace != null && _snapBase is { } sb)
             Add(_previewMap != null && _dragValid && sb.Body == _dragFace.Value.Body && sb.Face < _previewMap.Count ? new FaceRef(sb.Body, _previewMap[sb.Face]) : sb, HoverColor, 0.45);
+        foreach (var ((color, opacity), pos) in tints)
+        {
+            if (pos.Count == 0) continue;
+            var set = new FaceSet { Triangles = pos, Color = color, Opacity = opacity };
+            _highlights.Add(set);
+            View.Children.Add(set);
+        }
         // (the structure tree shows what is picked too)
         int? pickedGroup = _pickedUnits.Count == 1 ? _pickedUnits[0].Group : null;
         if (pickedGroup != null)
@@ -5805,6 +5831,22 @@ public sealed partial class EditorSession
                     var shape = GripShapes()[Enum.Parse<Grip>(arg)];
                     ClickAt(Viewport3DHelper.Point3DtoPoint2D(View, P(shape[shape.Count / 2])));
                     report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  plane origin ({_plane.Origin.X * Display:0.##},{_plane.Origin.Y * Display:0.##},{_plane.Origin.Z * Display:0.##}) normal ({_plane.N.X:0.###},{_plane.N.Y:0.###},{_plane.N.Z:0.###})"));
+                    break;
+                }
+                case "pickgroup": PickGroup(int.Parse(arg)); break;
+                case "spin":
+                {
+                    // spin:n — the camera turned n times a little round the vertical through what it looks at, as an
+                    // orbit does; the time it took reported
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    for (int k = 0; k < int.Parse(arg); k++)
+                    {
+                        var cam = View.Camera; var target = cam.Position + cam.LookDirection;
+                        double a = Math.PI / 90, ca = Math.Cos(a), sa = Math.Sin(a);
+                        var l = cam.LookDirection; var turned = new Vector3D(l.X * ca - l.Y * sa, l.X * sa + l.Y * ca, l.Z);
+                        cam.Set(target - turned, turned, cam.UpDirection);
+                    }
+                    report.AppendLine($"  spin {arg}: {sw.ElapsedMilliseconds} ms, {View.Children.Count} things beside the model");
                     break;
                 }
                 case "viewfrom":
