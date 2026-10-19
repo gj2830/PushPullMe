@@ -1,0 +1,32 @@
+using PushPullMe.Core;
+using RsDocx.Core.Brep;
+using RsDocx.Core.Stl;
+
+namespace PushPullMe.Tests;
+
+/// <summary>A Revit project opened: testdata/test.rvt of the converter (Autodesk's "Snowdon Towers Sample
+/// Architectural", Revit 2024; not in the repository: the test passes without it).</summary>
+public class RevitTests
+{
+    [Fact]
+    public void A_Revit_project_opens_as_bodies_and_a_wall_can_be_pulled()
+    {
+        string path = TestFiles.Converter("test.rvt");
+        if (!File.Exists(path)) return;
+        var d = SketchDocument.FromRevit(path, out var report);
+        Assert.True(d.Bodies.Count > 10_000);
+        // (nearly all faces in closed bodies: they meet along shared edges; a body Revit saved crooked, an edge of
+        // three faces or of two the same way round, in pieces, some of them a face alone)
+        Assert.True(d.Bodies.Where(b => !b.Sheet).Sum(b => b.Faces.Count) > 0.95 * d.Bodies.Sum(b => b.Faces.Count));
+        var walls = d.Groups.Single(g => g.Name == "SWall");
+        int wall = d.Members(walls.Id).First(b => !d.Bodies[b].Sheet && d.Bodies[b].Faces.Count == 6);
+        Assert.StartsWith("SWall ", d.BodyName(wall));
+        // its largest face pulled out 10 mm: the wall that much thicker
+        var body = d.Bodies[wall];
+        int face = Enumerable.Range(0, body.Faces.Count).MaxBy(f => d.TrianglesOf(new FaceRef(wall, f)).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length));
+        double area = d.TrianglesOf(new FaceRef(wall, face)).Sum(t => (t.B - t.A).Cross(t.C - t.A).Length) / 2;
+        var one = SketchDocument.FromBodies([body]);
+        var (pulled, _) = one.PushPull(new FaceRef(0, face), 0.01);
+        Assert.Equal(one.Volume() + area * 0.01, pulled.Volume(), 9);
+    }
+}

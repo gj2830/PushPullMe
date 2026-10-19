@@ -32,8 +32,9 @@ public interface IEditorWindow
     /// <summary>Whether the window has the converter (else a mesh is recognised here).</summary>
     bool HasConverter { get; }
 
-    /// <summary>A yes/no question (the AI assistant asks before it throws work away).</summary>
-    Task<bool> Ask(string question);
+    /// <summary>A yes/no question (the AI assistant asks before it throws work away; opening a Revit project, whether to
+    /// open the models it links too), titled <paramref name="title"/> (null: the AI assistant).</summary>
+    Task<bool> Ask(string question, string? title = null);
 
     void ShowToast(string title, string text);
 

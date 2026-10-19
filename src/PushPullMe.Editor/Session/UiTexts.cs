@@ -122,6 +122,7 @@ public static class UiTexts
         ["Aan: wat je met ⇕ tegen een ander deel aan trekt, wordt er één deel mee (zoals DesignSpark). Uit: het blijft een apart deel."] =
             "On: what you pull with ⇕ against another part becomes one part with it (as in DesignSpark). Off: it stays a part of its own.",
         ["Open een model om te beginnen."] = "Open a model to begin.",
+        ["Klik een vlak, ribbe of hoek van de kubus om het model van die kant te zien"] = "Click a side, edge or corner of the cube to see the model from there",
     };
 
     private static readonly Dictionary<string, string> Nl = En.ToDictionary(kv => kv.Value, kv => kv.Key);

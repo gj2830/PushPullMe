@@ -1,5 +1,6 @@
 using PushPullMe.Core;
 using RsDocx.Core.Brep;
+using RsDocx.Core.Geometry;
 using RsDocx.Core.Stl;
 using RsDocx.Core.Xt;
 using Xunit.Abstractions;

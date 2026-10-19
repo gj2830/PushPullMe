@@ -1,4 +1,5 @@
 using RsDocx.Core.Brep;
+using RsDocx.Core.Geometry;
 using RsDocx.Core.Stl;
 
 namespace PushPullMe.Core;

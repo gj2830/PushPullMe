@@ -60,6 +60,10 @@
           </Border>
         </Canvas>
 
+        <!-- the view cube: a click on a side, edge or corner looks from there -->
+        <local:ViewCube x:Name="Cube" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="8"
+                        ToolTip.Tip="Klik een vlak, ribbe of hoek van de kubus om het model van die kant te zien"/>
+
         <!-- the paint bucket's palette -->
         <Border x:Name="PaintPanel" IsVisible="False" Classes="card" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="16" Padding="12,10" Width="232">
           <StackPanel>

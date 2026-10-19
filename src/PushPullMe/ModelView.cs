@@ -120,15 +120,16 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
     // ------------------------------------------------------------------ drawing
 
     private GL? _gl;
-    private uint _faceProgram, _lineProgram;
-    private int _uMvp, _uLight, _uBack, _uUnlit, _uLineMvp, _uHalf, _uBias;
+    private uint _faceProgram, _lineProgram, _edgeProgram;
+    private int _uMvp, _uLight, _uBack, _uUnlit, _uLineMvp, _uHalf, _uBias, _uEdgeMvp, _uEdgeHalf, _uEdgeColor, _uEdgeWidth;
     private bool _modelDirty = true, _overlayDirty = true;
 
     /// <summary>Which OpenGL drew it (for the log and the test aid).</summary>
     public string GlInfo { get; private set; } = "(not yet)";
 
-    /// <summary>A vertex array with its buffer and how many vertices are in it.</summary>
-    private sealed class Batch { public uint Vao, Vbo; public int Count; }
+    /// <summary>A vertex array with its buffer and how many vertices are in it (for the model's edges: its buffer of
+    /// segments, how many, and the buffer of the six corners every one of them is drawn with).</summary>
+    private sealed class Batch { public uint Vao, Vbo, Corners; public int Count; }
 
     // faces: position, normal, colour (10 floats); lines: position, the other end, side, colour, width (12 floats)
     private const int FaceStride = 10, LineStride = 12;
@@ -207,6 +208,42 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             out vec4 fragColor;
             void main() { fragColor = vColor; }
             """);
+        // the model's edges: one instance per segment, its two ends; the six corners of its quad shared by all, the colour
+        // and width the same for all (a model of millions of edges takes 24 bytes for each, not 288)
+        _edgeProgram = Program(head + """
+            layout(location = 0) in float aEnd;
+            layout(location = 1) in float aSide;
+            layout(location = 2) in vec3 aA;
+            layout(location = 3) in vec3 aB;
+            uniform mat4 uMvp;
+            uniform vec2 uHalf;
+            uniform vec4 uColor;
+            uniform float uWidth;
+            out vec4 vColor;
+            void main()
+            {
+                vec3 at = aEnd < 0.5 ? aA : aB;
+                vec3 other = aEnd < 0.5 ? aB : aA;
+                vec4 p = uMvp * vec4(at, 1.0);
+                vec4 o = uMvp * vec4(other, 1.0);
+                vec2 ps = p.xy / max(p.w, 1e-6) * uHalf;
+                vec2 os = o.xy / max(o.w, 1e-6) * uHalf;
+                vec2 d = os - ps;
+                d = length(d) < 1e-6 ? vec2(1.0, 0.0) : normalize(d);
+                vec2 n = vec2(-d.y, d.x);
+                p.xy += n * aSide * (uWidth * 0.5) / uHalf * p.w;
+                gl_Position = p;
+                vColor = uColor;
+            }
+            """, head + """
+            in vec4 vColor;
+            out vec4 fragColor;
+            void main() { fragColor = vColor; }
+            """);
+        _uEdgeMvp = _gl.GetUniformLocation(_edgeProgram, "uMvp");
+        _uEdgeHalf = _gl.GetUniformLocation(_edgeProgram, "uHalf");
+        _uEdgeColor = _gl.GetUniformLocation(_edgeProgram, "uColor");
+        _uEdgeWidth = _gl.GetUniformLocation(_edgeProgram, "uWidth");
         _uMvp = _gl.GetUniformLocation(_faceProgram, "uMvp");
         _uLight = _gl.GetUniformLocation(_faceProgram, "uLight");
         _uBack = _gl.GetUniformLocation(_faceProgram, "uBack");
@@ -215,7 +252,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
         _uHalf = _gl.GetUniformLocation(_lineProgram, "uHalf");
         _uBias = _gl.GetUniformLocation(_lineProgram, "uBias");
         _faces = FaceBatch(); _faded = FaceBatch(); _highlights = FaceBatch();
-        _edges = LineBatch(); _lines = LineBatch(); _linesBehind = LineBatch(); _linesOnTop = LineBatch();
+        _edges = EdgeBatch(); _lines = LineBatch(); _linesBehind = LineBatch(); _linesOnTop = LineBatch();
         _modelDirty = _overlayDirty = true;
     }
 
@@ -223,8 +260,8 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
     {
         if (_gl == null) return;
         foreach (var b in new[] { _faces, _faded, _highlights, _edges, _lines, _linesBehind, _linesOnTop })
-            if (b != null) { _gl.DeleteBuffer(b.Vbo); _gl.DeleteVertexArray(b.Vao); }
-        _gl.DeleteProgram(_faceProgram); _gl.DeleteProgram(_lineProgram);
+            if (b != null) { _gl.DeleteBuffer(b.Vbo); if (b.Corners != 0) _gl.DeleteBuffer(b.Corners); _gl.DeleteVertexArray(b.Vao); }
+        _gl.DeleteProgram(_faceProgram); _gl.DeleteProgram(_lineProgram); _gl.DeleteProgram(_edgeProgram);
         _faces = _faded = _highlights = _edges = _lines = _linesBehind = _linesOnTop = null;
         _gl = null;
     }
@@ -269,6 +306,35 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
     private Batch FaceBatch() => NewBatch(FaceStride, [(0, 3, 0), (1, 3, 3), (2, 4, 6)]);
     private Batch LineBatch() => NewBatch(LineStride, [(0, 3, 0), (1, 3, 3), (2, 1, 6), (3, 4, 7), (4, 1, 11)]);
 
+    /// <summary>The model's edges: the six corners of a segment's quad (which end, which side; as
+    /// <see cref="Segment"/> makes them), and per segment (one instance) its two ends.</summary>
+    private unsafe Batch EdgeBatch()
+    {
+        var gl = _gl!;
+        var b = new Batch { Vao = gl.GenVertexArray(), Vbo = gl.GenBuffer(), Corners = gl.GenBuffer() };
+        gl.BindVertexArray(b.Vao);
+        gl.BindBuffer(BufferTargetARB.ArrayBuffer, b.Corners);
+        float[] corners = [0, 1, 0, -1, 1, -1, 0, -1, 1, 1, 1, -1];
+        fixed (float* p = corners) gl.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(corners.Length * sizeof(float)), p, BufferUsageARB.StaticDraw);
+        gl.EnableVertexAttribArray(0); gl.VertexAttribPointer(0, 1, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
+        gl.EnableVertexAttribArray(1); gl.VertexAttribPointer(1, 1, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)sizeof(float));
+        gl.BindBuffer(BufferTargetARB.ArrayBuffer, b.Vbo);
+        gl.EnableVertexAttribArray(2); gl.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 6 * sizeof(float), (void*)0);
+        gl.EnableVertexAttribArray(3); gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+        gl.VertexAttribDivisor(2, 1); gl.VertexAttribDivisor(3, 1);
+        gl.BindVertexArray(0);
+        return b;
+    }
+
+    /// <summary>A buffer filled with the first <paramref name="length"/> numbers of <paramref name="data"/>.</summary>
+    private unsafe void Fill(Batch b, float[] data, int length, int stride)
+    {
+        var gl = _gl!;
+        gl.BindBuffer(BufferTargetARB.ArrayBuffer, b.Vbo);
+        fixed (float* p = data) gl.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(length * sizeof(float)), p, BufferUsageARB.StaticDraw);
+        b.Count = length / stride;
+    }
+
     private unsafe void Fill(Batch b, List<float> data, int stride)
     {
         var gl = _gl!;
@@ -305,20 +371,37 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
         for (int i = 0; i + 1 < pts.Count; i += 2) Segment(d, F(pts[i]), F(pts[i + 1]), c, w);
     }
 
+    /// <summary>The model to the graphics card: its faces (each vertex its position, normal and colour) and its edges
+    /// (each segment its two ends), written straight into arrays of the size they need, let go once handed over.</summary>
     private void UploadModel()
     {
-        var faces = new List<float>(); var faded = new List<float>(); var edges = new List<float>();
-        if (_session?.Shown is { } model)
+        var model = _session?.Shown;
+        int solid = 0, seeThrough = 0;
+        foreach (var m in model?.Meshes ?? []) if (m.Faded) seeThrough += m.Positions.Length; else solid += m.Positions.Length;
+        var faces = new float[solid * FaceStride]; var faded = new float[seeThrough * FaceStride];
+        int fi = 0, di = 0;
+        foreach (var m in model?.Meshes ?? [])
         {
-            foreach (var m in model.Meshes)
+            var c = m.Faded ? V4(EditorSession.FrontColor, 0x38 / 255.0) : V4(m.Color ?? EditorSession.FrontColor);
+            var into = m.Faded ? faded : faces;
+            ref int at = ref (m.Faded ? ref di : ref fi);
+            for (int i = 0; i < m.Positions.Length; i++)
             {
-                var c = m.Faded ? V4(EditorSession.FrontColor, 0x38 / 255.0) : V4(m.Color ?? EditorSession.FrontColor);
-                var into = m.Faded ? faded : faces;
-                for (int i = 0; i < m.Positions.Length; i++) Face(into, m.Positions[i], m.Normals[i], c);
+                var (p, n) = (m.Positions[i], m.Normals[i]);
+                into[at++] = p.X; into[at++] = p.Y; into[at++] = p.Z; into[at++] = n.X; into[at++] = n.Y; into[at++] = n.Z;
+                into[at++] = c.X; into[at++] = c.Y; into[at++] = c.Z; into[at++] = c.W;
             }
-            Lines(edges, model.Edges, EditorSession.EdgeColor, 1.3);
         }
-        Fill(_faces!, faces, FaceStride); Fill(_faded!, faded, FaceStride); Fill(_edges!, edges, LineStride);
+        var pts = model?.Edges;
+        int segments = (pts?.Count ?? 0) / 2;
+        var edges = new float[segments * 6];
+        for (int i = 0; i < segments; i++)
+        {
+            var (a, b) = (pts![2 * i], pts[2 * i + 1]);
+            edges[6 * i] = (float)a.X; edges[6 * i + 1] = (float)a.Y; edges[6 * i + 2] = (float)a.Z;
+            edges[6 * i + 3] = (float)b.X; edges[6 * i + 4] = (float)b.Y; edges[6 * i + 5] = (float)b.Z;
+        }
+        Fill(_faces!, faces, faces.Length, FaceStride); Fill(_faded!, faded, faded.Length, FaceStride); Fill(_edges!, edges, edges.Length, 6);
     }
 
     private void UploadOverlays()
@@ -398,8 +481,18 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             g.Uniform1(_uBias, 2.4e-5f);
             Draw(_linesBehind!);
             g.Uniform1(_uBias, 0f);
-            Draw(_edges!);
             Draw(_lines!);
+            if (_edges!.Count > 0)
+            {
+                g.UseProgram(_edgeProgram);
+                g.UniformMatrix4(_uEdgeMvp, 1, false, (float*)&mvp);
+                g.Uniform2(_uEdgeHalf, w / 2f, h / 2f);
+                var ec = V4(EditorSession.EdgeColor);
+                g.Uniform4(_uEdgeColor, ec.X, ec.Y, ec.Z, ec.W);
+                g.Uniform1(_uEdgeWidth, Width(1.3));
+                g.BindVertexArray(_edges.Vao);
+                g.DrawArraysInstanced(PrimitiveType.Triangles, 0, 6, (uint)_edges.Count);
+            }
 
             // see-through: the faded faces, then the highlights (unlit)
             g.Enable(EnableCap.Blend);

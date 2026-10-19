@@ -46,6 +46,7 @@ public partial class MainWindow : Window, IEditorWindow
         InitializeComponent();
         _s = new EditorSession(this);
         View.Session = _s;
+        Cube.Session = _s;
         BuildTools();
         BuildStructure();
         ApplyTexts();
@@ -344,12 +345,14 @@ public partial class MainWindow : Window, IEditorWindow
         return (doc, r.Note);
     }
 
-    public async Task<bool> Ask(string question)
+    public async Task<bool> Ask(string question, string? title = null)
     {
+        // (test aid: the answer given beforehand, for the window's own tests)
+        if (Environment.GetEnvironmentVariable("PPM_ANSWER") is { Length: > 0 } answer) return answer.Equals("yes", StringComparison.OrdinalIgnoreCase);
         bool yes = false;
         var dlg = new Window
         {
-            Title = "PushPullMe – " + T("AI-assistent", "AI assistant"), Width = 460, SizeToContent = SizeToContent.Height,
+            Title = "PushPullMe – " + (title ?? T("AI-assistent", "AI assistant")), Width = 460, SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, CanResize = false, Background = (IBrush)this.FindResource("Page")!,
         };
         var ok = new Button { Classes = { "pill", "primary" }, Content = T("Ja", "Yes") };
@@ -429,7 +432,7 @@ public partial class MainWindow : Window, IEditorWindow
             dc.DrawImage(window, new Rect(0, 0, Bounds.Width, Bounds.Height));
             dc.DrawImage(Bitmap(w, h, rgba), new Rect(at.X, at.Y, View.Bounds.Width, View.Bounds.Height));
             // (what lies over the view: the labels, the palette, the toast, … drawn again on top of it)
-            foreach (var over in new Control[] { GroundButton, EmptyHint, TagLayer, PaintPanel, Toast, BusyCover })
+            foreach (var over in new Control[] { GroundButton, EmptyHint, TagLayer, Cube, PaintPanel, Toast, BusyCover })
             {
                 if (!over.IsVisible || over.Bounds.Width < 1 || over.TranslatePoint(new Point(0, 0), this) is not { } o) continue;
                 using var bmp = new RenderTargetBitmap(new PixelSize((int)Math.Ceiling(over.Bounds.Width), (int)Math.Ceiling(over.Bounds.Height)), new Vector(96, 96));

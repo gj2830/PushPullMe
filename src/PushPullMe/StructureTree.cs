@@ -22,7 +22,8 @@ internal sealed class StructureTree : UserControl
     private SketchDocument? _doc;
     private Func<int, bool> _bodyShown = _ => true;
 
-    public event Action<int, bool>? BodyShown;
+    /// <summary>Bodies' boxes ticked or not: one body's, or a group's all at once (the view drawn again once).</summary>
+    public event Action<IReadOnlyList<int>, bool>? BodyShown;
     public event Action<SketchKind, bool>? SketchShown;
     public event Action<int, int?>? Picked;
     public event Action<int, string>? Renamed;
@@ -84,7 +85,7 @@ internal sealed class StructureTree : UserControl
             // (a component instance: 🧩, with how many there are)
             int instances = g.Component is { } c ? doc.Instances(c).Count : 0;
             string icon = g.Component != null ? "🧩" : "📦";
-            var item = Line($"{icon} {doc.GroupName(group)}" + (instances > 1 ? $" (×{instances})" : ""), members.All(_bodyShown), shown => { foreach (int m in members) BodyShown?.Invoke(m, shown); });
+            var item = Line($"{icon} {doc.GroupName(group)}" + (instances > 1 ? $" (×{instances})" : ""), members.All(_bodyShown), shown => BodyShown?.Invoke(members, shown));
             item.Tag = new GroupLine(group);
             if (item.Header is StackPanel { Children: [_, TextBlock name] })
                 name.DoubleTapped += (_, e) => { BeginRename(item, n => GroupRenamed?.Invoke(group, NameOnly(n, icon))); e.Handled = true; };
@@ -97,7 +98,16 @@ internal sealed class StructureTree : UserControl
             actions.Add((Lang.T("Groep maken van wat gekozen is", "Make a group of what is picked"), GroupAction.Make, null, null));
             actions.Add((Lang.T("Component maken van wat gekozen is", "Make a component of what is picked"), GroupAction.MakeComponent, null, null));
             item.ContextMenu = Menu([.. actions]);
-            Fill(item.Items, doc, group, open);
+            // (what is in it made when it is unfolded: a placeholder till then; a model of thousands of bodies stays light)
+            item.Items.Add(new TreeViewItem { Header = "…" });
+            bool filled = false;
+            item.PropertyChanged += (_, e) =>
+            {
+                if (e.Property != TreeViewItem.IsExpandedProperty || !item.IsExpanded || filled) return;
+                filled = true;
+                item.Items.Clear();
+                Fill(item.Items, doc, group, open);
+            };
             items.Add(item);
             if (open.Contains(item.Tag)) item.IsExpanded = true;
         }
@@ -105,7 +115,7 @@ internal sealed class StructureTree : UserControl
         {
             if (doc.GroupOf(b) != parent) continue;
             int body = b;
-            var item = Line(doc.BodyName(b), _bodyShown(b), shown => BodyShown?.Invoke(body, shown));
+            var item = Line(doc.BodyName(b), _bodyShown(b), shown => BodyShown?.Invoke([body], shown));
             item.Tag = new Pick(b, null);
             if (item.Header is StackPanel { Children: [_, TextBlock name] }) name.DoubleTapped += (_, e) => { BeginRename(item, n => Renamed?.Invoke(body, n)); e.Handled = true; };
             item.ContextMenu = Menu((Lang.T("Groep maken (Ctrl+G)", "Make group (Ctrl+G)"), GroupAction.Make, null, body),
@@ -196,6 +206,7 @@ internal sealed class StructureTree : UserControl
         _quiet = true;
         try
         {
+            if (body is int ob && !_bodyItems.ContainsKey(ob) && _doc != null && ob < _doc.Bodies.Count) Reveal(_doc.GroupOf(ob));
             if (body is not int b || !_bodyItems.TryGetValue(b, out var item)) { _tree.SelectedItem = null; return; }
             for (var up = item.Parent as TreeViewItem; up != null; up = up.Parent as TreeViewItem) up.IsExpanded = true;
             if (face is int f)
@@ -214,12 +225,23 @@ internal sealed class StructureTree : UserControl
         _quiet = true;
         try
         {
+            if (group is { } rg && _doc?.Group(rg) is { } sg) Reveal(sg.Parent);
             var item = group is { } g ? All(_tree.Items).FirstOrDefault(i => i.Tag is GroupLine gl && gl.Group == g) : null;
             if (item == null) { _tree.SelectedItem = null; return; }
             for (var up = item.Parent as TreeViewItem; up != null; up = up.Parent as TreeViewItem) up.IsExpanded = true;
             _tree.SelectedItem = item; item.BringIntoView();
         }
         finally { _quiet = false; }
+    }
+
+    /// <summary>A group unfolded, and the groups round it (so what is in it is made: see <see cref="Fill"/>).</summary>
+    private void Reveal(int? group)
+    {
+        var chain = new List<int>();
+        for (int? g = group; g is { } id && chain.Count < 64; g = _doc?.Group(id)?.Parent) chain.Add(id);
+        chain.Reverse();
+        foreach (int id in chain)
+            if (All(_tree.Items).FirstOrDefault(i => i.Tag is GroupLine gl && gl.Group == id) is { } it) it.IsExpanded = true;
     }
 
     private static TreeViewItem Line(string text, bool shown, Action<bool> changed)

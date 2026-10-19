@@ -8,7 +8,9 @@ A playful 3D modelling app in the spirit of SketchUp, with the habits of DesignS
 geometry (planes, cylinders, cones, spheres, tori, free forms), saves as **STEP** (its main format, read by nearly every
 CAD program, and opened again from them) and reads and writes DesignSpark files (`.rsdocx`) through
 [StlConverter](https://github.com/gj2830/StlConverter), which comes along as a submodule. STL and 3MF can be imported
-too. The interface is in English or Dutch; switch with the 🌐 button.
+too, and Revit projects (`.rvt`, Revit 2023 and later) open without Revit: every element as Revit last drew it, grouped
+by kind (walls, floors, family instances …), flat faces flat so they can be pushed and pulled, curved ones as small
+flat faces. The interface is in English or Dutch; switch with the 🌐 button.
 
 ![A simple birdhouse, drawn from an empty sheet with push/pull, a work plane and paint, saved as .rsdocx and opened again](docs/birdhouse.png)
 
@@ -109,7 +111,8 @@ Een speels tekenprogramma voor 3D-vormen in de stijl van SketchUp, met de gewoon
 werkt met exacte vormen (vlakken, cilinders, kegels, bollen, ringen) en leest en schrijft DesignSpark-bestanden
 (`.rsdocx`) via [StlConverter](https://github.com/gj2830/StlConverter), dat als submodule meekomt. Het hoofdformaat is
 **STEP**: dat lezen vrijwel alle CAD-programma's, en STEP uit andere programma's opent PushPullMe ook. Ook STL en 3MF
-kunnen worden ingelezen. Het programma is in het Engels en het Nederlands (🌐-knop).
+kunnen worden ingelezen, en Revit-projecten (`.rvt`, Revit 2023 en later) openen zonder Revit: elk element zoals Revit
+het het laatst tekende, gegroepeerd per soort, platte vlakken echt plat (duwen/trekken kan), gebogen als kleine vlakjes. Het programma is in het Engels en het Nederlands (🌐-knop).
 
 Wat er kan: meteen tekenen op een leeg werkblad (rechthoeken, cirkels en lijnen op de grond worden vlakken, ⇕ maakt er
 blokken van; overlappende vormen delen elkaar), een werkvlak (⊞) dat je gelijk legt met een vlak of verschuift en draait

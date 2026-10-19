@@ -165,7 +165,12 @@ public sealed partial class SketchDocument
     {
         var ownNames = OwnNames();
         IReadOnlyDictionary<int, uint> ColorOfBody(int b) => b < Colors.Count ? Colors[b] : new Dictionary<int, uint>();
-        if (Groups.Count == 0) return (Bodies.ToList(), ownNames, Enumerable.Range(0, Bodies.Count).Select(ColorOfBody).ToList(), null);
+        // (each body as .rsdocx can hold it: see Saveable)
+        if (Groups.Count == 0)
+        {
+            var saved = Enumerable.Range(0, Bodies.Count).Select(b => Saveable(b, ColorOfBody(b))).ToList();
+            return (saved.Select(x => x.Body).ToList(), ownNames, saved.Select(x => x.Colors).ToList(), null);
+        }
         var shared = SharedPlaces();
         var bodies = new List<BrepBody>(); var names = new List<string?>(); var colors = new List<IReadOnlyDictionary<int, uint>>();
         var parts = new List<(string? Name, List<int> Bodies, List<RsDocxUse> Uses)> { (null, [], []) };
@@ -177,7 +182,8 @@ public sealed partial class SketchDocument
                 if (GroupOf(b) == group)
                 {
                     parts[part].Bodies.Add(bodies.Count);
-                    bodies.Add(Bodies[b]); names.Add(ownNames[b]); colors.Add(ColorOfBody(b));
+                    var (body, painted) = Saveable(b, ColorOfBody(b));
+                    bodies.Add(body); names.Add(ownNames[b]); colors.Add(painted);
                 }
             foreach (var g in GroupsIn(group))
                 if (g.Component is { } c && shared.TryGetValue(g.Id, out var at))

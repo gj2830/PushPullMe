@@ -248,8 +248,17 @@ public sealed partial class EditorSession
         ShowSketch([]);
     }
 
-    /// <summary>A faint grid on the work plane (every 10 mm, or 50 for a large model) with its red and green axes,
-    /// as far as the model reaches seen along it (at least 100 mm round its origin).</summary>
+    /// <summary>The first of 10, 20, 50, 100, 200, 500 mm … at least <paramref name="least"/> (mm).</summary>
+    private static double GridStep(double least)
+    {
+        for (double ten = 10; ; ten *= 10)
+            foreach (double f in new[] { 1, 2, 5 })
+                if (ten * f >= least) return ten * f;
+    }
+
+    /// <summary>A faint grid on the work plane with its red and green axes, as far as the bodies shown reach seen along
+    /// it (at least 100 mm round its origin); its lines a round 1, 2 or 5 times a power of ten apart (10 mm at least),
+    /// some 20 to 40 across, however large the model.</summary>
     private void RenderGround(SketchDocument? doc)
     {
         // (the button back to the ground: only while a work plane is set)
@@ -258,9 +267,9 @@ public sealed partial class EditorSession
         _groundVisuals.Clear();
         if (doc == null) return;
         double reach = 100;
-        foreach (var b in doc.Bodies)
+        foreach (var b in doc.Bodies.Where(b => !_hidden.Contains(b)))
             foreach (var v in b.Vertices) reach = Math.Max(reach, Math.Max(Math.Abs((v - _plane.Origin).Dot(_plane.X)), Math.Abs((v - _plane.Origin).Dot(_plane.Y))) * Display * 1.2);
-        double step = reach > 400 ? 50 : 10;
+        double step = GridStep(2 * reach / 40);
         reach = Math.Ceiling(reach / step) * step / Display;
         step /= Display;
         Point3D Q(double u, double v) => P(_plane.At(u, v));

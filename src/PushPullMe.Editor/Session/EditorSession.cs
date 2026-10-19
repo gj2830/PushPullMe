@@ -182,7 +182,7 @@ public sealed partial class EditorSession
     private static bool IsStep(string path) => ModelFiles.IsStep(path);
 
     /// <summary>A file with exact shapes (STEP or DesignSpark), opened here right away; a mesh goes through the converter.</summary>
-    private static bool IsExact(string path) => IsStep(path) || ModelFiles.IsRsDocx(path);
+    private static bool IsExact(string path) => IsStep(path) || ModelFiles.IsRsDocx(path) || ModelFiles.IsRevit(path);
 
     /// <summary>A file to work on: STEP or .rsdocx opens right away; a mesh (STL/3MF) opens in the converter's window (shapes
     /// are best found there, with all its options) when the window has it, and what it hands over is taken over here.</summary>
@@ -231,10 +231,23 @@ public sealed partial class EditorSession
 
     private async Task Load(string path)
     {
+        // (a Revit project linking other models: those too, when the user wants them; they can make it heavy)
+        List<(RsDocx.Core.Revit.RevitLink Link, string File)>? links = null;
+        if (ModelFiles.IsRevit(path))
+        {
+            _window.Busy(T("Gekoppelde modellen zoeken…", "Looking for linked models…"));
+            var found = await Task.Run(() => SketchDocument.RevitLinksFound(path));
+            _window.Busy(null);
+            if (found.Count > 0 && await _window.Ask(T(
+                    $"Dit Revit-project koppelt {found.Count} {(found.Count == 1 ? "ander model" : "andere modellen")} ({string.Join(", ", found.Select(f => Path.GetFileNameWithoutExtension(f.File)))}). Die ook openen? Dat duurt langer en kost meer geheugen.",
+                    $"This Revit project links {found.Count} other {(found.Count == 1 ? "model" : "models")} ({string.Join(", ", found.Select(f => Path.GetFileNameWithoutExtension(f.File)))}). Open those too? That takes longer and needs more memory."),
+                    T("Gekoppelde modellen", "Linked models")))
+                links = found;
+        }
         _window.Busy(T("Bestand lezen en vormen herkennen…", "Reading the file and recognising shapes…"));
         try
         {
-            var (doc, note) = await Task.Run(() => ModelFiles.Load(path));
+            var (doc, note) = await Task.Run(() => ModelFiles.Load(path, links));
             Adopt(doc, path, note);
         }
         catch (Exception ex) when (ModelFiles.IsFileError(ex))
@@ -345,9 +358,8 @@ public sealed partial class EditorSession
 
     private void Render(bool zoom = false) => Render(_doc, zoom);
 
-    /// <summary>The document as triangles (per body and colour; flat faces flat, round faces shaded smooth; outside the
-    /// open group faded, not to be picked) and its edges (not between two round faces: those are soft, as in SketchUp);
-    /// the window draws it (<see cref="SceneChanged"/>).</summary>
+    /// <summary>The document as triangles and edges, the bodies not hidden each as <see cref="ViewOf"/> shows it; the
+    /// window draws it (<see cref="SceneChanged"/>).</summary>
     private void Render(SketchDocument? doc, bool zoom = false)
     {
         _meshes.Clear();
@@ -356,62 +368,20 @@ public sealed partial class EditorSession
         if (doc == null) { Shown = null; SceneChanged?.Invoke(); ClearHighlight(); return; }
         var meshes = new List<ShownMesh>();
         double x0 = double.MaxValue, x1 = double.MinValue;
-        for (int b = 0; b < doc.Bodies.Count; b++)
-        {
-            var body = doc.Bodies[b];
-            if (_hidden.Contains(body)) continue;
-            // (outside the open group: faded, and not to be picked)
-            bool outside = Outside(b);
-            // one mesh per colour painted on the body (null: the standard colour)
-            var byColor = new Dictionary<uint, (List<System.Numerics.Vector3> Pos, List<System.Numerics.Vector3> Nor, List<int> Map)>();
-            const uint Standard = 0;
-            for (int f = 0; f < body.Faces.Count; f++)
-            {
-                var face = body.Faces[f];
-                uint key = doc.ColorOf(new FaceRef(b, f)) ?? Standard;
-                if (!byColor.TryGetValue(key, out var mm)) byColor[key] = mm = (new(), new(), new List<int>());
-                var faceTris = doc.TrianglesOf(new FaceRef(b, f));
-                // (a free-form face has no normal of its own here: the mean of its triangles round each point)
-                var smooth = face.Surface is BrepNurbsSurface ? FaceGeometry.SmoothNormals(faceTris) : null;
-                foreach (var (a, bb, c) in Clipped(faceTris))
-                {
-                    foreach (var p in new[] { a, bb, c })
-                    {
-                        mm.Pos.Add(F(P(p)));
-                        var n = smooth?.Invoke(p) ?? NormalAt(face, p, a, bb, c);
-                        mm.Nor.Add(new System.Numerics.Vector3((float)n.X, (float)n.Y, (float)n.Z));
-                        x0 = Math.Min(x0, Math.Min(p.X, Math.Min(p.Y, p.Z))); x1 = Math.Max(x1, Math.Max(p.X, Math.Max(p.Y, p.Z)));
-                    }
-                    mm.Map.Add(f);
-                }
-            }
-            foreach (var (key, (pos, nor, map)) in byColor)
-            {
-                if (pos.Count == 0) continue;
-                var mesh = new ShownMesh(pos.ToArray(), nor.ToArray(), map.ToArray(), b, key == Standard ? null : Argb(key), outside);
-                meshes.Add(mesh);
-                if (!outside) _meshes.Add(mesh.Pick);
-            }
-        }
-        if (x1 > x0) _modelSize = (x1 - x0) * Display;
-
-        // edges
         var pts = new Point3DCollection();
         for (int b = 0; b < doc.Bodies.Count; b++)
         {
-            var body = doc.Bodies[b];
-            if (_hidden.Contains(body) || Outside(b)) continue;
-            var curvedUses = new int[body.Edges.Count];
-            foreach (var face in body.Faces.Where(f => f.Surface is not BrepPlane))
-                foreach (var c in face.Loops.SelectMany(l => l)) curvedUses[c.Edge]++;
-            for (int e = 0; e < body.Edges.Count; e++)
+            if (_hidden.Contains(doc.Bodies[b])) continue;
+            var v = ViewOf(doc, b);
+            foreach (var mesh in v.Meshes)
             {
-                if (curvedUses[e] >= 2) continue;
-                var line = FaceGeometry.EdgePoints(body, body.Edges[e]);
-                for (int i = 0; i + 1 < line.Count; i++)
-                    if (ClippedSegment(line[i], line[i + 1]) is { } seg) { pts.Add(P(seg.A)); pts.Add(P(seg.B)); }
+                meshes.Add(mesh);
+                if (!mesh.Faded) _meshes.Add(mesh.Pick);
             }
+            foreach (var p in v.Edges) pts.Add(p);
+            x0 = Math.Min(x0, v.Low); x1 = Math.Max(x1, v.High);
         }
+        if (x1 > x0) _modelSize = (x1 - x0) * Display;
         Shown = new ShownModel(meshes, pts);
         SceneChanged?.Invoke();
         RenderSectionCut(doc);
@@ -424,6 +394,83 @@ public sealed partial class EditorSession
             var cam = View.Camera; cam.Set(cam.Position, new Vector3D(1, 1.4, -0.9), new Vector3D(0, 0, 1));
             ZoomAll(0);
         }
+    }
+
+    /// <summary>A body as shown: its meshes, its edges' points (two per segment) and its lowest and highest
+    /// coordinate; with what it was made for (its colours, whether outside the open group).</summary>
+    private sealed record BodyView(IReadOnlyList<ShownMesh> Meshes, Point3D[] Edges, double Low, double High, IReadOnlyDictionary<int, uint>? Colors, bool Outside);
+
+    /// <summary>Whether two bodies' colours are the same (painting copies them all: compared by what is in them).</summary>
+    private static bool SameColors(IReadOnlyDictionary<int, uint>? a, IReadOnlyDictionary<int, uint>? b) =>
+        ReferenceEquals(a, b) || (a?.Count ?? 0) == (b?.Count ?? 0) && (a == null || b == null || a.All(kv => b.TryGetValue(kv.Key, out uint c) && c == kv.Value));
+
+    /// <summary>The bodies as shown last, kept with the bodies themselves (let go with them): hiding or showing some
+    /// of them, or changing one, makes only what changed anew.</summary>
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<BrepBody, BodyView> _views = new();
+
+    /// <summary>
+    /// Body <paramref name="b"/> as shown (per colour one mesh of triangles: flat faces flat, round faces shaded smooth;
+    /// outside the open group faded, not to be picked, without edges; its edges not between two round faces: those are
+    /// soft, as in SketchUp); the one made before when the body, its colours and its place in or outside the open group
+    /// are the same and nothing is cut away by a section.
+    /// </summary>
+    private BodyView ViewOf(SketchDocument doc, int b)
+    {
+        var body = doc.Bodies[b];
+        var colors = b < doc.Colors.Count ? doc.Colors[b] : null;
+        bool outside = Outside(b);
+        if (_section == null && _views.TryGetValue(body, out var known) && SameColors(known.Colors, colors) && known.Outside == outside)
+        {
+            if (known.Meshes.All(m => m.Body == b)) return known;
+            // (the body has another number now: the same triangles, numbered so)
+            known = known with { Meshes = known.Meshes.Select(m => new ShownMesh(m.Positions, m.Normals, m.Pick.FaceOfTriangle as int[] ?? m.Pick.FaceOfTriangle.ToArray(), b, m.Color, m.Faded)).ToList() };
+            _views.AddOrUpdate(body, known);
+            return known;
+        }
+        double x0 = double.MaxValue, x1 = double.MinValue;
+        // one mesh per colour painted on the body (null: the standard colour)
+        var byColor = new Dictionary<uint, (List<System.Numerics.Vector3> Pos, List<System.Numerics.Vector3> Nor, List<int> Map)>();
+        const uint Standard = 0;
+        for (int f = 0; f < body.Faces.Count; f++)
+        {
+            var face = body.Faces[f];
+            uint key = doc.ColorOf(new FaceRef(b, f)) ?? Standard;
+            if (!byColor.TryGetValue(key, out var mm)) byColor[key] = mm = (new(), new(), new List<int>());
+            var faceTris = doc.TrianglesOf(new FaceRef(b, f));
+            // (a free-form face has no normal of its own here: the mean of its triangles round each point)
+            var smooth = face.Surface is BrepNurbsSurface ? FaceGeometry.SmoothNormals(faceTris) : null;
+            foreach (var (a, bb, c) in Clipped(faceTris))
+            {
+                foreach (var p in new[] { a, bb, c })
+                {
+                    mm.Pos.Add(F(P(p)));
+                    var n = smooth?.Invoke(p) ?? NormalAt(face, p, a, bb, c);
+                    mm.Nor.Add(new System.Numerics.Vector3((float)n.X, (float)n.Y, (float)n.Z));
+                    x0 = Math.Min(x0, Math.Min(p.X, Math.Min(p.Y, p.Z))); x1 = Math.Max(x1, Math.Max(p.X, Math.Max(p.Y, p.Z)));
+                }
+                mm.Map.Add(f);
+            }
+        }
+        var meshes = new List<ShownMesh>();
+        foreach (var (key, (pos, nor, map)) in byColor)
+            if (pos.Count > 0) meshes.Add(new ShownMesh(pos.ToArray(), nor.ToArray(), map.ToArray(), b, key == Standard ? null : Argb(key), outside));
+        var edges = new List<Point3D>();
+        if (!outside)
+        {
+            var curvedUses = new int[body.Edges.Count];
+            foreach (var face in body.Faces.Where(f => f.Surface is not BrepPlane))
+                foreach (var c in face.Loops.SelectMany(l => l)) curvedUses[c.Edge]++;
+            for (int e = 0; e < body.Edges.Count; e++)
+            {
+                if (curvedUses[e] >= 2) continue;
+                var line = FaceGeometry.EdgePoints(body, body.Edges[e]);
+                for (int i = 0; i + 1 < line.Count; i++)
+                    if (ClippedSegment(line[i], line[i + 1]) is { } seg) { edges.Add(P(seg.A)); edges.Add(P(seg.B)); }
+            }
+        }
+        var view = new BodyView(meshes, edges.ToArray(), x0, x1, colors, outside);
+        if (_section == null) _views.AddOrUpdate(body, view);
+        return view;
     }
 
     /// <summary>Whether body <paramref name="b"/> lies outside the open group (shown faded, not to be picked); by the
@@ -1133,13 +1180,18 @@ public sealed partial class EditorSession
         [SketchKind.Loose] = _treeCounts.Item1, [SketchKind.Guides] = _treeCounts.Item2, [SketchKind.Dimensions] = _treeCounts.Item3, [SketchKind.Notes] = _treeCounts.Item4,
     };
 
-    /// <summary>A body's box in the tree: shown or hidden.</summary>
-    public void SetBodyShown(int b, bool shown)
+    /// <summary>Bodies' boxes in the tree (one body's, or a group's all at once): shown or hidden, the view drawn
+    /// again once.</summary>
+    public void SetBodyShown(IReadOnlyList<int> bodies, bool shown)
     {
-        if (_doc == null || b >= _doc.Bodies.Count) return;
-        if (shown) _hidden.Remove(_doc.Bodies[b]); else _hidden.Add(_doc.Bodies[b]);
+        if (_doc is not { } doc) return;
+        var these = bodies.Where(b => b < doc.Bodies.Count).ToList();
+        if (these.Count == 0) return;
+        foreach (int b in these)
+            if (shown) _hidden.Remove(doc.Bodies[b]); else _hidden.Add(doc.Bodies[b]);
         Render();
-        StatusText.Text = T($"🌲 {_doc.BodyName(b)} {(shown ? "weer zichtbaar" : "verborgen")}.", $"🌲 {_doc.BodyName(b)} {(shown ? "shown again" : "hidden")}.");
+        string what = these.Count == 1 ? doc.BodyName(these[0]) : T($"{these.Count} lichamen", $"{these.Count} bodies");
+        StatusText.Text = T($"🌲 {what} {(shown ? "weer zichtbaar" : "verborgen")}.", $"🌲 {what} {(shown ? "shown again" : "hidden")}.");
     }
 
     /// <summary>A body renamed in the tree.</summary>
@@ -2532,16 +2584,34 @@ public sealed partial class EditorSession
     /// <summary>⛶: the whole model in view.</summary>
     public void ZoomExtents() => ZoomAll(300);
 
-    /// <summary>Everything shown in view, looking the way the camera looks: the camera put back along its look until the
-    /// corners of the box round the model just fit (90 % of the narrower side).</summary>
-    private void ZoomAll(double ms)
+    /// <summary>The view cube clicked: the model seen from <paramref name="from"/> (a side, an edge or a corner of the
+    /// cube: x right, y back, z up), all of it in view.</summary>
+    public void ViewFrom(Vector3D from, string name)
+    {
+        if (from.Length < 1e-9) return;
+        from.Normalize();
+        if (Picking.Bounds(_meshes) is null && View.Camera is { } cam)
+        {
+            // (nothing shown: the camera turned round the point it looks at)
+            var target = cam.Position + cam.LookDirection;
+            var look = from * -cam.LookDirection.Length;
+            SetCamera(target - look, look, Math.Abs(from.Z) > 0.999 ? new Vector3D(0, from.Z > 0 ? 1 : -1, 0) : new Vector3D(0, 0, 1));
+        }
+        else ZoomAll(0, from * -1);
+        StatusText.Text = T($"🧊 Aanzicht: {name}.", $"🧊 View: {name}.");
+        Log($"view from {name}");
+    }
+
+    /// <summary>Everything shown in view, looking the way the camera looks (or <paramref name="look"/>): the camera put
+    /// back along its look until the corners of the box round the model just fit (90 % of the narrower side).</summary>
+    private void ZoomAll(double ms, Vector3D? look = null)
     {
         if (Picking.Bounds(_meshes) is not { } box || View.Camera is not PerspectiveCamera cam) return;
         var lo = new Point3D(box.Min.X, box.Min.Y, box.Min.Z);
         var hi = new Point3D(box.Max.X, box.Max.Y, box.Max.Z);
         var centre = lo + (hi - lo) * 0.5;
         // (the way the camera looks; from the front left, a little above, when it has none that can be used)
-        var f = CameraOk() ? cam.LookDirection : new Vector3D(1, 1.4, -0.9); f.Normalize();
+        var f = look ?? (CameraOk() ? cam.LookDirection : new Vector3D(1, 1.4, -0.9)); f.Normalize();
         var r = Vector3D.CrossProduct(f, new Vector3D(0, 0, 1)); if (r.Length < 1e-9) r = new Vector3D(1, 0, 0); r.Normalize();
         var u = Vector3D.CrossProduct(r, f);
         var (tx, ty) = ViewReach(cam);
@@ -5735,6 +5805,13 @@ public sealed partial class EditorSession
                     var shape = GripShapes()[Enum.Parse<Grip>(arg)];
                     ClickAt(Viewport3DHelper.Point3DtoPoint2D(View, P(shape[shape.Count / 2])));
                     report.AppendLine(string.Create(CultureInfo.InvariantCulture, $"  plane origin ({_plane.Origin.X * Display:0.##},{_plane.Origin.Y * Display:0.##},{_plane.Origin.Z * Display:0.##}) normal ({_plane.N.X:0.###},{_plane.N.Y:0.###},{_plane.N.Z:0.###})"));
+                    break;
+                }
+                case "viewfrom":
+                {
+                    // as a click on the view cube: viewfrom:x,y,z (a side, edge or corner)
+                    var d = arg.Split(',').Select(x => double.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                    ViewFrom(new Vector3D(d[0], d[1], d[2]), arg);
                     break;
                 }
                 case "topview":

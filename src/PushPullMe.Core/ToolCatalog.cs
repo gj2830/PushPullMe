@@ -85,7 +85,7 @@ public static class ToolCatalog
             Schema(("op", Choice("Operation", "union", "subtract", "intersect"), true), ("a", Int("First body"), true), ("b", Int("Second body"), true))),
         new("undo", "Undo the last change (the user can also press Ctrl+Z).", Schema()),
         new("redo", "Redo what was undone.", Schema()),
-        new("open_file", "Open a file (.step/.stp, .rsdocx, .stl, .3mf). The user is asked first when there is unsaved work.",
+        new("open_file", "Open a file (.step/.stp, .rsdocx, .rvt (Revit 2023 and later), .stl, .3mf). The user is asked first when there is unsaved work.",
             Schema(("path", Str("Full path"), true))),
         new("save_file", "Save the model (.step is the main format; .rsdocx for DesignSpark; .stl). The user is asked first when the file exists.",
             Schema(("path", Str("Full path"), true))),
