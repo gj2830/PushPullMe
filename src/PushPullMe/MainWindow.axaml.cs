@@ -164,6 +164,7 @@ public partial class MainWindow : Window, IEditorWindow
             }
         }
         LanguageButton.Content = Lang.English ? "🌐  EN" : "🌐  NL";
+        LevelsChanged();
         StructureChanged();
     }
 
@@ -504,14 +505,25 @@ public partial class MainWindow : Window, IEditorWindow
         _structure.GroupMenu += _s.GroupMenu;
         _structure.SketchShown += _s.SetSketchShown;
         _structure.Picked += _s.PickInTree;
+        var muted = (IBrush)this.FindResource("Muted")!;
+        _levels = new LevelList(muted);
+        _levels.LevelShown += _s.SetLevelShown;
         var pane = new DockPanel();
-        var head = new TextBlock { Text = T("STRUCTUUR", "STRUCTURE"), FontSize = 10.5, FontWeight = FontWeight.SemiBold, Foreground = (IBrush)this.FindResource("Muted")!, Margin = new Thickness(0, 0, 0, 4) };
+        var head = new TextBlock { Text = T("STRUCTUUR", "STRUCTURE"), FontSize = 10.5, FontWeight = FontWeight.SemiBold, Foreground = muted, Margin = new Thickness(0, 0, 0, 4) };
         DockPanel.SetDock(head, Dock.Top);
         pane.Children.Add(head);
+        // (the storeys under the tree)
+        DockPanel.SetDock(_levels, Dock.Bottom);
+        pane.Children.Add(_levels);
         pane.Children.Add(_structure);
         StructureRight.Child = pane;
         StructureChanged();
+        LevelsChanged();
     }
+
+    private LevelList? _levels;
+
+    public void LevelsChanged() => _levels?.Show(_s.Levels, _s.IsLevelShown, (IBrush)this.FindResource("Muted")!);
 
     public void StructureChanged() => _structure?.Show(_s.Document, _s.IsBodyShown, _s.SketchVisible, _s.SketchCounts);
     public void StructurePick(int? body, int? face) => _structure?.Select(body, face);

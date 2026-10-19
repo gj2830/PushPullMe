@@ -48,6 +48,7 @@ public sealed partial class SketchDocument
         var bodies = new List<BrepBody>();
         var curved = new List<IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>>();
         var colors = new List<IReadOnlyDictionary<int, uint>>();
+        var levels = new List<SketchLevel>();
         var names = new List<string?>();
         var bodyGroups = new List<int?>();
         var groups = new List<SketchGroup>();
@@ -60,6 +61,7 @@ public sealed partial class SketchDocument
             // (the file a group of its own, its classes in it; made when its first body comes)
             int? top = null;
             var groupOf = new Dictionary<string, int>();
+            var onLevel = new Dictionary<RevitLevel, List<BrepBody>>();
             void Take(RevitElementMesh e)
             {
                 // (every piece of every saved body of the element; numbered when there are more)
@@ -84,6 +86,11 @@ public sealed partial class SketchDocument
                         groups.Add(new SketchGroup(g, e.Class, top));
                     }
                     bodies.Add(b);
+                    if (e.Level is { } lv)
+                    {
+                        if (!onLevel.TryGetValue(lv, out var on)) onLevel[lv] = on = [];
+                        on.Add(b);
+                    }
                     curved.Add(shown);
                     colors.Add(painted);
                     names.Add(pieces.Count == 1 ? $"{e.Class} {e.Id}" : $"{e.Class} {e.Id}.{k + 1}");
@@ -94,9 +101,12 @@ public sealed partial class SketchDocument
             try { RevitGeometry.Read(RevitFile.Open(model.File), Take, report); }
             catch (FormatException e) when (model.Placement == null) { throw new RevitReadException(Lang.T("Dit Revit-bestand is (nog) niet te lezen: ", "This Revit file cannot be read (yet): ") + e.Message); }
             catch (Exception e) when (e is FormatException or CompoundFileException or IOException) { }
+            // (its storeys from the bottom up, at the height its link puts them)
+            foreach (var (lv, on) in onLevel.OrderBy(kv => kv.Key.Elevation))
+                levels.Add(new SketchLevel(model.Name, lv.Name, place is { } pl ? pl.Point(new Vec3(0, 0, lv.Elevation)).Z : lv.Elevation, on));
         }
         if (bodies.Count == 0) throw new RevitReadException(Lang.T("Er staan geen lichamen in dit Revit-bestand.", "There are no bodies in this Revit file."));
-        return new SketchDocument { Bodies = bodies, Curved = curved, Colors = colors, Names = names, Groups = groups, BodyGroups = bodyGroups };
+        return new SketchDocument { Bodies = bodies, Curved = curved, Colors = colors, Names = names, Groups = groups, BodyGroups = bodyGroups, Levels = levels };
     }
 
     /// <summary>
@@ -670,6 +680,10 @@ public sealed partial class SketchDocument
         _ => _ => new Vec3(0, 0, 0),
     };
 }
+
+/// <summary>A storey of a model read from Revit: the model's name, its own name, its height (metres) and the bodies on
+/// it (as read; the very bodies, compared as such).</summary>
+public sealed record SketchLevel(string Model, string Name, double Elevation, IReadOnlyList<BrepBody> Bodies);
 
 /// <summary>Why a Revit file cannot be opened (shown to the user as it is).</summary>
 public sealed class RevitReadException(string message) : Exception(message);

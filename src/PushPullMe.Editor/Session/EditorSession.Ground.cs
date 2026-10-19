@@ -76,6 +76,7 @@ public sealed partial class EditorSession
     {
         _doc = SketchDocument.FromBodies([]);
         _path = null; _plane = WorkPlane.Ground;
+        SetLevels([]);
         _history.Clear(); _last = null; _selected = null; _hover = null;
         UpdateUndoButtons();
         FileText.Text = T("nieuw", "new");
@@ -267,7 +268,7 @@ public sealed partial class EditorSession
         _groundVisuals.Clear();
         if (doc == null) return;
         double reach = 100;
-        foreach (var b in doc.Bodies.Where(b => !_hidden.Contains(b)))
+        foreach (var b in doc.Bodies.Where(Drawn))
             foreach (var v in b.Vertices) reach = Math.Max(reach, Math.Max(Math.Abs((v - _plane.Origin).Dot(_plane.X)), Math.Abs((v - _plane.Origin).Dot(_plane.Y))) * Display * 1.2);
         double step = GridStep(2 * reach / 40);
         reach = Math.Ceiling(reach / step) * step / Display;

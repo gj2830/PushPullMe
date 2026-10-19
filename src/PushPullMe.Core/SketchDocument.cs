@@ -32,6 +32,10 @@ public sealed partial class SketchDocument
     /// "Vaste vorm n" or "Oppervlak n", see <see cref="BodyName"/>). Carried along by <see cref="CarryNames"/>.</summary>
     public IReadOnlyList<string?> Names { get; init; } = [];
 
+    /// <summary>The storeys of the models it was read from (from Revit; none otherwise), each with the bodies on it, as
+    /// read: not carried along by changes (the editor keeps them from the document opened).</summary>
+    public IReadOnlyList<SketchLevel> Levels { get; init; } = [];
+
     /// <summary>The same bodies with these loose lines.</summary>
     public SketchDocument WithLines(IReadOnlyList<SketchLine> lines) => new() { Bodies = Bodies, Curved = Curved, Colors = Colors, Lines = lines };
 

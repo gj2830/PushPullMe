@@ -66,6 +66,9 @@ public interface IEditorWindow
     /// <summary>The structure tree to be made anew (the document, the bodies shown or the drawing aids changed), and
     /// what is picked in it.</summary>
     void StructureChanged();
+
+    /// <summary>The list of storeys under the structure tree to be made anew (another document opened).</summary>
+    void LevelsChanged();
     void StructurePick(int? body, int? face);
     void StructurePickGroup(int group);
 

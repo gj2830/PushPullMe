@@ -217,6 +217,7 @@ public sealed partial class EditorSession
         _doc = doc; _path = path; _plane = WorkPlane.Ground; _savedDoc = doc;
         _history.Clear(); _last = null; _lastMove = null; _selected = null; _hover = null; EndDrag(); EndDraw(); EndOffset(); EndRound(); _lastOffset = null; _lastRound = null; EndRotate(); EndScale(); EndPolygon(); EndArc(); EndSweep(); EndRotRect(); EndFollow(); EndGround(); _unionFirst = null; _mirrorBody = null;
         _openGroup = null; _pickedUnits.Clear();
+        SetLevels(doc.Levels);
         UpdateUndoButtons();
         Render(zoom: true);
         FileText.Text = Path.GetFileName(path);
@@ -370,7 +371,7 @@ public sealed partial class EditorSession
         var pts = new Point3DCollection();
         for (int b = 0; b < doc.Bodies.Count; b++)
         {
-            if (_hidden.Contains(doc.Bodies[b])) continue;
+            if (!Drawn(doc.Bodies[b])) continue;
             var v = ViewOf(doc, b);
             foreach (var mesh in v.Meshes)
             {
@@ -1205,6 +1206,40 @@ public sealed partial class EditorSession
     {
         [SketchKind.Loose] = _treeCounts.Item1, [SketchKind.Guides] = _treeCounts.Item2, [SketchKind.Dimensions] = _treeCounts.Item3, [SketchKind.Notes] = _treeCounts.Item4,
     };
+
+    /// <summary>The storeys of the document opened (see <see cref="SketchDocument.Levels"/>), each shown or not.</summary>
+    private IReadOnlyList<SketchLevel> _levels = [];
+    private readonly HashSet<SketchLevel> _levelsOff = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The bodies on the storeys switched off (not drawn, as the bodies hidden in the tree).</summary>
+    private readonly HashSet<BrepBody> _levelHidden = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The storeys of the document opened, each model's from the bottom up (for the list under the tree).</summary>
+    public IReadOnlyList<SketchLevel> Levels => _levels;
+
+    /// <summary>Whether a storey's box in the list is ticked.</summary>
+    public bool IsLevelShown(SketchLevel level) => !_levelsOff.Contains(level);
+
+    private void SetLevels(IReadOnlyList<SketchLevel> levels)
+    {
+        _levels = levels; _levelsOff.Clear(); _levelHidden.Clear();
+        _window.LevelsChanged();
+    }
+
+    /// <summary>A storey's box in the list: its bodies shown or hidden (besides what the tree hides).</summary>
+    public void SetLevelShown(SketchLevel level, bool shown)
+    {
+        if (shown) _levelsOff.Remove(level); else _levelsOff.Add(level);
+        _levelHidden.Clear();
+        foreach (var off in _levelsOff) _levelHidden.UnionWith(off.Bodies);
+        Render();
+        _window.LevelsChanged();
+        StatusText.Text = T($"🏢 {level.Name} ({level.Model}) {(shown ? "weer zichtbaar" : "verborgen")}.", $"🏢 {level.Name} ({level.Model}) {(shown ? "shown again" : "hidden")}.");
+        Log($"level {level.Model} / {level.Name}: {(shown ? "shown" : "hidden")}");
+    }
+
+    /// <summary>Whether a body is drawn: not hidden in the tree, nor on a storey switched off.</summary>
+    private bool Drawn(BrepBody body) => !_hidden.Contains(body) && !_levelHidden.Contains(body);
 
     /// <summary>Bodies' boxes in the tree (one body's, or a group's all at once): shown or hidden, the view drawn
     /// again once.</summary>
@@ -5832,6 +5867,13 @@ public sealed partial class EditorSession
                     break;
                 }
                 case "pickgroup": PickGroup(int.Parse(arg)); break;
+                case "leveloff":
+                {
+                    // leveloff:i,j,… — those storeys of the list (from the bottom, as Levels gives them) switched off
+                    foreach (var i in arg.Split(',')) SetLevelShown(_levels[int.Parse(i)], false);
+                    report.AppendLine("  levels: " + string.Join(", ", _levels.Select((l, i) => $"{i} {l.Name} {l.Elevation:0.00}{(IsLevelShown(l) ? "" : " off")}")));
+                    break;
+                }
                 case "spin":
                 {
                     // spin:n — the camera turned n times a little round the vertical through what it looks at, as an
