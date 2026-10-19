@@ -16,8 +16,9 @@ public class RevitTests
         var d = SketchDocument.FromRevit(path, out var report);
         Assert.True(d.Bodies.Count > 10_000);
         // (nearly all faces in closed bodies: they meet along shared edges; a body Revit saved crooked, an edge of
-        // three faces or of two the same way round, in pieces, some of them a face alone)
-        Assert.True(d.Bodies.Where(b => !b.Sheet).Sum(b => b.Faces.Count) > 0.95 * d.Bodies.Sum(b => b.Faces.Count));
+        // three faces or of two the same way round, in pieces, some of them a face alone; a wall's sweep (a cornice,
+        // a skirting) saved without ends where it meets the wall: open as saved)
+        Assert.True(d.Bodies.Where(b => !b.Sheet).Sum(b => b.Faces.Count) > 0.9 * d.Bodies.Sum(b => b.Faces.Count));
         var walls = d.Groups.Single(g => g.Name == "SWall");
         int wall = d.Members(walls.Id).First(b => !d.Bodies[b].Sheet && d.Bodies[b].Faces.Count == 6);
         Assert.StartsWith("SWall ", d.BodyName(wall));
