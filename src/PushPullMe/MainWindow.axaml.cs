@@ -182,6 +182,13 @@ public partial class MainWindow : Window, IEditorWindow
                 BorderThickness = new Thickness(2), Tag = color, Background = new SolidColorBrush(Color.FromArgb(c.A, c.R, c.G, c.B)),
             };
             ToolTip.SetTip(swatch, name);
+            // (a see-through colour, glass: shining from white at the top left into its colour, fully there)
+            if (c.A < 255)
+                swatch.Background = new LinearGradientBrush
+                {
+                    StartPoint = new RelativePoint(0.15, 0.1, RelativeUnit.Relative), EndPoint = new RelativePoint(0.85, 0.9, RelativeUnit.Relative),
+                    GradientStops = { new GradientStop(Colors.White, 0), new GradientStop(Color.FromRgb(c.R, c.G, c.B), 0.55), new GradientStop(Color.FromArgb(0x90, c.R, c.G, c.B), 1) },
+                };
             if (color == null) swatch.Child = new TextBlock { Text = "∅", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.Gray };
             swatch.PointerPressed += (_, e) => { _s.SetPaint(color); e.Handled = true; };
             Swatches.Children.Add(swatch);
@@ -507,7 +514,7 @@ public partial class MainWindow : Window, IEditorWindow
         _structure.Picked += _s.PickInTree;
         var muted = (IBrush)this.FindResource("Muted")!;
         _levels = new LevelList(muted);
-        _levels.LevelShown += _s.SetLevelShown;
+        _levels.StoreyShown += _s.SetStoreyShown;
         var pane = new DockPanel();
         var head = new TextBlock { Text = T("STRUCTUUR", "STRUCTURE"), FontSize = 10.5, FontWeight = FontWeight.SemiBold, Foreground = muted, Margin = new Thickness(0, 0, 0, 4) };
         DockPanel.SetDock(head, Dock.Top);
@@ -523,7 +530,7 @@ public partial class MainWindow : Window, IEditorWindow
 
     private LevelList? _levels;
 
-    public void LevelsChanged() => _levels?.Show(_s.Levels, _s.IsLevelShown, (IBrush)this.FindResource("Muted")!);
+    public void LevelsChanged() => _levels?.Show(_s.Storeys, _s.IsStoreyShown);
 
     public void StructureChanged() => _structure?.Show(_s.Document, _s.IsBodyShown, _s.SketchVisible, _s.SketchCounts);
     public void StructurePick(int? body, int? face) => _structure?.Select(body, face);

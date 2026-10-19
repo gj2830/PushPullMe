@@ -39,6 +39,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             value.SceneChanged += () => { _modelDirty = true; RequestNextFrameRendering(); };
             value.View.Children.CollectionChanged += (_, _) => { _overlayDirty = true; RequestNextFrameRendering(); };
             value.View.Camera.Changed += RequestNextFrameRendering;
+            value.CutsChanged += RequestNextFrameRendering;
             value.View.MouseCaptureChanged += on => _captured = on;
             SizeToEditor();
         }
@@ -122,6 +123,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
     private GL? _gl;
     private uint _faceProgram, _lineProgram, _edgeProgram;
     private int _uMvp, _uLight, _uBack, _uUnlit, _uLineMvp, _uHalf, _uBias, _uEdgeMvp, _uEdgeHalf, _uEdgeColor, _uEdgeWidth;
+    private (int Count, int Ranges, int Masks) _uFaceCuts, _uEdgeCuts;
     private bool _modelDirty = true, _overlayDirty = true;
 
     /// <summary>Which OpenGL drew it (for the log and the test aid).</summary>
@@ -131,8 +133,9 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
     /// segments, how many, and the buffer of the six corners every one of them is drawn with).</summary>
     private sealed class Batch { public uint Vao, Vbo, Corners; public int Count; }
 
-    // faces: position, normal, colour (10 floats); lines: position, the other end, side, colour, width (12 floats)
-    private const int FaceStride = 10, LineStride = 12;
+    // faces: position, normal, colour, model (11 floats); lines: position, the other end, side, colour, width (12 floats);
+    // the model's edges: both ends, model (7 floats); a model: its number for the cuts (-1: none, never cut)
+    private const int FaceStride = 11, LineStride = 12, EdgeStride = 7;
     private Batch? _faces, _faded, _edges, _highlights, _lines, _linesBehind, _linesOnTop;
 
     /// <summary>A frame asked for: its pixels (width, height, RGBA rows top down) once drawn.</summary>
@@ -157,19 +160,39 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             layout(location = 0) in vec3 aPos;
             layout(location = 1) in vec3 aNormal;
             layout(location = 2) in vec4 aColor;
+            layout(location = 3) in float aModel;
             uniform mat4 uMvp;
             out vec3 vNormal;
             out vec4 vColor;
-            void main() { gl_Position = uMvp * vec4(aPos, 1.0); vNormal = aNormal; vColor = aColor; }
+            out float vZ;
+            flat out int vModel;
+            void main() { gl_Position = uMvp * vec4(aPos, 1.0); vNormal = aNormal; vColor = aColor; vZ = aPos.z; vModel = int(floor(aModel + 0.5)); }
             """, head + """
             in vec3 vNormal;
             in vec4 vColor;
+            in float vZ;
+            flat in int vModel;
             uniform vec3 uLight;
             uniform vec4 uBack;
             uniform int uUnlit;
             out vec4 fragColor;
+            // (cut away: a height range of a model, a storey switched off: see EditorSession.Cuts)
+            uniform int uCuts;
+            uniform vec2 uCut[32];
+            uniform int uCutMask[32];
+            bool CutAway(float z, int model)
+            {
+                if (model < 0 || model > 30) return false;
+                for (int i = 0; i < 32; i++)
+                {
+                    if (i >= uCuts) break;
+                    if (((uCutMask[i] >> model) & 1) != 0 && z >= uCut[i].x && z < uCut[i].y) return true;
+                }
+                return false;
+            }
             void main()
             {
+                if (CutAway(vZ, vModel)) discard;
                 if (uUnlit == 1) { fragColor = vColor; return; }
                 // the inside (seen through a hole or a cut): the back colour, the normal turned round
                 vec3 n = normalize(gl_FrontFacing ? vNormal : -vNormal);
@@ -215,14 +238,18 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             layout(location = 1) in float aSide;
             layout(location = 2) in vec3 aA;
             layout(location = 3) in vec3 aB;
+            layout(location = 4) in float aModel;
             uniform mat4 uMvp;
             uniform vec2 uHalf;
             uniform vec4 uColor;
             uniform float uWidth;
             out vec4 vColor;
+            out float vZ;
+            flat out int vModel;
             void main()
             {
                 vec3 at = aEnd < 0.5 ? aA : aB;
+                vZ = at.z; vModel = int(floor(aModel + 0.5));
                 vec3 other = aEnd < 0.5 ? aB : aA;
                 vec4 p = uMvp * vec4(at, 1.0);
                 vec4 o = uMvp * vec4(other, 1.0);
@@ -237,9 +264,27 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             }
             """, head + """
             in vec4 vColor;
+            in float vZ;
+            flat in int vModel;
             out vec4 fragColor;
-            void main() { fragColor = vColor; }
+            // (cut away: a height range of a model, a storey switched off: see EditorSession.Cuts)
+            uniform int uCuts;
+            uniform vec2 uCut[32];
+            uniform int uCutMask[32];
+            bool CutAway(float z, int model)
+            {
+                if (model < 0 || model > 30) return false;
+                for (int i = 0; i < 32; i++)
+                {
+                    if (i >= uCuts) break;
+                    if (((uCutMask[i] >> model) & 1) != 0 && z >= uCut[i].x && z < uCut[i].y) return true;
+                }
+                return false;
+            }
+            void main() { if (CutAway(vZ, vModel)) discard; fragColor = vColor; }
             """);
+        (int, int, int) Cuts(uint program) => (_gl.GetUniformLocation(program, "uCuts"), _gl.GetUniformLocation(program, "uCut"), _gl.GetUniformLocation(program, "uCutMask"));
+        _uFaceCuts = Cuts(_faceProgram); _uEdgeCuts = Cuts(_edgeProgram);
         _uEdgeMvp = _gl.GetUniformLocation(_edgeProgram, "uMvp");
         _uEdgeHalf = _gl.GetUniformLocation(_edgeProgram, "uHalf");
         _uEdgeColor = _gl.GetUniformLocation(_edgeProgram, "uColor");
@@ -303,7 +348,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
         return b;
     }
 
-    private Batch FaceBatch() => NewBatch(FaceStride, [(0, 3, 0), (1, 3, 3), (2, 4, 6)]);
+    private Batch FaceBatch() => NewBatch(FaceStride, [(0, 3, 0), (1, 3, 3), (2, 4, 6), (3, 1, 10)]);
     private Batch LineBatch() => NewBatch(LineStride, [(0, 3, 0), (1, 3, 3), (2, 1, 6), (3, 4, 7), (4, 1, 11)]);
 
     /// <summary>The model's edges: the six corners of a segment's quad (which end, which side; as
@@ -319,9 +364,10 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
         gl.EnableVertexAttribArray(0); gl.VertexAttribPointer(0, 1, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)0);
         gl.EnableVertexAttribArray(1); gl.VertexAttribPointer(1, 1, VertexAttribPointerType.Float, false, 2 * sizeof(float), (void*)sizeof(float));
         gl.BindBuffer(BufferTargetARB.ArrayBuffer, b.Vbo);
-        gl.EnableVertexAttribArray(2); gl.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, 6 * sizeof(float), (void*)0);
-        gl.EnableVertexAttribArray(3); gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-        gl.VertexAttribDivisor(2, 1); gl.VertexAttribDivisor(3, 1);
+        gl.EnableVertexAttribArray(2); gl.VertexAttribPointer(2, 3, VertexAttribPointerType.Float, false, EdgeStride * sizeof(float), (void*)0);
+        gl.EnableVertexAttribArray(3); gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, EdgeStride * sizeof(float), (void*)(3 * sizeof(float)));
+        gl.EnableVertexAttribArray(4); gl.VertexAttribPointer(4, 1, VertexAttribPointerType.Float, false, EdgeStride * sizeof(float), (void*)(6 * sizeof(float)));
+        gl.VertexAttribDivisor(2, 1); gl.VertexAttribDivisor(3, 1); gl.VertexAttribDivisor(4, 1);
         gl.BindVertexArray(0);
         return b;
     }
@@ -348,7 +394,20 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
 
     private static void Face(List<float> d, Vector3 p, Vector3 n, Vector4 c)
     {
-        d.Add(p.X); d.Add(p.Y); d.Add(p.Z); d.Add(n.X); d.Add(n.Y); d.Add(n.Z); d.Add(c.X); d.Add(c.Y); d.Add(c.Z); d.Add(c.W);
+        d.Add(p.X); d.Add(p.Y); d.Add(p.Z); d.Add(n.X); d.Add(n.Y); d.Add(n.Z); d.Add(c.X); d.Add(c.Y); d.Add(c.Z); d.Add(c.W); d.Add(-1);
+    }
+
+    /// <summary>The cuts (see <see cref="EditorSession.Cuts"/>) to a program's uniforms.</summary>
+    private unsafe void SetCuts((int Count, int Ranges, int Masks) at)
+    {
+        var cuts = _session?.Cuts ?? [];
+        int n = Math.Min(32, cuts.Count);
+        var ranges = new float[64]; var masks = new int[32];
+        for (int i = 0; i < n; i++) { ranges[2 * i] = cuts[i].Low; ranges[2 * i + 1] = cuts[i].High; masks[i] = (int)cuts[i].Mask; }
+        var g = _gl!;
+        g.Uniform1(at.Count, n);
+        fixed (float* r = ranges) g.Uniform2(at.Ranges, 32, r);
+        fixed (int* m = masks) g.Uniform1(at.Masks, 32, m);
     }
 
     /// <summary>A segment as two triangles, widened in the vertex shader (<paramref name="width"/> in pixels).</summary>
@@ -392,19 +451,22 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             {
                 var (p, n) = (m.Positions[i], m.Normals[i]);
                 into[at++] = p.X; into[at++] = p.Y; into[at++] = p.Z; into[at++] = n.X; into[at++] = n.Y; into[at++] = n.Z;
-                into[at++] = c.X; into[at++] = c.Y; into[at++] = c.Z; into[at++] = c.W;
+                into[at++] = c.X; into[at++] = c.Y; into[at++] = c.Z; into[at++] = c.W; into[at++] = m.Model;
             }
         }
         var pts = model?.Edges;
         int segments = (pts?.Count ?? 0) / 2;
-        var edges = new float[segments * 6];
+        var edges = new float[segments * EdgeStride];
+        var edgeModels = model?.EdgeModels;
         for (int i = 0; i < segments; i++)
         {
             var (a, b) = (pts![2 * i], pts[2 * i + 1]);
-            edges[6 * i] = (float)a.X; edges[6 * i + 1] = (float)a.Y; edges[6 * i + 2] = (float)a.Z;
-            edges[6 * i + 3] = (float)b.X; edges[6 * i + 4] = (float)b.Y; edges[6 * i + 5] = (float)b.Z;
+            int k = EdgeStride * i;
+            edges[k] = (float)a.X; edges[k + 1] = (float)a.Y; edges[k + 2] = (float)a.Z;
+            edges[k + 3] = (float)b.X; edges[k + 4] = (float)b.Y; edges[k + 5] = (float)b.Z;
+            edges[k + 6] = edgeModels != null && i < edgeModels.Count ? edgeModels[i] : -1;
         }
-        Fill(_faces!, faces, faces.Length, FaceStride); Fill(_faded!, faded, faded.Length, FaceStride); Fill(_edges!, edges, edges.Length, 6);
+        Fill(_faces!, faces, faces.Length, FaceStride); Fill(_faded!, faded, faded.Length, FaceStride); Fill(_edges!, edges, edges.Length, EdgeStride);
     }
 
     private void UploadOverlays()
@@ -472,6 +534,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             var back = V4(EditorSession.BackColor);
             g.Uniform4(_uBack, back.X, back.Y, back.Z, back.W);
             g.Uniform1(_uUnlit, 0);
+            SetCuts(_uFaceCuts);
             g.Enable(EnableCap.PolygonOffsetFill);
             g.PolygonOffset(1, 1);
             Draw(_faces);
@@ -493,6 +556,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
                 var ec = V4(EditorSession.EdgeColor);
                 g.Uniform4(_uEdgeColor, ec.X, ec.Y, ec.Z, ec.W);
                 g.Uniform1(_uEdgeWidth, Width(1.3));
+                SetCuts(_uEdgeCuts);
                 g.BindVertexArray(_edges.Vao);
                 g.DrawArraysInstanced(PrimitiveType.Triangles, 0, 6, (uint)_edges.Count);
             }

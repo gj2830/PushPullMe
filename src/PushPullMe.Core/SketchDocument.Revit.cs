@@ -685,9 +685,56 @@ public sealed partial class SketchDocument
     };
 }
 
-/// <summary>A storey of a model read from Revit: the model's name, its own name, its height (metres) and the bodies on
+/// <summary>A level of a model read from Revit: the model's name, its own name, its height (metres) and the bodies on
 /// it (as read; the very bodies, compared as such).</summary>
 public sealed record SketchLevel(string Model, string Name, double Elevation, IReadOnlyList<BrepBody> Bodies);
+
+/// <summary>A storey of the whole project: its number (0 the one the project's height 0 is on, -1 under it, 1 above), its height
+/// (its lowest level's, metres), the main model's levels it holds, and per model (all of them) the bodies on it.</summary>
+public sealed record SketchStorey(int Number, double Elevation, IReadOnlyList<string> Levels, IReadOnlyList<(string Model, IReadOnlyList<BrepBody> Bodies)> Parts);
+
+public static class SketchStoreys
+{
+    /// <summary>How far above a storey's lowest level the main model's levels still belong to it (metres): the ground
+    /// floors of blocks at different heights are one storey, a mezzanine one with the floor over it.</summary>
+    public const double Span = 2.0;
+
+    /// <summary>How far under a storey a level of another model still counts as on it (metres): the top of the steel
+    /// just under a floor.</summary>
+    public const double Margin = 0.3;
+
+    /// <summary>
+    /// The storeys of a project from its levels: the main model's (the first one's with levels) gathered by height (each
+    /// storey its lowest level and all within <see cref="Span"/> above it), numbered from the one the height 0 is on;
+    /// every model's levels on the storey they are at (down to <see cref="Margin"/> under it; under the lowest: the
+    /// lowest). Empty without levels.
+    /// </summary>
+    public static IReadOnlyList<SketchStorey> Of(IReadOnlyList<SketchLevel> levels)
+    {
+        if (levels.Count == 0) return [];
+        string main = levels[0].Model;
+        var groups = new List<(double Low, List<string> Names)>();
+        foreach (var l in levels.Where(l => l.Model == main).OrderBy(l => l.Elevation))
+        {
+            if (groups.Count == 0 || l.Elevation > groups[^1].Low + Span) groups.Add((l.Elevation, []));
+            if (!groups[^1].Names.Contains(l.Name)) groups[^1].Names.Add(l.Name);
+        }
+        // (the ground floor the storey the project's height 0 is on; all above it: the lowest)
+        int ground = Math.Max(0, groups.FindLastIndex(g => g.Low <= Margin));
+        var parts = groups.Select(_ => new Dictionary<string, List<BrepBody>>()).ToList();
+        foreach (var l in levels)
+        {
+            int at = Math.Max(0, groups.FindLastIndex(g => g.Low <= l.Elevation + Margin));
+            if (!parts[at].TryGetValue(l.Model, out var bodies)) parts[at][l.Model] = bodies = [];
+            bodies.AddRange(l.Bodies);
+        }
+        // (every model a part of every storey, in the order they were read: a storey is a slice of the whole project,
+        // whatever level its things are listed on; one with none of its levels there has no bodies on it)
+        var models = levels.Select(l => l.Model).Distinct().ToList();
+        return groups.Select((g, i) => new SketchStorey(i - ground, g.Low, g.Names,
+            models.Select(m => (m, parts[i].TryGetValue(m, out var on) ? (IReadOnlyList<BrepBody>)on : [])).ToList())).ToList();
+    }
+}
 
 /// <summary>Why a Revit file cannot be opened (shown to the user as it is).</summary>
 public sealed class RevitReadException(string message) : Exception(message);

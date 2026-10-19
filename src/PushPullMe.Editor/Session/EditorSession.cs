@@ -369,6 +369,7 @@ public sealed partial class EditorSession
         var meshes = new List<ShownMesh>();
         double x0 = double.MaxValue, x1 = double.MinValue;
         var pts = new Point3DCollection();
+        var edgeModels = new List<int>();
         for (int b = 0; b < doc.Bodies.Count; b++)
         {
             if (!Drawn(doc.Bodies[b])) continue;
@@ -379,10 +380,11 @@ public sealed partial class EditorSession
                 if (!mesh.Faded) _meshes.Add(mesh.Pick);
             }
             foreach (var p in v.Edges) pts.Add(p);
+            for (int k = 0; k < v.Edges.Length / 2; k++) edgeModels.Add(v.Model);
             x0 = Math.Min(x0, v.Low); x1 = Math.Max(x1, v.High);
         }
         if (x1 > x0) _modelSize = (x1 - x0) * Display;
-        Shown = new ShownModel(meshes, pts);
+        Shown = new ShownModel(meshes, pts, edgeModels);
         SceneChanged?.Invoke();
         RenderSectionCut(doc);
         RenderGround(doc);
@@ -398,7 +400,7 @@ public sealed partial class EditorSession
 
     /// <summary>A body as shown: its meshes, its edges' points (two per segment) and its lowest and highest
     /// coordinate; with what it was made for (its colours, whether outside the open group).</summary>
-    private sealed record BodyView(IReadOnlyList<ShownMesh> Meshes, Point3D[] Edges, double Low, double High, IReadOnlyDictionary<int, uint>? Colors, bool Outside);
+    private sealed record BodyView(IReadOnlyList<ShownMesh> Meshes, Point3D[] Edges, double Low, double High, IReadOnlyDictionary<int, uint>? Colors, bool Outside, int Model);
 
     /// <summary>Whether two bodies' colours are the same (painting copies them all: compared by what is in them).</summary>
     private static bool SameColors(IReadOnlyDictionary<int, uint>? a, IReadOnlyDictionary<int, uint>? b) =>
@@ -419,11 +421,12 @@ public sealed partial class EditorSession
         var body = doc.Bodies[b];
         var colors = b < doc.Colors.Count ? doc.Colors[b] : null;
         bool outside = Outside(b);
-        if (_section == null && _views.TryGetValue(body, out var known) && SameColors(known.Colors, colors) && known.Outside == outside)
+        int model = ModelOf(doc, b);
+        if (_section == null && _views.TryGetValue(body, out var known) && SameColors(known.Colors, colors) && known.Outside == outside && known.Model == model)
         {
             if (known.Meshes.All(m => m.Body == b)) return known;
             // (the body has another number now: the same triangles, numbered so)
-            known = known with { Meshes = known.Meshes.Select(m => new ShownMesh(m.Positions, m.Normals, m.Pick.FaceOfTriangle as int[] ?? m.Pick.FaceOfTriangle.ToArray(), b, m.Color, m.Faded)).ToList() };
+            known = known with { Meshes = known.Meshes.Select(m => new ShownMesh(m.Positions, m.Normals, m.Pick.FaceOfTriangle as int[] ?? m.Pick.FaceOfTriangle.ToArray(), b, m.Color, m.Faded, model)).ToList() };
             _views.AddOrUpdate(body, known);
             return known;
         }
@@ -453,7 +456,7 @@ public sealed partial class EditorSession
         }
         var meshes = new List<ShownMesh>();
         foreach (var (key, (pos, nor, map)) in byColor)
-            if (pos.Count > 0) meshes.Add(new ShownMesh(pos.ToArray(), nor.ToArray(), map.ToArray(), b, key == Standard ? null : Argb(key), outside));
+            if (pos.Count > 0) meshes.Add(new ShownMesh(pos.ToArray(), nor.ToArray(), map.ToArray(), b, key == Standard ? null : Argb(key), outside, model));
         var edges = new List<Point3D>();
         if (!outside)
         {
@@ -468,7 +471,7 @@ public sealed partial class EditorSession
                     if (ClippedSegment(line[i], line[i + 1]) is { } seg) { edges.Add(P(seg.A)); edges.Add(P(seg.B)); }
             }
         }
-        var view = new BodyView(meshes, edges.ToArray(), x0, x1, colors, outside);
+        var view = new BodyView(meshes, edges.ToArray(), x0, x1, colors, outside, model);
         if (_section == null) _views.AddOrUpdate(body, view);
         return view;
     }
@@ -701,7 +704,9 @@ public sealed partial class EditorSession
     private IEnumerable<(PickMesh Mesh, IReadOnlyList<int> Map, int Body, int Triangle, Point3D At)> Hits(Point pos)
     {
         if (View.Frame is not { } frame) return [];
-        return Picking.Hits(_meshes, frame.Ray(new ScreenPoint(pos.X, pos.Y))).Select(h => (h.Mesh, h.Mesh.FaceOfTriangle, h.Mesh.Body, h.Triangle, new Point3D(h.At.X, h.At.Y, h.At.Z)));
+        // (not where a storey is cut away: as if it were not there)
+        return Picking.Hits(_meshes, frame.Ray(new ScreenPoint(pos.X, pos.Y))).Select(h => (h.Mesh, h.Mesh.FaceOfTriangle, h.Mesh.Body, h.Triangle, new Point3D(h.At.X, h.At.Y, h.At.Z)))
+            .Where(h => !CutAway(h.Body, h.Item5));
     }
 
     private bool IsPlanar(FaceRef f) => _doc != null && _doc.Bodies[f.Body].Faces[f.Face].Surface is BrepPlane;
@@ -1207,39 +1212,112 @@ public sealed partial class EditorSession
         [SketchKind.Loose] = _treeCounts.Item1, [SketchKind.Guides] = _treeCounts.Item2, [SketchKind.Dimensions] = _treeCounts.Item3, [SketchKind.Notes] = _treeCounts.Item4,
     };
 
-    /// <summary>The storeys of the document opened (see <see cref="SketchDocument.Levels"/>), each shown or not.</summary>
-    private IReadOnlyList<SketchLevel> _levels = [];
-    private readonly HashSet<SketchLevel> _levelsOff = new(ReferenceEqualityComparer.Instance);
+    /// <summary>The storeys of the document opened (see <see cref="SketchStoreys.Of"/>), and the parts of them (a
+    /// storey's height of one model) switched off.</summary>
+    private IReadOnlyList<SketchStorey> _storeys = [];
+    private readonly HashSet<(SketchStorey, string)> _partsOff = new();
 
-    /// <summary>The bodies on the storeys switched off (not drawn, as the bodies hidden in the tree).</summary>
-    private readonly HashSet<BrepBody> _levelHidden = new(ReferenceEqualityComparer.Instance);
+    /// <summary>How far under its level a storey's slice begins (metres): its floor, under the level, goes with it, so
+    /// with the storeys above it off one looks into it, not at the floor over it.</summary>
+    private const double SliceBelow = 0.5;
 
-    /// <summary>The storeys of the document opened, each model's from the bottom up (for the list under the tree).</summary>
-    public IReadOnlyList<SketchLevel> Levels => _levels;
+    /// <summary>The height ranges cut away (millimetres, low to high), each for the models in its mask (bit n: the
+    /// model numbered n, see <see cref="ModelOf"/>): a storey switched off, wholly or for some models, cut out like a
+    /// slice of the building, whatever stands in it. The view leaves out what lies in them.</summary>
+    public IReadOnlyList<(float Low, float High, uint Mask)> Cuts { get; private set; } = [];
 
-    /// <summary>Whether a storey's box in the list is ticked.</summary>
-    public bool IsLevelShown(SketchLevel level) => !_levelsOff.Contains(level);
+    /// <summary>The cuts changed (the view draws again; nothing has to be made anew).</summary>
+    public event Action? CutsChanged;
+
+    /// <summary>The storeys of the document opened, from the bottom up (for the list under the tree).</summary>
+    public IReadOnlyList<SketchStorey> Storeys => _storeys;
+
+    /// <summary>Whether a storey is shown: wholly (true), not at all (false) or in part (null); or, with
+    /// <paramref name="model"/>, that model's part of it.</summary>
+    public bool? IsStoreyShown(SketchStorey storey, string? model = null)
+    {
+        if (model != null) return !_partsOff.Contains((storey, model));
+        int off = storey.Parts.Count(p => _partsOff.Contains((storey, p.Model)));
+        return off == 0 ? true : off == storey.Parts.Count ? false : null;
+    }
 
     private void SetLevels(IReadOnlyList<SketchLevel> levels)
     {
-        _levels = levels; _levelsOff.Clear(); _levelHidden.Clear();
+        _storeys = SketchStoreys.Of(levels); _partsOff.Clear();
+        UpdateCuts();
         _window.LevelsChanged();
     }
 
-    /// <summary>A storey's box in the list: its bodies shown or hidden (besides what the tree hides).</summary>
-    public void SetLevelShown(SketchLevel level, bool shown)
+    /// <summary>A storey's box in the list (<paramref name="model"/> null: all of it; else that model's part of it):
+    /// its slice of the building shown or cut away.</summary>
+    public void SetStoreyShown(SketchStorey storey, string? model, bool shown)
     {
-        if (shown) _levelsOff.Remove(level); else _levelsOff.Add(level);
-        _levelHidden.Clear();
-        foreach (var off in _levelsOff) _levelHidden.UnionWith(off.Bodies);
-        Render();
+        foreach (var part in storey.Parts.Where(p => model == null || p.Model == model))
+            if (shown) _partsOff.Remove((storey, part.Model)); else _partsOff.Add((storey, part.Model));
+        UpdateCuts();
+        UpdateHighlight();
         _window.LevelsChanged();
-        StatusText.Text = T($"🏢 {level.Name} ({level.Model}) {(shown ? "weer zichtbaar" : "verborgen")}.", $"🏢 {level.Name} ({level.Model}) {(shown ? "shown again" : "hidden")}.");
-        Log($"level {level.Model} / {level.Name}: {(shown ? "shown" : "hidden")}");
+        string what = T($"verdieping {storey.Number}", $"level {storey.Number}") + (model != null ? $" ({model})" : "");
+        StatusText.Text = T($"🏢 {what} {(shown ? "weer zichtbaar" : "weggesneden")}.", $"🏢 {what} {(shown ? "shown again" : "cut away")}.");
+        Log($"storey {storey.Number}{(model != null ? " / " + model : "")}: {(shown ? "shown" : "cut away")}");
     }
 
-    /// <summary>Whether a body is drawn: not hidden in the tree, nor on a storey switched off.</summary>
-    private bool Drawn(BrepBody body) => !_hidden.Contains(body) && !_levelHidden.Contains(body);
+    /// <summary>The cuts anew from the storeys switched off: each storey from <see cref="SliceBelow"/> under its height
+    /// to as far under the next one's (the lowest from as deep as anything goes, the highest as high).</summary>
+    private void UpdateCuts()
+    {
+        var cuts = new List<(float, float, uint)>();
+        var order = _storeys.OrderBy(st => st.Number).ToList();
+        for (int i = 0; i < order.Count; i++)
+        {
+            uint mask = 0;
+            foreach (var part in order[i].Parts)
+                if (_partsOff.Contains((order[i], part.Model)) && ModelNumber(part.Model) is { } n and < 31) mask |= 1u << n;
+            if (mask == 0) continue;
+            float low = i == 0 ? float.MinValue : (float)((order[i].Elevation - SliceBelow) * Display);
+            float high = i == order.Count - 1 ? float.MaxValue : (float)((order[i + 1].Elevation - SliceBelow) * Display);
+            cuts.Add((low, high, mask));
+        }
+        Cuts = cuts;
+        CutsChanged?.Invoke();
+    }
+
+    /// <summary>Whether a point of a body (millimetres) is cut away.</summary>
+    private bool CutAway(int body, Point3D at)
+    {
+        if (Cuts.Count == 0 || _doc == null) return false;
+        int n = ModelOf(_doc, body);
+        if (n is < 0 or >= 31) return false;
+        foreach (var (low, high, mask) in Cuts)
+            if ((mask >> n & 1) != 0 && at.Z >= low && at.Z < high) return true;
+        return false;
+    }
+
+    /// <summary>The number of a model (a top group of the document: a file a project was read from), by its place
+    /// among the top groups; -1: a body in none.</summary>
+    private int ModelOf(SketchDocument doc, int body)
+    {
+        for (int? g = doc.GroupOf(body), steps = 0; g is { } id && steps < 64; steps++)
+        {
+            var group = doc.Group(id);
+            if (group == null) return -1;
+            if (group.Parent == null) return TopGroups(doc).IndexOf(id);
+            g = group.Parent;
+        }
+        return -1;
+    }
+
+    private int? ModelNumber(string model) => _doc is { } doc && TopGroups(doc).FindIndex(id => doc.GroupName(id) == model) is >= 0 and var n ? n : null;
+
+    private (SketchDocument? Doc, List<int> Ids) _topGroups;
+    private List<int> TopGroups(SketchDocument doc)
+    {
+        if (!ReferenceEquals(_topGroups.Doc, doc)) _topGroups = (doc, doc.Groups.Where(g => g.Parent == null).Select(g => g.Id).ToList());
+        return _topGroups.Ids;
+    }
+
+    /// <summary>Whether a body is drawn: not hidden in the tree.</summary>
+    private bool Drawn(BrepBody body) => !_hidden.Contains(body);
 
     /// <summary>Bodies' boxes in the tree (one body's, or a group's all at once): shown or hidden, the view drawn
     /// again once.</summary>
@@ -2610,7 +2688,15 @@ public sealed partial class EditorSession
         (T("rood", "red"), 0xFFE11D48), (T("oranje", "orange"), 0xFFF97316), (T("geel", "yellow"), 0xFFFACC15), (T("lichtgroen", "light green"), 0xFF84CC16), (T("groen", "green"), 0xFF16A34A),
         (T("turkoois", "turquoise"), 0xFF14B8A6), (T("lichtblauw", "light blue"), 0xFF38BDF8), (T("blauw", "blue"), 0xFF2563EB), (T("paars", "purple"), 0xFF7C3AED), (T("roze", "pink"), 0xFFEC4899),
         (T("bruin", "brown"), 0xFF92400E), (T("hout", "wood"), 0xFFC8A27A),
+        // (see-through: a third opaque, in the blue-grey of Revit's glass)
+        (T("glas", "glass"), 0x5594B0CD),
     ];
+
+    /// <summary>A colour's name: the palette's, or else (one taken up from a face, as a Revit material's) its value,
+    /// see-through or not.</summary>
+    public static string ColorName(uint? color) =>
+        Palette.FirstOrDefault(p => p.Color == color).Name is { } name ? name
+            : T("eigen kleur", "own colour") + $" #{color & 0xFFFFFF:X6}" + (color >> 24 < 255 ? T(", doorzichtig", ", see-through") : "");
 
     /// <summary>The colour the bucket holds (null: none, taking paint off).</summary>
     private uint? _paint = 0xFFE11D48;
@@ -2626,7 +2712,7 @@ public sealed partial class EditorSession
     {
         _paint = color;
         PaintChanged?.Invoke();
-        PaintName.Text = Palette.First(p => p.Color == color).Name;
+        PaintName.Text = ColorName(color);
         if (EraserMode || !PaintMode) return;
         StatusText.Text = T($"🎨 Verf: {PaintName.Text}. Klik een vlak · Ctrl: het hele lichaam · Shift: alle vlakken in dezelfde kleur · Alt: kleur overnemen.", $"🎨 Paint: {PaintName.Text}. Click a face · Ctrl: the whole body · Shift: all faces of the same colour · Alt: pick up a colour.");
     }
@@ -5869,9 +5955,10 @@ public sealed partial class EditorSession
                 case "pickgroup": PickGroup(int.Parse(arg)); break;
                 case "leveloff":
                 {
-                    // leveloff:i,j,… — those storeys of the list (from the bottom, as Levels gives them) switched off
-                    foreach (var i in arg.Split(',')) SetLevelShown(_levels[int.Parse(i)], false);
-                    report.AppendLine("  levels: " + string.Join(", ", _levels.Select((l, i) => $"{i} {l.Name} {l.Elevation:0.00}{(IsLevelShown(l) ? "" : " off")}")));
+                    // leveloff:n,m,… — those storeys (by number: 0 the ground floor) switched off
+                    foreach (var n in arg.Split(',')) SetStoreyShown(_storeys.Single(st => st.Number == int.Parse(n)), null, false);
+                    report.AppendLine("  storeys: " + string.Join(", ", _storeys.Select(st => $"{st.Number} {st.Elevation:0.00} [{string.Join("/", st.Levels)}]{(IsStoreyShown(st) == false ? " off" : "")}")));
+                    report.AppendLine("  cuts: " + string.Join(", ", Cuts.Select(c => $"{c.Low:0}..{c.High:0} mm, models {Convert.ToString(c.Mask, 2)}")));
                     break;
                 }
                 case "spin":

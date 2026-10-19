@@ -1785,6 +1785,28 @@ public class PaintTests
     }
 
     [Fact]
+    public void Glass_stays_see_through_in_the_file()
+    {
+        // (the bucket's glass: a see-through colour, written as .NET writes one, "A, R, G, B")
+        uint glass = PushPullMe.Editor.Session.EditorSession.Palette.Single(p => p.Name is "glas" or "glass").Color!.Value;
+        Assert.True(glass >> 24 < 255);
+        var doc = SketchDocument.FromBodies([BrepShapes.FromPolyhedron(Polyhedron.Box(0, 0, 0, 10 * Mm, 10 * Mm, 10 * Mm))]);
+        doc = doc.Paint(Enumerable.Range(0, doc.Bodies[0].Faces.Count).Select(f => new FaceRef(0, f)), glass);
+        string path = Path.Combine(Path.GetTempPath(), $"ppm_{Guid.NewGuid():N}.rsdocx");
+        try
+        {
+            doc.ToRsDocx().Save(path);
+            // (a copy to open in DesignSpark: a cube of glass)
+            string outDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../output"));
+            Directory.CreateDirectory(outDir);
+            File.Copy(path, Path.Combine(outDir, "glas_test.rsdocx"), overwrite: true);
+            var back = SketchDocument.FromRsDocx(path);
+            for (int f = 0; f < doc.Bodies[0].Faces.Count; f++) Assert.Equal(glass, back.ColorOf(new FaceRef(0, f)));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void A_painted_face_keeps_its_colour_through_push_pull_drawing_moving_and_erasing()
     {
         var doc = Cube();

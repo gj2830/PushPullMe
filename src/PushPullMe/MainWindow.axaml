@@ -4,14 +4,14 @@
         x:Class="PushPullMe.MainWindow"
         Title="PushPullMe" Width="1320" Height="860" Background="{StaticResource Page}"
         Icon="/Assets/pushpullme.png" FontSize="12" DragDrop.AllowDrop="True">
-  <Grid Margin="16" RowDefinitions="Auto,*,Auto" ColumnDefinitions="Auto,*,Auto">
+  <Grid Margin="16,8,16,16" RowDefinitions="Auto,*,Auto" ColumnDefinitions="Auto,*,Auto">
 
     <!-- ============================== top bar: name and file buttons -->
-    <DockPanel Grid.ColumnSpan="3" Margin="0,0,0,12" LastChildFill="False">
+    <DockPanel Grid.ColumnSpan="3" Margin="0,0,0,8" LastChildFill="False">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-        <Image Source="/Assets/pushpullme.png" Width="34" Height="34" Margin="0,0,10,0"/>
-        <TextBlock Text="PushPullMe" FontSize="26" FontWeight="Black" Foreground="{StaticResource AccentGradient}"/>
-        <TextBlock x:Name="FileText" FontSize="14" Foreground="{StaticResource Muted}" VerticalAlignment="Bottom" Margin="14,0,0,4"/>
+        <Image Source="/Assets/pushpullme.png" Width="28" Height="28" Margin="0,0,8,0"/>
+        <TextBlock Text="PushPullMe" FontSize="22" FontWeight="Black" Foreground="{StaticResource AccentGradient}" VerticalAlignment="Center"/>
+        <TextBlock x:Name="FileText" FontSize="14" Foreground="{StaticResource Muted}" VerticalAlignment="Bottom" Margin="12,0,0,3"/>
       </StackPanel>
       <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
         <Button x:Name="LanguageButton" Classes="pill" Content="🌐  NL" ToolTip.Tip="Taal / language: Nederlands · English"/>

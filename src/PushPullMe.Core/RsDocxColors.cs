@@ -119,15 +119,21 @@ public static class RsDocxColors
 
     private static XElement? Child(XElement e, string name) => e.Elements().FirstOrDefault(x => x.Name.LocalName == name);
 
-    /// <summary>"R, G, B" (0..255) as ARGB, opaque.</summary>
+    /// <summary>"R, G, B" (0..255) as ARGB, opaque; "A, R, G, B" (as .NET writes a see-through colour) with its alpha.</summary>
     private static uint? Parse(string s)
     {
         var p = s.Split(',', StringSplitOptions.TrimEntries);
-        if (p.Length < 3 || !byte.TryParse(p[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out byte r)
-            || !byte.TryParse(p[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out byte g)
-            || !byte.TryParse(p[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out byte b)) return null;
-        return 0xFF000000u | ((uint)r << 16) | ((uint)g << 8) | b;
+        if (p.Length is not (3 or 4)) return null;
+        var n = new byte[p.Length];
+        for (int i = 0; i < p.Length; i++)
+            if (!byte.TryParse(p[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out n[i])) return null;
+        uint a = p.Length == 4 ? n[0] : 0xFFu;
+        int o = p.Length - 3;
+        return a << 24 | ((uint)n[o] << 16) | ((uint)n[o + 1] << 8) | n[o + 2];
     }
 
-    private static string Format(uint c) => string.Create(CultureInfo.InvariantCulture, $"{(c >> 16) & 0xFF}, {(c >> 8) & 0xFF}, {c & 0xFF}");
+    /// <summary>A colour as DesignSpark (.NET) writes one: "R, G, B", or "A, R, G, B" when see-through.</summary>
+    private static string Format(uint c) => (c >> 24) < 255
+        ? string.Create(CultureInfo.InvariantCulture, $"{c >> 24}, {(c >> 16) & 0xFF}, {(c >> 8) & 0xFF}, {c & 0xFF}")
+        : string.Create(CultureInfo.InvariantCulture, $"{(c >> 16) & 0xFF}, {(c >> 8) & 0xFF}, {c & 0xFF}");
 }
