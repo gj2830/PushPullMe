@@ -1,3 +1,4 @@
+using RsDocx.Core;
 using RsDocx.Core.Brep;
 using RsDocx.Core.Stl;
 
@@ -134,6 +135,76 @@ public sealed partial class SketchDocument
         }
         return true;
     }
+
+    /// <summary>
+    /// The places of the instances of each component relative to one of them (<see cref="Placement"/>s), for the
+    /// components a file can keep as one part placed more than once: more than one instance, all differing only by a turn
+    /// and a move (a file cannot place a part mirrored or larger). By group id.
+    /// </summary>
+    internal Dictionary<int, Placement> SharedPlaces()
+    {
+        var places = new Dictionary<int, Placement>();
+        foreach (var c in Groups.Where(g => g.Component != null).GroupBy(g => g.Component!.Value))
+        {
+            var back = (c.First().Place ?? Placement.Identity).Inverse();
+            var rel = c.Select(g => (g.Id, P: back.Then(g.Place ?? Placement.Identity))).ToList();
+            if (rel.Count > 1 && rel.All(x => x.P.Rigid))
+                foreach (var (id, p) in rel) places[id] = p;
+        }
+        return places;
+    }
+
+    /// <summary>
+    /// The model as DesignSpark gets it (see <see cref="RsDocxComposer.Compose(IReadOnlyList{BrepBody}, RsDocx.Core.Package.RsDocxPackage?, IReadOnlyList{string?}?, IReadOnlyList{RsDocxPart}?)"/>):
+    /// every group a part (a DesignSpark component) used once, where it is; a component (see <see cref="SharedPlaces"/>)
+    /// one part with the bodies of the instance met first (its own coordinates the world's there), used at every instance;
+    /// the bodies of the other instances not written. The bodies with their names and colours, in the parts' order; no
+    /// parts without groups.
+    /// </summary>
+    internal (List<BrepBody> Bodies, List<string?> Names, List<IReadOnlyDictionary<int, uint>> Colors, List<RsDocxPart>? Parts) RsDocxParts()
+    {
+        var ownNames = OwnNames();
+        IReadOnlyDictionary<int, uint> ColorOfBody(int b) => b < Colors.Count ? Colors[b] : new Dictionary<int, uint>();
+        if (Groups.Count == 0) return (Bodies.ToList(), ownNames, Enumerable.Range(0, Bodies.Count).Select(ColorOfBody).ToList(), null);
+        var shared = SharedPlaces();
+        var bodies = new List<BrepBody>(); var names = new List<string?>(); var colors = new List<IReadOnlyDictionary<int, uint>>();
+        var parts = new List<(string? Name, List<int> Bodies, List<RsDocxUse> Uses)> { (null, [], []) };
+        var partOf = new Dictionary<int, (int Part, Placement At)>();
+        int NewPart(string name) { parts.Add((name, [], [])); return parts.Count - 1; }
+        void Fill(int part, int? group)
+        {
+            for (int b = 0; b < Bodies.Count; b++)
+                if (GroupOf(b) == group)
+                {
+                    parts[part].Bodies.Add(bodies.Count);
+                    bodies.Add(Bodies[b]); names.Add(ownNames[b]); colors.Add(ColorOfBody(b));
+                }
+            foreach (var g in GroupsIn(group))
+                if (g.Component is { } c && shared.TryGetValue(g.Id, out var at))
+                {
+                    if (!partOf.TryGetValue(c, out var made))
+                    {
+                        partOf[c] = made = (NewPart(GroupName(g.Id)), at);
+                        Fill(made.Part, g.Id);
+                    }
+                    // (the part's coordinates are the world's at the instance met first)
+                    parts[part].Uses.Add(new RsDocxUse(made.Part, Matrix(made.At.Inverse().Then(at))));
+                }
+                else
+                {
+                    int p = NewPart(GroupName(g.Id));
+                    Fill(p, g.Id);
+                    parts[part].Uses.Add(new RsDocxUse(p));
+                }
+        }
+        Fill(0, null);
+        return (bodies, names, colors, parts.Select(p => new RsDocxPart(p.Name, p.Bodies, p.Uses)).ToList());
+    }
+
+    /// <summary>A placement as a 4×4 matrix by rows (the move in the last column), as DesignSpark keeps one.</summary>
+    private static double[] Matrix(Placement p) =>
+        // (rounded to a nanometre: a quarter turn gives 6e-17 for 0)
+        new double[] { p.X.X, p.Y.X, p.Z.X, p.O.X, p.X.Y, p.Y.Y, p.Z.Y, p.O.Y, p.X.Z, p.Y.Z, p.Z.Z, p.O.Z, 0, 0, 0, 1 }.Select(x => Math.Round(x, 12) + 0.0).ToArray();
 
     /// <summary>The triangles of curved faces put where <paramref name="m"/> says (turned round after a mirror, so they
     /// still face outward).</summary>

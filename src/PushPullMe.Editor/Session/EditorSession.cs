@@ -273,9 +273,9 @@ public sealed partial class EditorSession
                 Log($"saved {path} (colours left out)");
                 return;
             }
-            if (_doc.Groups.Count > 0 && !IsStep(path))
+            if (_doc.Groups.Count > 0 && path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase))
             {
-                ShowToast(T("💾 Opgeslagen, zonder groepen", "💾 Saved, without groups"), Path.GetFileName(path) + T(": groepen worden hierin (nog) niet bewaard. Sla op als STEP om ze te houden.", ": groups are not kept in it (yet). Save as STEP to keep them."));
+                ShowToast(T("💾 Opgeslagen, zonder groepen", "💾 Saved, without groups"), Path.GetFileName(path) + T(": een STL kan geen groepen of componenten bevatten. Sla op als STEP of .rsdocx om ze te houden.", ": an STL cannot hold groups or components. Save as STEP or .rsdocx to keep them."));
                 Log($"saved {path} (groups left out)");
                 return;
             }

@@ -115,7 +115,7 @@ public sealed partial class SketchDocument
 
     /// <summary>Whether a group name is only the standard one ("Groep 3", "Group"): no name of its own.</summary>
     public static bool IsStandardGroupName(string? name) => string.IsNullOrWhiteSpace(name)
-        || System.Text.RegularExpressions.Regex.IsMatch(name.Trim(), @"^(groep|group|component)( \d+)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        || System.Text.RegularExpressions.Regex.IsMatch(name.Trim(), @"^(groep|group|component)( ?\d+)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     /// <summary>A group given another name (empty, or the standard "Groep n": none of its own any more); a component
     /// instance with all the others of its component.</summary>

@@ -158,6 +158,82 @@ public class ComponentTests
     }
 
     [Fact]
+    public void A_DesignSpark_pattern_of_a_component_opens_as_linked_instances()
+    {
+        // blokken_gelinkt.rsdocx (made in DesignSpark): a pattern ("Patroon") of a block component ("Component1"), the
+        // second 27.41 mm along -y
+        string file = TestFiles.Converter("blokken_gelinkt.rsdocx");
+        if (!File.Exists(file)) return; // (the user's own file: only where it is, not in the repository)
+        var d = SketchDocument.FromRsDocx(file);
+        Assert.Equal(2, d.Bodies.Count);
+        var pattern = d.Groups.Single(g => g.Parent == null);
+        Assert.Equal("Patroon", d.GroupName(pattern.Id));
+        Assert.Null(pattern.Component);
+        var blocks = d.Groups.Where(g => g.Parent == pattern.Id).ToList();
+        Assert.Equal(2, blocks.Count);
+        Assert.NotNull(blocks[0].Component);
+        Assert.Equal(blocks[0].Component, blocks[1].Component);
+        Near(Low(d.Bodies[d.Members(blocks[0].Id).Single()]) + new Vec3(0, -27.41 * Mm, 0), Low(d.Bodies[d.Members(blocks[1].Id).Single()]));
+        // linked: the first pulled up 5 mm, the second along
+        int first = d.Members(blocks[0].Id).Single();
+        double h = High(d.Bodies[first]).Z;
+        var (pulled, _) = d.PushPull(Side(d, first, new Vec3(0, 0, 1)), 5 * Mm);
+        var after = Commit(d, pulled, blocks[0].Id);
+        Assert.Equal(h + 5 * Mm, High(after.Bodies[after.Members(blocks[1].Id).Single()]).Z, 12);
+    }
+
+    [Fact]
+    public void Components_go_through_rsdocx_as_DesignSpark_components()
+    {
+        // as in the STEP test: a table with two legs (components), the table copied turned, a block scaled 2× beside it
+        var (d, leg) = Blocks(3).MakeComponent([GroupUnit.OfBody(0)], "Poot");
+        var (d2, leg2) = d.TransformGroup(leg, (x, b, cp) => x.MoveBody(b, new Vec3(0, 20 * Mm, 0), cp), copy: true, Placement.Move(new Vec3(0, 20 * Mm, 0)));
+        var (t, table) = d2.MakeComponent([GroupUnit.OfGroup(leg), GroupUnit.OfGroup(leg2), GroupUnit.OfBody(1)], "Tafel");
+        var turn = Placement.Turn(new Vec3(0, 0, 0), new Vec3(0, 0, 1), Math.PI / 2).Then(Placement.Move(new Vec3(200 * Mm, 0, 0)));
+        var (two, _) = t.TransformGroup(table, (x, b, cp) =>
+        {
+            var (r, rb) = x.RotateBody(b, new Vec3(0, 0, 0), new Vec3(0, 0, 1), Math.PI / 2, cp);
+            return r.MoveBody(rb, new Vec3(200 * Mm, 0, 0), false);
+        }, copy: true, turn);
+        var (big, blk) = two.MakeComponent([GroupUnit.OfBody(2)], "Blok");
+        var (scaled, _) = big.TransformGroup(blk, (x, b, cp) => x.ScaleBody(b, new Vec3(0, 0, 0), 2, null, cp), copy: true, Placement.Scaled(new Vec3(0, 0, 0), 2));
+        var painted = SketchDocument.CarryMeta(scaled, scaled.Paint([new FaceRef(scaled.Members(leg)[0], 1)], 0xFF00FF00)).SyncChanged(scaled);
+        string path = Path.Combine(Path.GetTempPath(), $"ppm_componenten_{Guid.NewGuid():N}.rsdocx");
+        try
+        {
+            var pkg = painted.ToRsDocx();
+            pkg.Save(path);
+            // the leg and the table each one part, the blocks each their own (one larger): 1 + 4 parts with bodies
+            var doc = pkg.GetXml("SpaceClaim/document.xml");
+            Assert.Equal(1 + 2 + 2, doc.Descendants().Count(e => e.Name.LocalName == "PartDef"));
+            Assert.Equal(2 + 2 + 2, doc.Descendants().Count(e => e.Name.LocalName == "ComponentDef"));
+            Assert.Equal(4, doc.Descendants().Count(e => e.Name.LocalName == "NominalBodyDef"));
+            var back = SketchDocument.FromRsDocx(path);
+            Assert.Equal(painted.Bodies.Count, back.Bodies.Count);
+            Assert.Equal(painted.Volume(), back.Volume(), 12);
+            var legs = back.Groups.Where(g => g.Name == "Poot").ToList();
+            Assert.Equal(4, legs.Count);
+            Assert.Single(legs.Select(g => g.Component).Distinct());
+            Assert.NotNull(legs[0].Component);
+            Assert.Equal(2, back.Groups.Count(g => g.Name == "Tafel" && g.Component != null));
+            Assert.All(legs, l => Assert.Equal(0xFF00FF00, back.ColorOf(new FaceRef(back.Members(l.Id).Single(), 1))));
+            // linked after: a leg pulled, all four along
+            int one = legs[0].Id;
+            var (pulled, _) = back.PushPull(Side(back, back.Members(one).Single(), new Vec3(0, 0, 1)), 5 * Mm);
+            var after = Commit(back, pulled, one);
+            Assert.All(legs, l => Assert.Equal(15 * Mm, High(after.Bodies[after.Members(l.Id).Single()]).Z, 12));
+            // and DesignSpark's own file through it again (where it is: see above)
+            if (!File.Exists(TestFiles.Converter("blokken_gelinkt.rsdocx"))) return;
+            var ds = SketchDocument.FromRsDocx(TestFiles.Converter("blokken_gelinkt.rsdocx"));
+            ds.ToRsDocx().Save(path);
+            var again = SketchDocument.FromRsDocx(path);
+            Assert.Equal(ds.Volume(), again.Volume(), 12);
+            Assert.Equal(2, again.Groups.Count(g => g.Component != null));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void Components_go_through_STEP_and_still_follow_each_other_after()
     {
         // a table (component) with a leg (component, twice) and a top, the table copied turned; a block scaled 2× as a

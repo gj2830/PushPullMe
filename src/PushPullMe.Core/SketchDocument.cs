@@ -126,10 +126,16 @@ public sealed partial class SketchDocument
     /// (they are shown here all the same).</summary>
     public static SketchDocument FromRsDocx(string path, out int hidden)
     {
-        var bodies = RsDocxReader.Read(path, out hidden, out var colors, out var names);
+        var bodies = RsDocxReader.Read(path, out hidden, out var colors, out var names, out var groups, out var bodyGroups);
         // (a flat face's outer loop first, as the rest expects; a file need not have it so: boltest.rsdocx)
         var doc = FromBodies(bodies.Select(b => new BrepBody { Vertices = b.Vertices, Edges = b.Edges, Faces = Core.PushPull.OrderLoops(b), Sheet = b.Sheet }).ToList());
-        return new SketchDocument { Bodies = doc.Bodies, Curved = doc.Curved, Colors = colors, Lines = RsDocxSketch.Read(RsDocxPackage.Open(path)), Names = names };
+        return new SketchDocument
+        {
+            Bodies = doc.Bodies, Curved = doc.Curved, Colors = colors, Lines = RsDocxSketch.Read(RsDocxPackage.Open(path)), Names = names,
+            // (DesignSpark's components as groups numbered from 1; a part used more than once: a component)
+            Groups = groups.Select((g, k) => new SketchGroup(k + 1, IsStandardGroupName(g.Name) ? null : g.Name, g.Parent + 1, g.Component + 1, g.Place)).ToList(),
+            BodyGroups = groups.Count > 0 ? bodyGroups.Select(g => g + 1).ToList() : [],
+        };
     }
 
     /// <summary>Bodies made here (planes only, or with curved faces shown by their own triangles).</summary>
@@ -1196,14 +1202,7 @@ public sealed partial class SketchDocument
         var index = order.Select((g, k) => (g.Id, k)).ToDictionary(x => x.Id, x => x.k);
         // a component's instances one part placed more than once, where each stands from the first; only when they differ
         // by a turn and a move (a file cannot place a part mirrored or larger: then each written as a group of its own)
-        var places = new Dictionary<int, StepPlace>();
-        foreach (var c in Groups.Where(g => g.Component != null).GroupBy(g => g.Component!.Value))
-        {
-            var back = (c.First().Place ?? Placement.Identity).Inverse();
-            var rel = c.Select(g => (g.Id, P: back.Then(g.Place ?? Placement.Identity))).ToList();
-            if (rel.Count > 1 && rel.All(x => x.P.Rigid))
-                foreach (var (id, p) in rel) places[id] = new StepPlace(p.O, p.X, p.Y, p.Z);
-        }
+        var places = SharedPlaces().ToDictionary(kv => kv.Key, kv => new StepPlace(kv.Value.O, kv.Value.X, kv.Value.Y, kv.Value.Z));
         return StepWriter.Write(new StepModel(
             Bodies.Select((b, i) => new StepBody(b, BodyName(i), i < Colors.Count && Colors[i].Count > 0 ? Colors[i] : null, GroupOf(i) is { } g ? index[g] : null)).ToList(),
             Lines.Where(l => !l.Construction).Select(l => new StepCurve(l.Start, l.End, l.Circle)).ToList(),
@@ -1255,9 +1254,10 @@ public sealed partial class SketchDocument
 
     public RsDocxPackage ToRsDocx()
     {
-        var pkg = RsDocxComposer.Compose(Bodies, names: OwnNames());
+        var (bodies, names, colors, parts) = RsDocxParts();
+        var pkg = RsDocxComposer.Compose(bodies, null, names, parts);
         // the colours painted here, as DesignSpark keeps them (see RsDocxColors)
-        RsDocxColors.Write(pkg, Colors);
+        RsDocxColors.Write(pkg, colors);
         // the loose lines, as DesignSpark keeps them (see RsDocxSketch)
         RsDocxSketch.Write(pkg, Lines);
         return pkg;

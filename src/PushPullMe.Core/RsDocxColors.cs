@@ -50,27 +50,37 @@ public static class RsDocxColors
 
     /// <summary>
     /// The colours written into a package made from these bodies (its geometry carries the monikers): a body whose every
-    /// face has the same colour gets that as its body colour; otherwise every painted face gets a FaceColorDef.
+    /// face has the same colour gets that as its body colour; otherwise every painted face gets a FaceColorDef, in the
+    /// part the body is in. The bodies in the order of their monikers, which the composer hands out in the bodies' order
+    /// (over all geometry parts: one per component).
     /// </summary>
     public static void Write(RsDocxPackage pkg, IReadOnlyList<IReadOnlyDictionary<int, uint>> colors)
     {
         if (colors.All(c => c.Count == 0) || !pkg.Contains(DocumentPart)) return;
-        var xt = XtReader.Read(pkg.GetPart(RsDocxComposer.GeometryPart));
-        var map = xt.ByIndex();
-        var bodyNodes = xt.Nodes.Where(n => n.NodeType == XtNodeTypes.Body).ToList();
+        var geometry = pkg.Relationships().Where(r => r.Type.Contains("/partBodyGeometry#", StringComparison.Ordinal)).Select(r => r.Target.TrimStart('/'))
+            .Append(RsDocxComposer.GeometryPart).Where(pkg.Contains).Distinct();
+        var found = new List<(Dictionary<int, XtNode> Map, XtNode Body, string? Name)>();
+        foreach (var at in geometry)
+        {
+            var xt = XtReader.Read(pkg.GetPart(at));
+            var m = xt.ByIndex();
+            found.AddRange(xt.Nodes.Where(n => n.NodeType == XtNodeTypes.Body).Select(n => (m, n, XtTopology.NameOf(m, n))));
+        }
+        static int Number(string? moniker) => moniker != null && int.TryParse(moniker.Split(':')[^1], out int n) ? n : int.MaxValue;
+        found = found.OrderBy(x => Number(x.Name)).ToList();
         var doc = pkg.GetXml(DocumentPart);
         var bodyDefs = doc.Descendants().Where(e => e.Name.LocalName == "NominalBodyDef").ToDictionary(e => (string?)e.Attribute("Id") ?? "");
-        var part = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "PartDef");
-        if (part == null) return;
+        var first = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "PartDef");
+        if (first == null) return;
         // new monikers: a number before the colon not used yet (as DesignSpark starts a new one for what it adds)
         int prefix = doc.Descendants().Select(e => (string?)e.Attribute("Id")).Where(id => id != null && id.Contains(':'))
             .Select(id => int.TryParse(id!.Split(':')[0], out int p) ? p : 0).DefaultIfEmpty(0).Max() + 1;
         int next = 1;
-        var ns = part.Name.Namespace;
-        for (int b = 0; b < colors.Count && b < bodyNodes.Count; b++)
+        var ns = first.Name.Namespace;
+        for (int b = 0; b < colors.Count && b < found.Count; b++)
         {
-            var body = bodyNodes[b];
-            string? bodyName = XtTopology.NameOf(map, body);
+            var (map, body, bodyName) = found[b];
+            var part = bodyName != null && bodyDefs.TryGetValue(bodyName, out var owner) && owner.Parent is { } p ? p : first;
             var faceNodes = Faces(map, body);
             var painted = colors[b];
             if (painted.Count == 0) continue;

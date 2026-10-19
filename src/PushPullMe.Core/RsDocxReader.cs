@@ -6,6 +6,11 @@ using RsDocx.Core.Xt;
 
 namespace PushPullMe.Core;
 
+/// <summary>A place a DesignSpark component is used (see <see cref="RsDocxReader.Read(string, out int, out List{Dictionary{int, uint}}, out List{string?}, out List{RsDocxGroup}, out List{int?})"/>):
+/// its name (null: none), the group it is in (an index; null: at the top), the component when its part is used more than
+/// once (an index; null: only here) and then where it stands.</summary>
+public sealed record RsDocxGroup(string? Name, int? Parent, int? Component, Placement? Place);
+
 /// <summary>Why an .rsdocx cannot be opened (shown to the user as it is).</summary>
 public sealed class RsDocxReadException(string message) : Exception(message);
 
@@ -27,36 +32,160 @@ public static class RsDocxReader
 
     /// <summary>As <see cref="Read(string, out int, out List{Dictionary{int, uint}})"/>, with each body's name as DesignSpark
     /// shows it (its caption; null for DesignSpark's own "Vaste vorm" or "Oppervlak").</summary>
-    public static List<BrepBody> Read(string path, out int hidden, out List<Dictionary<int, uint>> colors, out List<string?> bodyNames)
+    public static List<BrepBody> Read(string path, out int hidden, out List<Dictionary<int, uint>> colors, out List<string?> bodyNames) =>
+        Read(path, out hidden, out colors, out bodyNames, out _, out _);
+
+    /// <summary>
+    /// As <see cref="Read(string, out int, out List{Dictionary{int, uint}}, out List{string?})"/>, with DesignSpark's
+    /// components: every place a component (a part of the design, a PartDef) is used (ComponentDef, or a member of a
+    /// pattern) is a group (<paramref name="groups"/>, each before the groups in it; <paramref name="bodyGroups"/>: per
+    /// body its group, null: none), and its bodies are put where it stands. A part used more than once is a component:
+    /// its groups share <see cref="RsDocxGroup.Component"/>, each with its <see cref="RsDocxGroup.Place"/>.
+    /// </summary>
+    public static List<BrepBody> Read(string path, out int hidden, out List<Dictionary<int, uint>> colors, out List<string?> bodyNames,
+        out List<RsDocxGroup> groups, out List<int?> bodyGroups)
     {
         hidden = 0;
         RsDocxPackage pkg;
         try { pkg = RsDocxPackage.Open(path); }
         catch (Exception e) when (e is InvalidDataException or IOException) { throw new RsDocxReadException(Lang.T("Dit is geen leesbaar .rsdocx-bestand: ", "This is not a readable .rsdocx file: ") + e.Message); }
-        if (!pkg.Contains(RsDocxComposer.GeometryPart)) throw new RsDocxReadException(Lang.T("Er staat geen geometrie in dit bestand.", "There is no geometry in this file."));
-        XtFile xt;
-        try { xt = XtReader.Read(pkg.GetPart(RsDocxComposer.GeometryPart)); }
-        catch (XtFormatException e) { throw new RsDocxReadException(Lang.T("De geometrie in dit bestand is niet te lezen: ", "The geometry in this file cannot be read: ") + e.Message); }
-        var hide = new HashSet<string>();
-        if (pkg.Contains("SpaceClaim/document.xml"))
-            try { hide = HiddenIds(pkg.GetXml("SpaceClaim/document.xml")); } catch (System.Xml.XmlException) { }
-        // all bodies are read, also the ones hidden in DesignSpark (only counted, so the user can be told)
-        var all = Bodies(xt, out var names, out var nodes);
-        hidden = names.Count(nm => nm is { } s && s.Split(':') is [_, var id] && hide.Contains(id));
-        var map = xt.ByIndex();
-        var faceNames = nodes.Select(n => (IReadOnlyList<string?>)RsDocxColors.Faces(map, n).Select(f => XtTopology.NameOf(map, f)).ToList()).ToList();
-        colors = RsDocxColors.ForFaces(pkg, names, faceNames);
-        // the names in DesignSpark's structure tree: the captions of the bodies
-        var captions = new Dictionary<string, string>();
-        try
+        System.Xml.Linq.XDocument? doc = null;
+        if (pkg.Contains(RsDocxComposer.DocumentPart))
+            try { doc = pkg.GetXml(RsDocxComposer.DocumentPart); } catch (System.Xml.XmlException) { }
+        var parts = doc != null ? Parts(doc) : new Dictionary<string, List<(string Id, string Source, Placement Trans)>>();
+        string? rootId = doc != null ? RootPart(doc) : null;
+        // the geometry of each part (a relationship from document.xml per part with bodies; a file of ours or an older one:
+        // the one geometry part, the root's)
+        var geometry = new Dictionary<string, string>();
+        foreach (var r in pkg.Relationships())
+            if (r.Type.Contains("/partBodyGeometry#", StringComparison.Ordinal) && r.Type.Split(':')[^1] is { Length: > 0 } id && pkg.Contains(r.Target.TrimStart('/')))
+                geometry[id] = r.Target.TrimStart('/');
+        if (geometry.Count == 0 && pkg.Contains(RsDocxComposer.GeometryPart)) geometry[Num(rootId)] = RsDocxComposer.GeometryPart;
+        if (geometry.Count == 0) throw new RsDocxReadException(Lang.T("Er staat geen geometrie in dit bestand.", "There is no geometry in this file."));
+        var shapes = new List<BrepBody>(); var names = new List<string?>(); var faceNames = new List<IReadOnlyList<string?>>();
+        var ofPart = new Dictionary<string, List<int>>();
+        foreach (var (part, at) in geometry)
         {
-            foreach (var c in pkg.GetXml("SpaceClaim/document.xml").Descendants().Where(e => e.Name.LocalName == "CaptionDef"))
+            XtFile xt;
+            try { xt = XtReader.Read(pkg.GetPart(at)); }
+            catch (XtFormatException e) { throw new RsDocxReadException(Lang.T("De geometrie in dit bestand is niet te lezen: ", "The geometry in this file cannot be read: ") + e.Message); }
+            var some = Bodies(xt, out var nm, out var nodes);
+            var map = xt.ByIndex();
+            ofPart[part] = Enumerable.Range(shapes.Count, some.Count).ToList();
+            shapes.AddRange(some); names.AddRange(nm);
+            faceNames.AddRange(nodes.Select(n => (IReadOnlyList<string?>)RsDocxColors.Faces(map, n).Select(f => XtTopology.NameOf(map, f)).ToList()));
+        }
+        // all bodies are read, also the ones hidden in DesignSpark (only counted, so the user can be told)
+        var hide = new HashSet<string>();
+        if (doc != null) try { hide = HiddenIds(doc); } catch (System.Xml.XmlException) { }
+        hidden = names.Count(nm => nm is { } s && s.Split(':') is [_, var id] && hide.Contains(id));
+        var shapeColors = RsDocxColors.ForFaces(pkg, names, faceNames);
+        // the names in DesignSpark's structure tree: the captions of bodies and parts
+        var captions = new Dictionary<string, string>();
+        if (doc != null)
+            foreach (var c in doc.Descendants().Where(e => e.Name.LocalName == "CaptionDef"))
                 if (c.Elements().FirstOrDefault(e => e.Name.LocalName == "subjectId")?.Value is { } subject && c.Elements().FirstOrDefault(e => e.Name.LocalName == "name")?.Value is { } nm)
                     captions[subject.Trim()] = nm;
+        string? Caption(string? id) => id != null && captions.TryGetValue(id, out var c) ? c : null;
+
+        // how often each part is used, from the root down
+        var uses = new Dictionary<string, int>();
+        void Count(string part, HashSet<string> path)
+        {
+            if (!parts.TryGetValue(part, out var occ) || !path.Add(part)) return;
+            foreach (var o in occ) { uses[o.Source] = uses.GetValueOrDefault(o.Source) + 1; Count(o.Source, path); }
+            path.Remove(part);
         }
-        catch (System.Xml.XmlException) { }
-        bodyNames = names.Select(n => n != null && captions.TryGetValue(n, out var c) && !SketchDocument.IsStandardName(c) ? c : null).ToList();
-        return all;
+        var bodies = new List<BrepBody>(); var outNames = new List<string?>(); var outColors = new List<Dictionary<int, uint>>();
+        var gs = new List<RsDocxGroup>(); var bgs = new List<int?>();
+        var component = new Dictionary<string, int>();
+        void Place(string part, Placement place, int? group, HashSet<string> path)
+        {
+            if (!path.Add(part)) return;
+            foreach (int i in ofPart.GetValueOrDefault(Num(part)) ?? [])
+            {
+                bodies.Add(place == Placement.Identity ? shapes[i] : BrepTransform.Placed(shapes[i], place));
+                outNames.Add(names[i] is { } n && Caption(n) is { } c && !SketchDocument.IsStandardName(c) ? c : null);
+                outColors.Add(shapeColors[i]);
+                bgs.Add(group);
+            }
+            foreach (var o in parts.GetValueOrDefault(part) ?? [])
+            {
+                var p = o.Trans.Then(place);
+                bool shared = uses.GetValueOrDefault(o.Source) > 1;
+                int? c = shared ? component.TryGetValue(o.Source, out int ci) ? ci : component[o.Source] = component.Count : null;
+                gs.Add(new RsDocxGroup(Caption(o.Id) ?? Caption(o.Source), group, c, shared ? p : null));
+                Place(o.Source, p, gs.Count - 1, path);
+            }
+            path.Remove(part);
+        }
+        if (rootId != null && parts.ContainsKey(rootId))
+        {
+            Count(rootId, new HashSet<string>());
+            Place(rootId, Placement.Identity, null, new HashSet<string>());
+        }
+        // (bodies of parts not reached from the root, or no document: where they are)
+        var placedParts = new HashSet<string>(rootId != null && parts.ContainsKey(rootId) ? Reached(parts, rootId).Select(Num) : []);
+        foreach (var (part, list) in ofPart)
+            if (!placedParts.Contains(part))
+                foreach (int i in list)
+                {
+                    bodies.Add(shapes[i]); outNames.Add(names[i] is { } n && Caption(n) is { } c && !SketchDocument.IsStandardName(c) ? c : null);
+                    outColors.Add(shapeColors[i]); bgs.Add(null);
+                }
+        if (bodies.Count == 0) throw new RsDocxReadException(Lang.T("Er staan geen vaste lichamen in dit bestand.", "There are no solid bodies in this file."));
+        colors = outColors; bodyNames = outNames; groups = gs; bodyGroups = bgs;
+        return bodies;
+    }
+
+    /// <summary>A part's number (a moniker's after its colon: "0:7081" and "015f88c6-…:7081" are the same part).</summary>
+    private static string Num(string? id) => id?.Split(':')[^1] ?? "";
+
+    /// <summary>The parts the root uses (itself too), however deep.</summary>
+    private static IEnumerable<string> Reached(Dictionary<string, List<(string Id, string Source, Placement Trans)>> parts, string? root)
+    {
+        var seen = new HashSet<string>();
+        var todo = new Stack<string>();
+        if (root != null) todo.Push(root);
+        while (todo.Count > 0)
+        {
+            var p = todo.Pop();
+            if (!seen.Add(p)) continue;
+            foreach (var o in parts.GetValueOrDefault(p) ?? []) todo.Push(o.Source);
+        }
+        return seen;
+    }
+
+    /// <summary>The design's root part: the subject of the RootCaptionDef, or the first PartDef.</summary>
+    private static string? RootPart(System.Xml.Linq.XDocument doc) =>
+        doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "RootCaptionDef")?.Elements().FirstOrDefault(e => e.Name.LocalName == "subjectId")?.Value.Trim()
+        ?? (string?)doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "PartDef")?.Attribute("Id");
+
+    /// <summary>
+    /// The design's parts (PartDef, by id) with the components they use: per use its id, the part it uses (its source's
+    /// moniker, the number after the colon with the part's own prefix) and where that part stands in this one (trans: a
+    /// 4×4 matrix by rows, the move in the last column).
+    /// </summary>
+    private static Dictionary<string, List<(string Id, string Source, Placement Trans)>> Parts(System.Xml.Linq.XDocument doc)
+    {
+        var result = new Dictionary<string, List<(string, string, Placement)>>();
+        foreach (var part in doc.Descendants().Where(e => e.Name.LocalName == "PartDef"))
+        {
+            if ((string?)part.Attribute("Id") is not { } id) continue;
+            string prefix = id.Split(':')[0];
+            var list = new List<(string, string, Placement)>();
+            foreach (var use in part.Elements().Where(e => e.Name.LocalName is "ComponentDef" or "ComponentPatternMemberDef"))
+            {
+                var src = (string?)use.Elements().FirstOrDefault(e => e.Name.LocalName == "source")?.Attribute("refId");
+                var m = use.Elements().FirstOrDefault(e => e.Name.LocalName == "trans")?.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(x => double.Parse(x, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                if (src == null || m is not { Length: 16 }) continue;
+                var trans = new Placement(new Vec3(m[3], m[7], m[11]), new Vec3(m[0], m[4], m[8]), new Vec3(m[1], m[5], m[9]), new Vec3(m[2], m[6], m[10]));
+                list.Add(((string?)use.Attribute("Id") ?? "", prefix + ":" + src.Split(':')[^1], trans));
+            }
+            result[id] = list;
+        }
+        return result;
     }
 
     /// <summary>

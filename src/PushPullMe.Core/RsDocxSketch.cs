@@ -51,7 +51,8 @@ public static class RsDocxSketch
         if (lines.Count == 0 || !pkg.Contains(DocumentPart)) return;
         var doc = pkg.GetXml(DocumentPart);
         var root = doc.Root!;
-        var part = root.Descendants(Nom + "PartDef").Single();
+        // (the design's own part: the first; components come after it)
+        var part = root.Descendants(Nom + "PartDef").First();
         part.Elements(Sketch + "PartSketchCurveContainerDef").Remove();
         // monikers from the document's counter on
         var next = root.Element(Core + "nextId")!;
