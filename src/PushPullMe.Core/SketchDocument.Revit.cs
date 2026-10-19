@@ -156,12 +156,12 @@ public sealed partial class SketchDocument
         }
         // (per face: its exact surface (null: flat, from its outer ring), whether it faces against it, its rings, the
         // triangles it is shown with when curved, whether it is one of the triangles of a face not read exactly, and
-        // its colour (0xAARRGGBB), its material's)
+        // its colour (0xAARRGGBB), its material's, see-through as it is)
         var faces = new List<(BrepSurface? Surface, bool Reversed, int[][] Loops, List<(Vec3, Vec3, Vec3)>? Shown, bool Facet, uint? Color)>();
         foreach (var f in rb.Faces)
         {
             var tris = f.Triangles.Select(t => (t.A, t.B, t.C)).ToList();
-            uint? color = f.Material is { } made ? 0xFF000000u | made.Rgb : null;
+            uint? color = f.Material is { } made ? Opacity(made.Transparency) << 24 | made.Rgb : null;
             var outward = tris.Aggregate(new Vec3(0, 0, 0), (n, t) => n + (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1));
             double area = tris.Sum(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length);
             bool flat = f.Rings is { Count: > 0 } && f.Surface is null or BrepPlane;
@@ -660,6 +660,10 @@ public sealed partial class SketchDocument
         BrepCurve curve = c.Minor is { } minor ? new BrepEllipse(c.Centre, n, x, rx, minor) : new BrepCircle(c.Centre, n, x, rx);
         return (curve, t => Point(f0 + fs * t, fy));
     }
+
+    /// <summary>How opaque a material that is <paramref name="transparency"/> see-through (0 … 1) is shown (its colour's
+    /// alpha): never less than a quarter, so a pane of glass Revit makes wholly clear is still seen.</summary>
+    private static uint Opacity(double transparency) => (uint)Math.Round(255 * (1 - 0.75 * Math.Clamp(transparency, 0, 1)));
 
     /// <summary>A curved surface's natural normal at a point on it (for a NURBS surface: dS/du × dS/dv, from nearby
     /// parameters).</summary>

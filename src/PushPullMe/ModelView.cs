@@ -377,14 +377,17 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
     {
         var model = _session?.Shown;
         int solid = 0, seeThrough = 0;
-        foreach (var m in model?.Meshes ?? []) if (m.Faded) seeThrough += m.Positions.Length; else solid += m.Positions.Length;
+        // (see-through: faded outside the open group, or of a see-through colour (glass); drawn after the rest)
+        static bool SeeThrough(ShownMesh m) => m.Faded || m.Color is { A: < 255 };
+        foreach (var m in model?.Meshes ?? []) if (SeeThrough(m)) seeThrough += m.Positions.Length; else solid += m.Positions.Length;
         var faces = new float[solid * FaceStride]; var faded = new float[seeThrough * FaceStride];
         int fi = 0, di = 0;
         foreach (var m in model?.Meshes ?? [])
         {
             var c = m.Faded ? V4(EditorSession.FrontColor, 0x38 / 255.0) : V4(m.Color ?? EditorSession.FrontColor);
-            var into = m.Faded ? faded : faces;
-            ref int at = ref (m.Faded ? ref di : ref fi);
+            bool see = SeeThrough(m);
+            var into = see ? faded : faces;
+            ref int at = ref (see ? ref di : ref fi);
             for (int i = 0; i < m.Positions.Length; i++)
             {
                 var (p, n) = (m.Positions[i], m.Normals[i]);
