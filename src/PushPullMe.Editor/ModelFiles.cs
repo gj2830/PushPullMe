@@ -35,9 +35,9 @@ public static class ModelFiles
             int left = report.SkippedSurfaces.Values.Sum();
             int solids = rvt.Bodies.Count(b => !b.Sheet), models = rvt.Groups.Count(g => g.Parent == null);
             return (rvt, (Lang.T("🏢 Revit-model", "🏢 Revit model"),
-                Lang.T($"{rvt.Bodies.Count:N0} lichamen ({solids:N0} dicht) uit {models} {(models == 1 ? "model" : "modellen")}, zoals Revit ze het laatst tekende; gebogen vlakken als kleine platte vlakjes."
+                Lang.T($"{rvt.Bodies.Count:N0} lichamen ({solids:N0} dicht) uit {models} {(models == 1 ? "model" : "modellen")}, zoals Revit ze het laatst tekende, in de kleuren van hun materialen; ronde vlakken exact (cilinders, bollen, omwentelingsvlakken), andere gebogen vlakken als kleine platte vlakjes."
                         + (left > 0 ? $" {left:N0} vlakken van een soort die nog niet gelezen wordt, zijn weggelaten." : ""),
-                    $"{rvt.Bodies.Count:N0} bodies ({solids:N0} closed) from {models} {(models == 1 ? "model" : "models")}, as Revit last drew them; curved faces as small flat faces."
+                    $"{rvt.Bodies.Count:N0} bodies ({solids:N0} closed) from {models} {(models == 1 ? "model" : "models")}, as Revit last drew them, in their materials' colours; round faces exact (cylinders, spheres, surfaces of revolution), other curved faces as small flat faces."
                         + (left > 0 ? $" {left:N0} faces of a kind not read yet were left out." : ""))));
         }
         if (IsRsDocx(path))

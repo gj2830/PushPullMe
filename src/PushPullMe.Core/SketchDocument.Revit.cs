@@ -47,6 +47,7 @@ public sealed partial class SketchDocument
         foreach (var (link, file) in links ?? []) models.Add((Path.GetFileNameWithoutExtension(file), file, link.Placement));
         var bodies = new List<BrepBody>();
         var curved = new List<IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>>();
+        var colors = new List<IReadOnlyDictionary<int, uint>>();
         var names = new List<string?>();
         var bodyGroups = new List<int?>();
         var groups = new List<SketchGroup>();
@@ -65,7 +66,7 @@ public sealed partial class SketchDocument
                 var pieces = e.Bodies.SelectMany(ToBody).ToList();
                 for (int k = 0; k < pieces.Count; k++)
                 {
-                    var (b, shown) = pieces[k];
+                    var (b, shown, painted) = pieces[k];
                     if (place is { } pl)
                     {
                         b = BrepTransform.Placed(b, pl);
@@ -84,6 +85,7 @@ public sealed partial class SketchDocument
                     }
                     bodies.Add(b);
                     curved.Add(shown);
+                    colors.Add(painted);
                     names.Add(pieces.Count == 1 ? $"{e.Class} {e.Id}" : $"{e.Class} {e.Id}.{k + 1}");
                     bodyGroups.Add(g);
                 }
@@ -94,7 +96,7 @@ public sealed partial class SketchDocument
             catch (Exception e) when (e is FormatException or CompoundFileException or IOException) { }
         }
         if (bodies.Count == 0) throw new RevitReadException(Lang.T("Er staan geen lichamen in dit Revit-bestand.", "There are no bodies in this Revit file."));
-        return new SketchDocument { Bodies = bodies, Curved = curved, Names = names, Groups = groups, BodyGroups = bodyGroups };
+        return new SketchDocument { Bodies = bodies, Curved = curved, Colors = colors, Names = names, Groups = groups, BodyGroups = bodyGroups };
     }
 
     /// <summary>
@@ -104,9 +106,10 @@ public sealed partial class SketchDocument
     /// many triangles), any other face its triangles, each a flat face. The outer ring runs counter-clockwise round the
     /// face's outward side (which its triangles give), the holes the other way. Every connected piece (faces sharing
     /// edges) a body of its own: a saved body can be several, and a body here is one shell. Closed (every edge in two
-    /// faces, once each way): a solid; else a face without thickness.
+    /// faces, once each way): a solid; else a face without thickness. Every face the colour of its material (none
+    /// without one).
     /// </summary>
-    private static List<(BrepBody Body, IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>> Curved)> ToBody(RevitBody rb)
+    private static List<(BrepBody Body, IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>> Curved, IReadOnlyDictionary<int, uint> Colors)> ToBody(RevitBody rb)
     {
         var verts = new List<Vec3>();
         var index = new Dictionary<(long, long, long), int>();
@@ -142,11 +145,13 @@ public sealed partial class SketchDocument
             return n;
         }
         // (per face: its exact surface (null: flat, from its outer ring), whether it faces against it, its rings, the
-        // triangles it is shown with when curved, and whether it is one of the triangles of a face not read exactly)
-        var faces = new List<(BrepSurface? Surface, bool Reversed, int[][] Loops, List<(Vec3, Vec3, Vec3)>? Shown, bool Facet)>();
+        // triangles it is shown with when curved, whether it is one of the triangles of a face not read exactly, and
+        // its colour (0xAARRGGBB), its material's)
+        var faces = new List<(BrepSurface? Surface, bool Reversed, int[][] Loops, List<(Vec3, Vec3, Vec3)>? Shown, bool Facet, uint? Color)>();
         foreach (var f in rb.Faces)
         {
             var tris = f.Triangles.Select(t => (t.A, t.B, t.C)).ToList();
+            uint? color = f.Material is { } made ? 0xFF000000u | made.Rgb : null;
             var outward = tris.Aggregate(new Vec3(0, 0, 0), (n, t) => n + (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1));
             double area = tris.Sum(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length);
             bool flat = f.Rings is { Count: > 0 } && f.Surface is null or BrepPlane;
@@ -171,7 +176,7 @@ public sealed partial class SketchDocument
                     var n = Newell(outer).Normalized(); var o = verts[outer[0]];
                     if (loops.SelectMany(l => l).All(v => Math.Abs((verts[v] - o).Dot(n)) <= OnFace))
                     {
-                        faces.Add((null, false, loops.ToArray(), null, false));
+                        faces.Add((null, false, loops.ToArray(), null, false, color));
                         continue;
                     }
                 }
@@ -183,14 +188,14 @@ public sealed partial class SketchDocument
                     var t0 = tris.MaxBy(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length);
                     var c0 = (t0.Item1 + t0.Item2 + t0.Item3) * (1.0 / 3);
                     bool reversed = along(c0).Dot((t0.Item2 - t0.Item1).Cross(t0.Item3 - t0.Item1)) < 0;
-                    faces.Add((surface, reversed, loops.ToArray(), tris, false));
+                    faces.Add((surface, reversed, loops.ToArray(), tris, false, color));
                     continue;
                 }
             }
             foreach (var t in f.Triangles)
             {
                 var tri = Ring([t.A, t.B, t.C]);
-                if (tri.Length == 3) faces.Add((null, false, [tri], null, true));
+                if (tri.Length == 3) faces.Add((null, false, [tri], null, true, color));
             }
         }
         // every edge its curve (see EdgeCurves); one none fits straight (.rsdocx shows the faces along it by their
@@ -212,7 +217,7 @@ public sealed partial class SketchDocument
                 }
         foreach (var u in uses.Values)
             if (u.Count == 2 && u[0].Up != u[1].Up) parent[Root(u[0].Face)] = Root(u[1].Face);
-        var result = new List<(BrepBody, IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>)>();
+        var result = new List<(BrepBody, IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>, IReadOnlyDictionary<int, uint>)>();
         foreach (var piece in Enumerable.Range(0, faces.Count).GroupBy(Root))
         {
             var its = piece.Select(f => faces[f]).ToList();
@@ -226,7 +231,7 @@ public sealed partial class SketchDocument
 
         // one piece as a body: its own vertices, the edges (each from its lower vertex number to its higher), the faces'
         // loops of them
-        (BrepBody, IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>) Piece(List<(BrepSurface? Surface, bool Reversed, int[][] Loops, List<(Vec3, Vec3, Vec3)>? Shown, bool Facet)> its, HashSet<(int, int)> seams)
+        (BrepBody, IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>, IReadOnlyDictionary<int, uint>) Piece(List<(BrepSurface? Surface, bool Reversed, int[][] Loops, List<(Vec3, Vec3, Vec3)>? Shown, bool Facet, uint? Color)> its, HashSet<(int, int)> seams)
         {
             var own = new Dictionary<int, int>();
             var pts = new List<Vec3>();
@@ -249,8 +254,10 @@ public sealed partial class SketchDocument
             }).ToList();
             var brepFaces = new List<BrepFace>();
             var shown = new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>();
-            foreach (var (surface, reversed, globalLoops, tris, _) in its)
+            var colors = new Dictionary<int, uint>();
+            foreach (var (surface, reversed, globalLoops, tris, _, color) in its)
             {
+                if (color is { } c) colors[brepFaces.Count] = c;
                 var loops = globalLoops.Select(l => l.Select(O).ToArray()).ToArray();
                 var coedges = globalLoops.Select(Loop).ToList();
                 BrepSurface sf;
@@ -264,7 +271,7 @@ public sealed partial class SketchDocument
                 brepFaces.Add(new BrepFace(sf, reversed, coedges));
             }
             bool closed = directed.All(kv => kv.Value == 1 && directed.GetValueOrDefault((kv.Key.Item2, kv.Key.Item1)) == 1);
-            return (new BrepBody { Vertices = pts, Edges = edges, Faces = brepFaces, Sheet = !closed }, shown);
+            return (new BrepBody { Vertices = pts, Edges = edges, Faces = brepFaces, Sheet = !closed }, shown, colors);
         }
     }
 
@@ -280,7 +287,7 @@ public sealed partial class SketchDocument
     /// triangle of a face not read exactly, straight only (an arc could bulge across the triangle). An edge nothing
     /// fits (where two pipes meet at a slant: no circle nor ellipse) straight after all.
     /// </summary>
-    private static Dictionary<(int, int), BrepCurve> EdgeCurves(List<(BrepSurface? Surface, bool Reversed, int[][] Loops, List<(Vec3, Vec3, Vec3)>? Shown, bool Facet)> faces,
+    private static Dictionary<(int, int), BrepCurve> EdgeCurves(List<(BrepSurface? Surface, bool Reversed, int[][] Loops, List<(Vec3, Vec3, Vec3)>? Shown, bool Facet, uint? Color)> faces,
         List<Vec3> verts, Func<int[], Vec3> newell)
     {
         // per edge the faces along it and the points next to it in their loops
@@ -304,7 +311,7 @@ public sealed partial class SketchDocument
         // (a NURBS surface's parameters at its faces' vertices, each from the one before it round the loop (a search
         // all over the surface for the first only): from there those of points along its edges)
         var near = new Dictionary<(BrepNurbsSurface, int), (double, double)>();
-        foreach (var (surface, _, loops, _, _) in faces)
+        foreach (var (surface, _, loops, _, _, _) in faces)
             if (surface is BrepNurbsSurface ns)
                 foreach (var l in loops)
                 {
