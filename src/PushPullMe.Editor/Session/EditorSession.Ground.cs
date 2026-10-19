@@ -86,10 +86,24 @@ public sealed partial class EditorSession
         Log("new document");
     }
 
+    /// <summary>
+    /// The next point of a line on the work plane: a corner close by (see <see cref="GroundAt"/>), else from the last
+    /// point along an axis of the plane, parallel or square to a line drawn before or to the edge rested on last (see
+    /// <see cref="InferDirs"/>), else where the mouse points; with the direction it was inferred along.
+    /// </summary>
+    private (Vec3 P, InferDir? Along)? GroundLinePoint(Point pos)
+    {
+        if (GroundAt(pos) is not { } g) return null;
+        if (_gKind != GroundKind.Line || _gPts.Count == 0 || GroundCorners().Any(c => (c - g).Length < 1e-12)) return (g, null);
+        var drawn = _gPts.Zip(_gPts.Skip(1)).Select(s => (s.Second - s.First).Normalized());
+        return InferFrom(_gPts[^1], pos, g, InferDirs(_plane.N, drawn)) is { } inf ? (inf.P, inf.Dir) : (g, null);
+    }
+
     /// <summary>A click on the work plane: the first point of a shape, or its next or last.</summary>
     private void GroundClick(Point pos)
     {
-        if (_doc == null || GroundAt(pos) is not { } g) return;
+        if (_doc == null || GroundLinePoint(pos) is not { } gl) return;
+        var g = gl.P;
         if (_gKind == null)
         {
             _gKind = RectMode ? GroundKind.Rectangle : CircleMode ? GroundKind.Circle : GroundKind.Line;
@@ -168,7 +182,8 @@ public sealed partial class EditorSession
     /// <summary>The shape on the work plane as the mouse moves.</summary>
     private void GroundTo(Point pos)
     {
-        if (_gKind is not { } kind || GroundAt(pos) is not { } g) return;
+        if (_gKind is not { } kind || GroundLinePoint(pos) is not { } gl) return;
+        var g = gl.P;
         _gEnd = g;
         var a = _gPts[0];
         switch (kind)
@@ -186,8 +201,9 @@ public sealed partial class EditorSession
                 MeasureBox.Text = Mm(r);
                 break;
             default:
-                ShowSketch([_gPts[^1], g]);
+                ShowSketch([_gPts[^1], g], default, color: gl.Along?.Color);
                 MeasureBox.Text = Mm((g - _gPts[^1]).Length);
+                if (gl.Along is { } al) StatusText.Text = T($"╱ {Mm((g - _gPts[^1]).Length)} mm {al.Name} · klik, of typ een lengte + Enter. Esc: klaar.", $"╱ {Mm((g - _gPts[^1]).Length)} mm {al.Name} · click, or type a length + Enter. Esc: done.");
                 break;
         }
     }

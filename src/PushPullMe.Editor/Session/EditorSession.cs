@@ -691,6 +691,7 @@ public sealed partial class EditorSession
     {
         if (Tool == tool) return;
         Tool = tool;
+        _restEdge = null;
         ToolChanged?.Invoke();
         PaintPanel.On = PaintMode;
         if (PaintMode) SetPaint(_paint); else _sampleOnce = false;
@@ -742,6 +743,8 @@ public sealed partial class EditorSession
         _mouseAt = pos;
         if (_doc == null) return;
         UpdateMarks(pos);
+        // (the edge the mouse rests on: to line up with later, see InferDirs)
+        if (Tool is Tool.Line or Tool.Move or Tool.Tape) RestOnEdge(pos);
         if (_movePick != null) { MoveTo(pos); return; }
         if (_dragFace != null) { DragTo(pos); return; }
         if (_drawFace != null) { DrawTo(pos); return; }
@@ -1432,13 +1435,11 @@ public sealed partial class EditorSession
             if (_lineAxis is int held) { if (Math.Abs(Axes[held].Dir.Dot(n)) < 1e-6) dirs.Add((Axes[held].Dir, T("langs de ", "along the ") + Axes[held].Name, Axes[held].Color)); }
             else
             {
-                foreach (var ax in Axes.Where(a => Math.Abs(a.Dir.Dot(n)) < 1e-6)) dirs.Add((ax.Dir, T("langs de ", "along the ") + ax.Name, ax.Color));
-                foreach (var e in lineUp.SelectMany(lf => body.Faces[lf].Loops).SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Curve is BrepLine && e.Start >= 0))
-                {
-                    var ed = (body.Vertices[e.End] - body.Vertices[e.Start]).Normalized();
-                    dirs.Add((ed, T("evenwijdig aan een rand", "parallel to an edge"), InferColor));
-                    dirs.Add((n.Cross(ed), T("loodrecht op een rand", "square to an edge"), InferColor));
-                }
+                // the axes, the edges of the faces (and of the lines drawn so far), and the edge rested on last
+                var edges = lineUp.SelectMany(lf => body.Faces[lf].Loops).SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Curve is BrepLine && e.Start >= 0)
+                    .Select(e => (body.Vertices[e.End] - body.Vertices[e.Start]).Normalized())
+                    .Concat(_linePts.Zip(_linePts.Skip(1)).Select(s => (s.Second - s.First).Normalized()));
+                dirs.AddRange(InferDirs(n, edges).Select(x => (x.Dir, x.Name, x.Color)));
             }
             if (d.Length > 1e-9)
                 foreach (var (dir, name, color) in dirs)
@@ -1924,7 +1925,7 @@ public sealed partial class EditorSession
     /// else along the axis held by an arrow key, or the axis the mouse is close to (within 15 pixels), else free in the
     /// plane across the view through the grab point; with what it snapped to.
     /// </summary>
-    private (Vec3 Offset, string? Snap, int? Axis)? MoveOffsetAt(Point pos)
+    private (Vec3 Offset, string? Snap, InferDir? Along)? MoveOffsetAt(Point pos)
     {
         if (_moveBase == null || _movePick is not { } mp) return null;
         Point Screen(Vec3 v) => Viewport3DHelper.Point3DtoPoint2D(View.Viewport, P(v));
@@ -1962,10 +1963,10 @@ public sealed partial class EditorSession
             return _moveGrab + d * t;
         }
         Vec3 Round(Vec3 v, Vec3 d) { double l = Math.Round(v.Dot(d) * Display * 10) / 10 / Display; return d * l; }
-        if (_moveAxis is int held && OnLine(Axes[held].Dir) is { } ph) return (Round(ph - _moveGrab, Axes[held].Dir), null, held);
-        var best = Enumerable.Range(0, 3).Select(i => (I: i, P: OnLine(Axes[i].Dir))).Where(x => x.P != null)
-            .Select(x => (x.I, P: x.P!.Value, Px: (Screen(x.P!.Value) - pos).Length)).Where(x => x.Px < 15 && (x.P - _moveGrab).Length > 1e-6).OrderBy(x => x.Px).ToList();
-        if (best.Count > 0) return (Round(best[0].P - _moveGrab, Axes[best[0].I].Dir), null, best[0].I);
+        if (_moveAxis is int held && OnLine(Axes[held].Dir) is { } ph)
+            return (Round(ph - _moveGrab, Axes[held].Dir), null, new InferDir(Axes[held].Dir, T("langs de ", "along the ") + Axes[held].Name, Axes[held].Color));
+        // along an axis, or parallel to the edge rested on last
+        if (InferFrom(_moveGrab, pos, null, InferDirs(null, [])) is { } inf) return (inf.P - _moveGrab, null, inf.Dir);
         // free: in the plane across the view
         double den = dir.Dot(dir);
         var look = View.Camera is ProjectionCamera cam ? new Vec3(cam.LookDirection.X, cam.LookDirection.Y, cam.LookDirection.Z).Normalized() : dir;
@@ -1982,19 +1983,19 @@ public sealed partial class EditorSession
         if (_movePick == null || _typed.Length > 0) return;
         if (MoveOffsetAt(pos) is not { } m) return;
         if ((m.Offset - _moveOffset).Length < 1e-12 && _moveValid) return;
-        PreviewMove(m.Offset, m.Snap, m.Axis);
+        PreviewMove(m.Offset, m.Snap, m.Along);
     }
 
-    private void PreviewMove(Vec3 offset, string? snap, int? axis)
+    private void PreviewMove(Vec3 offset, string? snap, InferDir? along)
     {
         if (_movePick is not { } mp || _moveBase == null) return;
         _moveOffset = offset;
         MeasureBox.Text = Mm(offset.Length);
-        // the axis it runs along, as a coloured guide line
-        if (axis is int a)
+        // the direction it runs along, as a coloured guide line
+        if (along is { } a)
         {
-            var d = Axes[a].Dir * Math.Max(offset.Length, 0.005);
-            ShowSketch([_moveGrab - d, _moveGrab + offset + d], default, color: Axes[a].Color);
+            var d = a.Dir * Math.Max(offset.Length, 0.005);
+            ShowSketch([_moveGrab - d, _moveGrab + offset + d], default, color: a.Color);
         }
         else ShowSketch([_moveGrab, _moveGrab + offset]);
         if (offset.Length < 1e-9) { _moveValid = false; Render(_moveBase); return; }
@@ -2003,7 +2004,7 @@ public sealed partial class EditorSession
             var doc = MoveDoc(_moveBase, mp.Body, mp.Pick, offset, _moveGroup, checkCrossing: false);
             _moveValid = true;
             Render(doc);
-            StatusText.Text = T($"✥ {Mm(offset.Length)} mm{(axis is int ax ? " langs de " + Axes[ax].Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · klik om neer te zetten, of typ de afstand + Enter. Esc breekt af.", $"✥ {Mm(offset.Length)} mm{(axis is int ax2 ? " along the " + Axes[ax2].Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · click to put it down, or type the distance + Enter. Esc cancels.");
+            StatusText.Text = T($"✥ {Mm(offset.Length)} mm{(along is { } ax ? " " + ax.Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · klik om neer te zetten, of typ de afstand + Enter. Esc breekt af.", $"✥ {Mm(offset.Length)} mm{(along is { } ax2 ? " " + ax2.Name : "")}{(snap != null ? " · 🎯 " + snap : "")} · click to put it down, or type the distance + Enter. Esc cancels.");
         }
         catch (PushPullException ex) { _moveValid = false; StatusText.Text = "⛔ " + ex.Message; }
     }
@@ -2352,6 +2353,16 @@ public sealed partial class EditorSession
         return best?.Item1;
     }
 
+    /// <summary>Where the tape ends: a corner or guide line (see <see cref="TapePoint"/>), else from the start along an
+    /// axis or parallel to the edge rested on last (see <see cref="InferFrom"/>), else where the mouse hits the model.</summary>
+    private (Vec3 Point, Snap? Kind, InferDir? Along)? TapeEnd((FaceRef Face, Point3D Point)? hit, Point pos)
+    {
+        var tp = TapePoint(hit, pos);
+        if (tp is { Kind: not null } || _tapeStart is not { } start) return tp is { } t ? (t.Point, t.Kind, null) : null;
+        if (InferFrom(start, pos, null, InferDirs(null, [])) is { } inf) return (inf.P, null, inf.Dir);
+        return tp is { } f ? (f.Point, null, null) : null;
+    }
+
     /// <summary>The point the tape points at: a corner close by (12 pixels), else where the mouse hits the model.</summary>
     private (Vec3 Point, Snap? Kind)? TapePoint((FaceRef Face, Point3D Point)? hit, Point pos)
     {
@@ -2423,10 +2434,11 @@ public sealed partial class EditorSession
             StatusText.Text = T($"📏 Hulplijn op {Mm(off.Length)} mm van de rand · klik om hem te plaatsen, of typ de afstand + Enter. Esc breekt af.", $"📏 Guide line {Mm(off.Length)} mm from the edge · click to place it, or type the distance + Enter. Esc cancels.");
             return;
         }
-        if (TapePoint(hit, pos) is not { } tp) return;
-        ShowSketch([start, tp.Point]);
+        if (TapeEnd(hit, pos) is not { } tp) return;
+        ShowSketch([start, tp.Point], default, color: tp.Along?.Color);
         MeasureBox.Text = Mm((tp.Point - start).Length);
-        StatusText.Text = T($"📏 {Units.Measure(tp.Point - start)}{(tp.Kind is { } tk ? " · 🎯 " + tk.Name() : "")} · klik om de maat vast te houden.", $"📏 {Units.Measure(tp.Point - start)}{(tp.Kind is { } tk2 ? " · 🎯 " + tk2.Name() : "")} · click to keep the measurement.");
+        string along = tp.Along is { } al ? " · " + al.Name : "";
+        StatusText.Text = T($"📏 {Units.Measure(tp.Point - start)}{along}{(tp.Kind is { } tk ? " · 🎯 " + tk.Name() : "")} · klik om de maat vast te houden.", $"📏 {Units.Measure(tp.Point - start)}{along}{(tp.Kind is { } tk2 ? " · 🎯 " + tk2.Name() : "")} · click to keep the measurement.");
     }
 
     private void FinishTape((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -2439,9 +2451,9 @@ public sealed partial class EditorSession
             EndTape();
             return;
         }
-        if (TapePoint(hit, pos) is not { } tp) return;
+        if (TapeEnd(hit, pos) is not { } tp) return;
         EndTape();
-        ShowSketch([start, tp.Point]);
+        ShowSketch([start, tp.Point], default, color: tp.Along?.Color);
         MeasureBox.Text = Mm((tp.Point - start).Length);
         StatusText.Text = T($"📏 Gemeten: {Units.Measure(tp.Point - start)}.", $"📏 Measured: {Units.Measure(tp.Point - start)}.");
         Log($"measured {Units.Measure(tp.Point - start)}");
