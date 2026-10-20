@@ -13,7 +13,9 @@
   - a pulled piece that touches another with a face joins it (`JoinTouching`), only when pulling (distance > 0), only
     when the operation is set (not while dragging), only within the box round the new faces, only within one group;
     the "join" box (default on) turns it off;
-  - ⇕ on a cylinder changes its radius; ⇕ on the end face of a turned piece follows the turn.
+  - ⇕ on a cylinder changes its radius; ⇕ on the end face of a turned piece follows the turn; with Ctrl at the click
+    it goes straight along the normal as a prism (`straight`, `Apply(prism:)`: a side face at every edge, no round
+    neighbour extended), as DesignSpark extends it with a copy of the face.
 - Names: `Names` per body (null = none); "Vaste vorm", "Oppervlak", "Solid", "Surface", "Body" (with or without a
   number) are standard names, not own names. A body that merges into another loses its name.
 - Groups (`SketchGroup(Id, Name, Parent)`, `BodyGroups`) and components: an instance is a group with `Component` and

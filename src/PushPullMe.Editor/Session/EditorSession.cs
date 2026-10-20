@@ -39,6 +39,8 @@ public sealed partial class EditorSession
     /// and the angle the mouse is at round it so far (to go on past half a turn).</summary>
     private (Vec3 Point, Vec3 Dir, double Radius)? _dragTurn;
     private double _dragTurnAngle;
+    /// <summary>The end of a turned piece dragged straight along its normal (Ctrl at the click; issue #21).</summary>
+    private bool _dragStraight;
     private SketchDocument? _dragBase;
     private double _dragDist;
 
@@ -68,7 +70,7 @@ public sealed partial class EditorSession
     private LineSet? _sketch;
 
     /// <summary>The last push/pull: typing a distance right after it changes it (as in SketchUp).</summary>
-    private (SketchDocument Before, FaceRef Face, double Dist)? _last;
+    private (SketchDocument Before, FaceRef Face, double Dist, bool Straight)? _last;
 
     /// <summary>What is being typed into the measurements box.</summary>
     private string _typed = "";
@@ -2955,6 +2957,9 @@ public sealed partial class EditorSession
         else n = FaceGeometry.Normal(face);
         _dragNormal = new Vector3D(n.X, n.Y, n.Z);
         _dragTurn = face.Surface is BrepPlane ? PushPullMe.Core.Revolve.EndAxis(_doc.Bodies[f.Body], f.Face) : null;
+        // (Ctrl: the end of a turned piece straight on, as DesignSpark's pull of a copy of the face)
+        _dragStraight = _dragTurn != null && (Mods & ModifierKeys.Control) != 0;
+        if (_dragStraight) _dragTurn = null;
         _dragTurnAngle = 0;
         if (_dragTurn != null) _through = [];
         _selected = null;
@@ -2965,6 +2970,10 @@ public sealed partial class EditorSession
             ? T($"⇕ {CylinderText(_doc, f)} · beweeg de muis om de straal te veranderen; klik om vast te zetten, of typ de straal + Enter. Esc breekt af.", $"⇕ {CylinderText(_doc, f)} · move the mouse to change the radius; click to set it, or type the radius + Enter. Esc cancels.")
             : face.Surface is BrepCylinder
             ? T($"⇕ {CylinderText(_doc, f)} · beweeg de muis om de straal te veranderen; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", $"⇕ {CylinderText(_doc, f)} · move the mouse to change the radius; click to set it, or type the distance + Enter. Esc cancels.")
+            : _dragTurn != null
+            ? T("⇕ Het eind van een gedraaid stuk volgt de draai (Ctrl bij het klikken: recht verlengen). Beweeg de muis; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", "⇕ The end of a turned piece follows the turn (Ctrl when clicking: extend it straight). Move the mouse; click to set it, or type the distance + Enter. Esc cancels.")
+            : _dragStraight
+            ? T("⇕ Het eind van een gedraaid stuk wordt recht verlengd (zonder Ctrl volgt het de draai). Beweeg de muis; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", "⇕ The end of a turned piece is extended straight (without Ctrl it follows the turn). Move the mouse; click to set it, or type the distance + Enter. Esc cancels.")
             : T("⇕ Beweeg de muis om het vlak te verschuiven; klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", "⇕ Move the mouse to shift the face; click to set it, or type the distance + Enter. Esc cancels.");
     }
 
@@ -3094,6 +3103,9 @@ public sealed partial class EditorSession
     {
         if (!_dragValid) return;
         string cyl = _preview != null && _previewFace is { } pf && _preview.Bodies[pf.Body].Faces[pf.Face].Surface is BrepCylinder ? " · " + CylinderText(_preview, pf) : "";
+        // (the end of a turned piece: which way it goes, and how to get the other)
+        cyl += _dragTurn != null ? T(" · volgt de draai (Ctrl bij het klikken: recht)", " · follows the turn (Ctrl when clicking: straight)")
+            : _dragStraight ? T(" · recht (zonder Ctrl: volgt de draai)", " · straight (without Ctrl: follows the turn)") : "";
         StatusText.Text = _dragRadius
             ? T($"⇕ {cyl.TrimStart(' ', '·')} · klik om vast te zetten, of typ de straal + Enter. Esc breekt af.", $"⇕ {cyl.TrimStart(' ', '·')} · click to set it, or type the radius + Enter. Esc cancels.")
             : T($"⇕ {_dragDist * Display:0.##} mm{cyl}{(flush != null ? " · 🎯 " + flush : "")} · klik om vast te zetten, of typ de afstand + Enter. Esc breekt af.", $"⇕ {_dragDist * Display:0.##} mm{cyl}{(flush != null ? " · 🎯 " + flush : "")} · click to set it, or type the distance + Enter. Esc cancels.");
@@ -3141,7 +3153,7 @@ public sealed partial class EditorSession
         if (Math.Abs(dist) < 1e-9) { _preview = null; _previewMap = null; _dragValid = false; Render(_dragBase); return; }
         try
         {
-            var (doc, r) = _dragBase.PushPull(f, dist, checkCrossing: false);
+            var (doc, r) = _dragBase.PushPull(f, dist, checkCrossing: false, straight: _dragStraight);
             if (r.FaceMap[f.Face] < 0 && !r.Punched) throw new PushPullException(T("Zo verdwijnt het vlak helemaal.", "That way the face disappears completely."));
             _preview = doc; _previewFace = new FaceRef(f.Body, r.FaceMap[f.Face]); _dragValid = true;
             _previewMap = r.FaceMap; _previewNew = r.NewFaces.ToHashSet();
@@ -3159,21 +3171,21 @@ public sealed partial class EditorSession
     private void Finish(double dist)
     {
         if (_dragFace is not { } f || _dragBase is not { } before) return;
-        var start = before;
+        var start = before; bool straight = _dragStraight;
         EndDrag(); EndDraw();
         _typed = "";
         if (Math.Abs(dist) < 1e-9) { Render(); return; }
-        Apply(start, f, dist, replaceLast: false);
+        Apply(start, f, dist, replaceLast: false, straight);
     }
 
-    private void Apply(SketchDocument before, FaceRef f, double dist, bool replaceLast)
+    private void Apply(SketchDocument before, FaceRef f, double dist, bool replaceLast, bool straight = false)
     {
         try
         {
-            var (doc, r) = before.PushPull(f, dist, join: Join);
+            var (doc, r) = before.PushPull(f, dist, join: Join, straight: straight);
             if (replaceLast) { _doc = _history.Replace(before, doc, _openGroup); UpdateUndoButtons(); }
             else Commit(before, doc);
-            _last = (before, f, dist);
+            _last = (before, f, dist, straight);
             _selected = r.FaceMap[f.Face] >= 0 ? new FaceRef(f.Body, r.FaceMap[f.Face]) : null;
             Render();
             bool rounding = HasRadius(before, f); // (pin, hole or rounding: shown by its radius)
@@ -5755,14 +5767,15 @@ public sealed partial class EditorSession
             // (a pin, hole or rounding: the typed value is its new radius)
             if (_dragRadius && !RadiusDistance(before, f, mm, out dist)) return;
             else if (!_dragRadius && _dragDist < 0 && dist > 0) dist = -dist;
+            bool straight = _dragStraight;
             EndDrag();
-            Apply(before, f, dist, replaceLast: false);
+            Apply(before, f, dist, replaceLast: false, straight);
         }
         else if (_last is { } last)
         {
             if (HasRadius(last.Before, last.Face)) { if (!RadiusDistance(last.Before, last.Face, mm, out dist)) return; }
             else if (last.Dist < 0 && dist > 0) dist = -dist;
-            Apply(last.Before, last.Face, dist, replaceLast: true);
+            Apply(last.Before, last.Face, dist, replaceLast: true, last.Straight);
         }
     }
 

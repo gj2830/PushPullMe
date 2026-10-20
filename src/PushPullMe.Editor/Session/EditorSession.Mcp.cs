@@ -208,7 +208,7 @@ public sealed partial class EditorSession
             case "push_pull":
             {
                 int b = Body(); var f = Face(b); double d = Num("distance");
-                var (doc, r) = before.PushPull(f, d / Display, join: Join);
+                var (doc, r) = before.PushPull(f, d / Display, join: Join, straight: Flag("straight"));
                 return Changed(before, doc, $"trekt vlak {f.Face} van {before.BodyName(b)} {Mm(d / Display)} mm.", $"pulled face {f.Face} of body {b} by {Mm(d / Display)} mm.");
             }
             case "draw_rectangle":

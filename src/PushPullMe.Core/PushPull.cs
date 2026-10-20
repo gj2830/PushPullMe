@@ -51,7 +51,12 @@ public static partial class PushPull
         public bool Dead;
     }
 
-    public static PushPullResult Apply(BrepBody body, int face, double distance)
+    /// <summary>
+    /// The face moved over <paramref name="distance"/> along its normal. <paramref name="prism"/>: a side face at every
+    /// edge, as a copy of the face pulled out (the end of a turned piece extended straight); no rounding moves along and
+    /// no slanted or round neighbour is extended.
+    /// </summary>
+    public static PushPullResult Apply(BrepBody body, int face, double distance, bool prism = false)
     {
         if (face < 0 || face >= body.Faces.Count) throw new ArgumentOutOfRangeException(nameof(face));
         var F = body.Faces[face];
@@ -63,7 +68,7 @@ public static partial class PushPull
 
         var n = FaceGeometry.Normal(F);
         // a rounding of an edge that runs on past a quarter: cut where it faces across the movement, then again
-        if (SplitRoundings(body, face, n) is { } split)
+        if (!prism && SplitRoundings(body, face, n) is { } split)
         {
             var rs = Apply(split.Body, face, distance);
             var staying = split.NewFaces.Select(x => rs.FaceMap[x]).Where(x => x >= 0);
@@ -75,14 +80,15 @@ public static partial class PushPull
         var edges = body.Edges.Select(e => (BrepEdge?)e).ToList();
         var faces = body.Faces.Select(f => new Work(f.Surface, f.Reversed, f.Loops.Select(l => l.ToList()).ToList())).ToList();
         // roundings of the face's edges move along with it (as one piece); its edge is then the edge of that piece
-        var along = Along(body, face, n);
+        List<int> along = prism ? [] : Along(body, face, n);
         var allCo = new[] { face }.Concat(along).SelectMany(m => body.Faces[m].Loops.SelectMany(l => l)).ToList();
         var inner = allCo.GroupBy(c => c.Edge).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();
         var boundary = allCo.Where(c => !inner.Contains(c.Edge)).ToList();
         // (cutting back or extending only away from the roundings that move along)
         var alongVerts = along.SelectMany(g => body.Faces[g].Loops.SelectMany(l => l)).Select(c => body.Edges[c.Edge])
             .Where(e => e.Start >= 0).SelectMany(e => new[] { e.Start, e.End }).ToHashSet();
-        var (trimEdges, trimVerts) = Trims(body, face, n, plane.Origin + off, sign, alongVerts);
+        var (trimEdges, trimVerts) = prism ? (new Dictionary<int, int>(), new Dictionary<int, (int K, Vec3 P, bool Forward)>())
+            : Trims(body, face, n, plane.Origin + off, sign, alongVerts);
 
         // the moved vertices, with an edge from each old one to its new place: straight along the normal, or (next to a
         // neighbour that is cut back or extended) along the edge it slides on

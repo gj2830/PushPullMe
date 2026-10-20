@@ -177,17 +177,19 @@ public sealed partial class SketchDocument
     /// dragging).
     /// <paramref name="join"/>: a piece pulled against another part with a face becomes one part with it (as DesignSpark's
     /// "merge" in its pull; off: it stays apart).
+    /// <paramref name="straight"/>: the end of a turned piece moved along its normal like any flat face, not along the
+    /// turn (as DesignSpark extends it with a copy of the face; ⇕ with Ctrl).
     /// </summary>
-    public (SketchDocument Doc, PushPullResult Result) PushPull(FaceRef f, double distance, bool checkCrossing = true, bool join = true)
+    public (SketchDocument Doc, PushPullResult Result) PushPull(FaceRef f, double distance, bool checkCrossing = true, bool join = true, bool straight = false)
     {
         var body = Bodies[f.Body];
         if (body.Sheet) return PushSheet(f, distance, checkCrossing, join);
         // the end of a piece turned round an axis: it follows the turn, out and in (as DesignSpark)
-        if (Core.Revolve.EndAxis(body, f.Face) is { } end) return TurnEnd(f, end, distance, checkCrossing);
+        if (!straight && Core.Revolve.EndAxis(body, f.Face) is { } end) return TurnEnd(f, end, distance, checkCrossing);
         if (body.Faces[f.Face].Surface is BrepCylinder || (body.Faces[f.Face].Surface is BrepSphere or BrepTorus && Core.PushPull.IsRoundingSet(body, f.Face)))
             return PushPullCylinder(f, distance, checkCrossing);
         PushPullResult r;
-        try { r = Core.PushPull.Apply(body, f.Face, distance); }
+        try { r = Core.PushPull.Apply(body, f.Face, distance, prism: straight); }
         catch (TouchesItselfException) when (distance > 0 && body.Faces[f.Face].Surface is BrepPlane)
         {
             // the body would touch itself only along an edge: the piece pulled out a body of its own, the body as it was

@@ -2710,6 +2710,25 @@ public class RevolveTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void The_end_of_a_turned_piece_pulled_straight_gets_a_straight_piece()
+    {
+        // (issue #21: as DesignSpark's pull of a copy of the face; ⇕ with Ctrl) the cap (10 × 10) pulled 3 mm along its
+        // normal: a block of 300 mm³ on it, the cap facing the same way, moved 3 mm
+        var doc = Cube();
+        var (d, cap) = doc.Revolve(Face(doc, new Vec3(0, 0, 1)), P(12, 0, 10), new Vec3(0, 1, 0), Math.PI / 6);
+        var n = FaceGeometry.Normal(d.Bodies[0].Faces[cap.Face]);
+        var origin = ((BrepPlane)d.Bodies[0].Faces[cap.Face].Surface).Origin;
+        var (e, r) = d.PushPull(cap, 3 * Mm, straight: true);
+        AssertSound(e);
+        Assert.Equal(Mm3(d) + 300, Mm3(e), 1.0);
+        var moved = e.Bodies[0].Faces[r.FaceMap[cap.Face]];
+        Assert.True(FaceGeometry.Normal(moved).Dot(n) > 1 - 1e-12);
+        Assert.Equal(3, (((BrepPlane)moved.Surface).Origin - origin).Dot(n) / Mm, 9);
+        // the ring itself as it was: still its two cylinders
+        Assert.Equal(2, e.Bodies[0].Faces.Count(f => f.Surface is BrepCylinder));
+    }
+
+    [Fact]
     public void A_half_disc_turned_more_than_half_way_round_an_edge_makes_an_arch()
     {
         // a half disc r 2 round (0, 4) on the top, from the left edge; turned round the right top edge (x 10) 210°: an
