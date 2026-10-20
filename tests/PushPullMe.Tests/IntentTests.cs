@@ -88,6 +88,27 @@ public class IntentTests
     }
 
     [Fact]
+    public void The_end_of_a_turned_piece_pulled_straight_gets_a_straight_piece()
+    {
+        // (user, 20 Oct 2026, issue #21: ⇕ with Ctrl extends it straight, as DesignSpark with a copy of the face; the
+        // round neighbours are not extended, so the end keeps its size)
+        var doc = Box(10, 10, 10);
+        var (d, cap) = doc.Revolve(Facing(doc, 0, Up), P(12, 0, 10), new Vec3(0, 1, 0), Math.PI / 6);
+        var n = FaceGeometry.Normal(d.Bodies[0].Faces[cap.Face]);
+        var (e, r) = d.PushPull(cap, 3 * Mm, straight: true);
+        Assert.Equal(Mm3(d) + 10 * 10 * 3, Mm3(e), 1.0);
+        Assert.True(FaceGeometry.Normal(e.Bodies[0].Faces[r.FaceMap[cap.Face]]).Dot(n) > 1 - 1e-12);
+    }
+
+    [Fact]
+    public void A_highlight_shows_the_whole_part_also_where_the_storey_cut_hides_it()
+    {
+        // (user, 20 Oct 2026, issue #8: hovering or picking a part shows how big it really is) a highlight carries no
+        // model number, so the view's storey cut (per model) never takes part of it away
+        Assert.Null(typeof(FaceSet).GetProperty("Model"));
+    }
+
+    [Fact]
     public void A_change_in_one_component_instance_comes_in_the_others_and_scaling_along_one_axis_is_refused()
     {
         // (user, 19 Oct 2026: components as in SketchUp; bodies stay in world coordinates)
