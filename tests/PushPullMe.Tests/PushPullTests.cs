@@ -1478,6 +1478,40 @@ public class RsDocxReaderTests(ITestOutputHelper output)
             Assert.True(file is "helix.rsdocx" or "yubikey.rsdocx", e.Message);
         }
     }
+
+    [Fact]
+    public void A_cylinder_band_along_a_helix_is_shown_as_it_is()
+    {
+        // testdata/helix.rsdocx (DesignSpark): a thread 20 mm high, pitch 1.5 mm (13⅓ turns of helices that run on to
+        // 14), between cylinders of r 8.15 and 8.9 mm whose faces are bands bounded by two helices (issue #24: they were
+        // drawn as chords through the cylinder, and along the whole helix instead of the edge)
+        var d = SketchDocument.FromRsDocx(TestFiles.Converter("helix.rsdocx"));
+        var body = d.Bodies[0];
+        const double turns = 20 / 1.5;
+        foreach (var (fr, tris) in d.AllTriangles())
+        {
+            if (body.Faces[fr.Face].Surface is not BrepCylinder cy) continue;
+            double area = tris.Sum(t => (t.B - t.A).Cross(t.C - t.A).Length / 2) / (Mm * Mm);
+            double r = cy.Radius / Mm;
+            // every point on the cylinder, the band as high as the thread is there (0.29 mm outside, 1.15 mm inside)
+            Assert.All(tris.SelectMany(t => new[] { t.A, t.B, t.C }), p =>
+            {
+                var w = p - cy.Origin; var ax = cy.Axis.Normalized();
+                Assert.InRange((w - ax * w.Dot(ax)).Length / Mm, r * 0.999, r * 1.001);
+            });
+            // (unrolled a parallelogram: the circumference times the turns, by the height along the axis)
+            double expected = 2 * Math.PI * r * turns * (r > 8.5 ? 0.288675 : 1.154700);
+            output.WriteLine($"cylinder r {r:0.##}: {tris.Count} triangles, area {area:0.##} mm² (expected {expected:0.##})");
+            Assert.InRange(area, expected * 0.995, expected * 1.005);
+        }
+        // the thread: its cross-section (a trapezium 0.75 mm deep, 1.15 mm at the root, 0.29 mm at the top) turned
+        // round the axis at its centroid (Pappus); within 2 %: the flanks, whose large parts nearly cancel, as chords
+        // between the edge points every 7.5°
+        double section = 0.75 * (1.154700 + 0.288675) / 2, centroid = 8.15 + 0.75 * (1.154700 + 2 * 0.288675) / (3 * (1.154700 + 0.288675));
+        double volume = d.Volume() / (Mm * Mm * Mm), expectedVolume = section * 2 * Math.PI * centroid * turns;
+        output.WriteLine($"volume {volume:0.##} mm³ (expected {expectedVolume:0.##})");
+        Assert.InRange(volume, expectedVolume * 0.98, expectedVolume * 1.02);
+    }
 }
 
 /// <summary>Move, as in SketchUp: a face, edge or vertex moved, what hangs on it follows.</summary>

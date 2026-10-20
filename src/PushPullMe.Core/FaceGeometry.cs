@@ -69,6 +69,17 @@ public static class FaceGeometry
                 int k = Math.Max(8, s.ControlPoints.Count * 4);
                 double t0 = s.Knots[0], t1 = s.Knots[^1];
                 var U = BSpline.Expand(s.Knots, s.Mults);
+                // (an edge on part of its curve, such as a thread's helix in DesignSpark's helix.rsdocx that runs on past the
+                // edge's ends: only between its vertices; not a ring, nor a closed curve's edge across its seam)
+                if (e.Start >= 0 && e.Start != e.End && ((s.At(t0) - body.Vertices[e.Start]).Length > 1e-9 || (s.At(t1) - body.Vertices[e.End]).Length > 1e-9))
+                {
+                    double a = BSpline.ClosestParam(s, body.Vertices[e.Start]), b = BSpline.ClosestParam(s, body.Vertices[e.End]);
+                    if (!s.Closed || a < b)
+                    {
+                        k = Math.Max(8, (int)Math.Ceiling(k * Math.Abs(b - a) / (t1 - t0)));
+                        (t0, t1) = (a, b);
+                    }
+                }
                 for (int i = 0; i <= k; i++)
                 {
                     double t = t0 + (t1 - t0) * i / k;
@@ -239,7 +250,9 @@ public static class FaceGeometry
         }
         var segs = loops.SelectMany(l => l.Select((p, i) => (A: p, B: l[(i + 1) % l.Count]))).ToList();
         var ts = loops.SelectMany(l => l.Select(p => p.T)).Order().ToList();
-        if (ts[^1] - ts[0] >= 2 * Math.PI - 1e-9) return null;
+        // (a whole turn: a loop over a seam, as OpenCASCADE writes a whole cylinder, done by Unwrapped; more than a turn
+        // without going round, such as a band between two helices of a thread (helix.rsdocx), is strips as any other)
+        if (Math.Abs(ts[^1] - ts[0] - 2 * Math.PI) < 1e-6) return null;
         var cuts = new List<double> { ts[0] };
         foreach (double t in ts.Skip(1))
         {
@@ -508,7 +521,11 @@ public static class FaceGeometry
             return r;
         }).ToList();
         bool Border((double U, double V) q) => Math.Abs(q.U - u0) < du * 1e-6 || Math.Abs(q.U - u1) < du * 1e-6 || Math.Abs(q.V - v0) < dv * 1e-6 || Math.Abs(q.V - v1) < dv * 1e-6;
-        if (uv.Count == 0 || (uv.Count == 1 && uv[0].All(Border)))
+        // (round the edge of the parameters means reaching all four sides: a thread's flank in helix.rsdocx has all its
+        // points on the two sides along its helices, yet stops short of the surface's ends)
+        bool Spans(List<(double U, double V)> l) => l.Min(q => q.U) - u0 < du * 1e-6 && u1 - l.Max(q => q.U) < du * 1e-6
+            && l.Min(q => q.V) - v0 < dv * 1e-6 && v1 - l.Max(q => q.V) < dv * 1e-6;
+        if (uv.Count == 0 || (uv.Count == 1 && uv[0].All(Border) && Spans(uv[0])))
         {
             // the whole surface: a grid, fine enough that the surface between its points keeps within 0.01 mm of a straight
             // line (in each direction doubled from 4 per control point till it does; a twisted loft needs many)
@@ -560,7 +577,12 @@ public static class FaceGeometry
         Vec3 At((double U, double V) q) => ns.At(Wrap(q.U, cu, u0, du, uClosed), Wrap(q.V, cv, v0, dv, vClosed));
         var laid = uv.Select(l => l.Select(Lay).ToList()).ToList();
         // (a rectangle in the parameters, as a seam makes it: a neat grid through its own edge points)
-        if (laid.Count == 1 && Grid(laid[0], loops[0], (u, v) => At((u, v)), p => Natural(ns.Parameters(p).U, ns.Parameters(p).V)) is { } rect && rect.Count > 0) return rect;
+        // (the normal at each triangle near the parameters of the one before, its neighbour: only for its side, so Newton
+        // steps from there do; a search over the whole surface per triangle takes most of a minute for helix.rsdocx's
+        // flanks of 13 turns, and a triangle's middle, off the surface, often does not let Newton settle)
+        var last = uv[0][0];
+        Vec3 Outward(Vec3 p) { last = ns.Near(p, last); return Natural(last.U, last.V); }
+        if (laid.Count == 1 && Grid(laid[0], loops[0], (u, v) => At((u, v)), Outward) is { } rect && rect.Count > 0) return rect;
         // (to lengths: so the triangles are not long and thin where the parameters stretch)
         double Len(Func<double, Vec3> c) { double s = 0; var p = c(0); for (int i = 1; i <= 16; i++) { var q = c(i / 16.0); s += (q - p).Length; p = q; } return s; }
         double su = Math.Max(1e-12, Len(t => ns.At(u0 + du * t, v0 + dv / 2))) / du, sv = Math.Max(1e-12, Len(t => ns.At(u0 + du / 2, v0 + dv * t))) / dv;
