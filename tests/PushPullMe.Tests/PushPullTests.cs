@@ -2070,9 +2070,18 @@ public class RealModelTests(ITestOutputHelper output)
     }
 }
 
+/// <summary>A debugging aid, not a test: shown as skipped unless PPM_DEBUG is 1 or 2.</summary>
+public sealed class DebugFactAttribute : FactAttribute
+{
+    public DebugFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) Skip = "debugging aid: set PPM_DEBUG=1 to run";
+    }
+}
+
 public class DebugTests(ITestOutputHelper output)
 {
-    [Fact]
+    [DebugFact]
     public void Debug_sleutelrek_roundings()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
@@ -2093,7 +2102,7 @@ public class DebugTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [DebugFact]
     public void Debug_sleutelrek_drag_into_rounding()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
@@ -2125,7 +2134,7 @@ public class DebugTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [DebugFact]
     public void Debug_sleutelrek_pull_check_volume()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
@@ -2158,7 +2167,7 @@ public class DebugTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [DebugFact]
     public void Debug_sleutelrek_side_after_rounding()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
@@ -2188,7 +2197,7 @@ public class DebugTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [DebugFact]
     public void Debug_sleutelrek_face5_neighbours()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
@@ -2239,7 +2248,7 @@ public class DebugTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [DebugFact]
     public void Debug_sleutelrek_crossing()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
@@ -2272,7 +2281,7 @@ public class DebugTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [DebugFact]
     public void Debug_sleutelrek_second_pull()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
@@ -2326,7 +2335,7 @@ public class DebugTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [DebugFact]
     public void Debug_xt_nodes()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;
@@ -2353,7 +2362,7 @@ public class DebugTests(ITestOutputHelper output)
     }
 
     /// <summary>A session log of the user replayed (PPM_REPLAY = the log file).</summary>
-    [Fact]
+    [DebugFact]
     public void Debug_replay_session()
     {
         if (Environment.GetEnvironmentVariable("PPM_REPLAY") is not { Length: > 0 } log) return;
@@ -2402,7 +2411,7 @@ public class DebugTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [DebugFact]
     public void Debug_sleutelrek_183()
     {
         if (Environment.GetEnvironmentVariable("PPM_DEBUG") is not ("1" or "2")) return;

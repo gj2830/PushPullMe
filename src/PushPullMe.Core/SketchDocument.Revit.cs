@@ -663,7 +663,7 @@ public sealed partial class SketchDocument
 
     /// <summary>How opaque a material that is <paramref name="transparency"/> see-through (0 … 1) is shown (its colour's
     /// alpha): never less than a quarter, so a pane of glass Revit makes wholly clear is still seen.</summary>
-    private static uint Opacity(double transparency) => (uint)Math.Round(255 * (1 - 0.75 * Math.Clamp(transparency, 0, 1)));
+    internal static uint Opacity(double transparency) => (uint)Math.Round(255 * (1 - 0.75 * Math.Clamp(transparency, 0, 1)));
 
     /// <summary>A curved surface's natural normal at a point on it (for a NURBS surface: dS/du × dS/dv, from nearby
     /// parameters).</summary>

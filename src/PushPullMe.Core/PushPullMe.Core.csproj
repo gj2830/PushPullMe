@@ -9,6 +9,8 @@
   <ItemGroup>
     <!-- reading, recognising and writing (.rsdocx) come from the converter's core -->
     <ProjectReference Include="$(RsConverterDir)src\RsDocx.Core\RsDocx.Core.csproj" />
+    <!-- the guarded intent tests check a few internal rules -->
+    <InternalsVisibleTo Include="PushPullMe.Tests" />
   </ItemGroup>
 
 </Project>

@@ -16,3 +16,8 @@ PLAN.md
 SKETCHUP_TOOLS.md
 OVERDRACHT.md
 TESTEN.md
+
+# private working agreements and skills of the assistant
+CLAUDE.local.md
+.claude/skills/
+.claude/settings.local.json
