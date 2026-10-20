@@ -15,7 +15,12 @@
 - Every change goes through `Commit` (`History`: undo/redo; `CarryMeta` carries names, groups and components to the
   new document; `SyncChanged` copies an edited component instance to the others).
 - Snapping (`EditorSession.Infer.cs`): axes, parallel and square to edges and to the edge the mouse last rested on;
-  in a face within 3°, in space within 15 px; lengths on 0.1 mm.
+  in a face within 3°, in space within 15 px; lengths on 0.1 mm. In line with the corner last rested on along an
+  axis (within 12 px; a thin line in the axis's colour; geometry in `Core/Inference.cs`). `PlanePoint` is the one
+  inference for tools going from point to point on a face (arcs, ◇, ⬡); rotate infers its start direction; arrow
+  keys hold a line on a face or on the work plane to an axis.
+- Soft edges (not drawn, `FaceGeometry.SoftEdges`): between two curved faces, and between two flat triangles that
+  bend less than 30° (a Revit terrain's facets); a pure display rule, nothing kept in the model.
 - Settings (`Settings`, folder `AppData` per system): language, join toggle (default on), assistant box (default off).
 - MCP (`EditorSession.Mcp.cs`): only while the user ticked "AI assistant may work along"; calls run on the UI thread,
   through `Commit` (undoable), refused while the user is mid-operation; asks before opening over unsaved work and

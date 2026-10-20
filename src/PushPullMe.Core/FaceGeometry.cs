@@ -671,6 +671,37 @@ public static class FaceGeometry
         }).Where(t => (t.Item2 - t.Item1).Cross(t.Item3 - t.Item1).Length > 1e-20).ToList();
     }
 
+    /// <summary>The largest bend between two flat triangles whose edge is soft (see <see cref="SoftEdges"/>): as
+    /// SketchUp softens a mesh it imports (its default is 20°; a Revit terrain bends up to some 30° between facets).</summary>
+    public const double SoftBendDegrees = 30;
+
+    /// <summary>
+    /// Which edges of a body are soft, not drawn (as in SketchUp): between two curved faces, and between two flat
+    /// triangles (a mesh's facets: a Revit terrain, a face Revit saved only as triangles) that bend less than
+    /// <see cref="SoftBendDegrees"/>. The edge where such facets meet a face of another kind, or bend sharply (a terrain's
+    /// top and its side), stays.
+    /// </summary>
+    public static bool[] SoftEdges(BrepBody body)
+    {
+        var curvedUses = new int[body.Edges.Count];
+        var facets = new List<int>?[body.Edges.Count];
+        for (int f = 0; f < body.Faces.Count; f++)
+        {
+            var face = body.Faces[f];
+            bool facet = face is { Surface: BrepPlane, Loops: [{ Count: 3 }] };
+            foreach (var c in face.Loops.SelectMany(l => l))
+            {
+                if (face.Surface is not BrepPlane) curvedUses[c.Edge]++;
+                if (facet) (facets[c.Edge] ??= []).Add(f);
+            }
+        }
+        double cos = Math.Cos(SoftBendDegrees * Math.PI / 180);
+        var soft = new bool[body.Edges.Count];
+        for (int e = 0; e < body.Edges.Count; e++)
+            soft[e] = curvedUses[e] >= 2 || facets[e] is [var a, var b] && Normal(body.Faces[a]).Dot(Normal(body.Faces[b])) > cos;
+        return soft;
+    }
+
     /// <summary>
     /// Smooth normals for triangles of one face whose surface gives none (a free-form face): at each point the
     /// area-weighted mean of the normals of the triangles round it; null for a point not among them.

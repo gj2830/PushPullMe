@@ -15,7 +15,15 @@
     the "join" box (default on) turns it off;
   - ⇕ on a cylinder changes its radius; ⇕ on the end face of a turned piece follows the turn; with Ctrl at the click
     it goes straight along the normal as a prism (`straight`, `Apply(prism:)`: a side face at every edge, no round
-    neighbour extended), as DesignSpark extends it with a copy of the face.
+    neighbour extended), as DesignSpark extends it with a copy of the face;
+  - ⇕ on the end face of a thread follows the helix (`ScrewEnd`): side edges and helical faces made anew from the end
+    that stays (`ThreadShapes.Helix`/`Ruled`), turns from the angle round the axis (DesignSpark's helices climb within
+    0.01 mm only); crossing tested against other parts only (its own flanks against each other take a minute).
+- Follow Me along a path (`Sweep.cs`): the path is pieces (line or arc) from a face's outer edge or a run of loose
+  lines (`OfLines`: on while exactly one line goes on; in one plane). Straight profile and path: mitred prisms (polyhedra)
+  united; with an arc anywhere: one body made on piece by piece (prism push/pull of the end face, `Revolve` round an
+  arc) because booleans between pieces meeting with a round cap hang; that needs smooth corners and an open path (a
+  whole circle is one whole turn). The profile touches the path at a corner or an end, or lies round an end (a pipe).
 - Names: `Names` per body (null = none); "Vaste vorm", "Oppervlak", "Solid", "Surface", "Body" (with or without a
   number) are standard names, not own names. A body that merges into another loses its name.
 - Groups (`SketchGroup(Id, Name, Parent)`, `BodyGroups`) and components: an instance is a group with `Component` and

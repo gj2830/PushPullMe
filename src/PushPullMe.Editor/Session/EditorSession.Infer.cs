@@ -87,4 +87,70 @@ public sealed partial class EditorSession
         }
         return best is { } bb ? (bb.P, bb.Dir) : null;
     }
+
+    /// <summary>The corner the mouse last rested on (within 10 pixels: of the face under it, or on the work plane), to
+    /// line up with along an axis (SketchUp's dotted "in line with a point"); null: none yet.</summary>
+    private Vec3? _restPoint;
+
+    /// <summary>Remembers the corner the mouse is on (see <see cref="_restPoint"/>).</summary>
+    private void RestOnPoint(Point pos)
+    {
+        if (_doc == null) return;
+        if (FaceAt(pos) is { } h)
+        {
+            var body = _doc.Bodies[h.Face.Body];
+            foreach (var c in body.Faces[h.Face.Face].Loops.SelectMany(l => l))
+                if (body.Edges[c.Edge] is { Start: >= 0 } e && body.Vertices[c.Forward ? e.Start : e.End] is var v && (Screen2(v) - pos).Length < 10) { _restPoint = v; return; }
+        }
+        foreach (var v in GroundCorners())
+            if ((Screen2(v) - pos).Length < 10) { _restPoint = v; return; }
+    }
+
+    /// <summary>
+    /// A point lined up with the corner rested on (see <see cref="_restPoint"/>) along an axis lying in the plane through
+    /// <paramref name="q"/> with normal <paramref name="n"/>: on the line from <paramref name="from"/> along
+    /// <paramref name="dir"/> where it crosses such a line, or else the point of such a line nearest q; only when it lies
+    /// within 12 pixels of the mouse. With the corner (taken into the plane) it lines up with, and the axis's colour.
+    /// </summary>
+    private (Vec3 P, Vec3 Corner, Color Color)? LineUp(Vec3 q, Vec3 n, Point pos, Vec3? from = null, Vec3? dir = null)
+    {
+        if (_restPoint is not { } corner) return null;
+        var axes = Axes;
+        var best = Inference.LineUp(q, n, corner, axes.Select(a => a.Dir).ToList(), from, dir)
+            .Select(x => (x.P, x.Corner, axes[x.Axis].Color, Px: (Screen2(x.P) - pos).Length))
+            .Where(x => x.Px < 12 && (x.P - x.Corner).Length > 1e-9).OrderBy(x => x.Px).ToList();
+        return best.Count > 0 ? (best[0].P, best[0].Corner, best[0].Color) : null;
+    }
+
+    /// <summary>What a point inferred on a face's plane is: where, its name (null: nothing special), the colour to draw
+    /// toward it in (null: the usual), and the line to the corner it lines up with (null: none).</summary>
+    private readonly record struct PlanePick(Vec3 P, string? Name, Color? Color, (Vec3 A, Vec3 B, Color Color)? Guide);
+
+    /// <summary>
+    /// The next point on face <paramref name="f"/>'s plane under the mouse, as the line infers it, for the tools that go
+    /// from point to point there (arcs, ◇, ⬡): a corner, middle, centre or guide crossing near the mouse; else from
+    /// <paramref name="from"/> (null: the first point) along an axis, parallel or square to an edge of the face or the
+    /// edge rested on (see <see cref="InferFrom"/>), lined up with the corner rested on where that is near; else a point
+    /// on an edge; else lined up with the corner rested on; else the mouse's point. Null: the mouse is off the plane.
+    /// </summary>
+    private PlanePick? PlanePoint(FaceRef f, Vec3? from, Point pos)
+    {
+        if (_doc == null || OnPlane(f, pos) is not { } p) return null;
+        var n = NormalOf(f);
+        var es = EdgeSnap(f, p, pos);
+        if (es is { Kind: not (Snap.OnEdge or Snap.OnLoose) } hard) return new(hard.Point, hard.Kind.Name(), null, null);
+        if (from is { } a)
+        {
+            var body = _doc.Bodies[f.Body];
+            var edges = body.Faces[f.Face].Loops.SelectMany(l => l).Select(c => body.Edges[c.Edge]).Where(e => e.Curve is BrepLine && e.Start >= 0)
+                .Select(e => (body.Vertices[e.End] - body.Vertices[e.Start]).Normalized());
+            if (InferFrom(a, pos, p, InferDirs(n, edges)) is { } inf)
+                return LineUp(inf.P, n, pos, a, inf.Dir.Dir) is { } lu
+                    ? new(lu.P, inf.Dir.Name + " · " + T("in lijn met een punt", "in line with a point"), inf.Dir.Color, (lu.Corner, lu.P, lu.Color))
+                    : new(inf.P, inf.Dir.Name, inf.Dir.Color, null);
+        }
+        if (es is { } on) return new(on.Point, on.Kind.Name(), null, null);
+        if (LineUp(p, n, pos) is { } l2) return new(l2.P, T("in lijn met een punt", "in line with a point"), null, (l2.Corner, l2.P, l2.Color));
+        return new(p, null, null, null);
+    }
 }

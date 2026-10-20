@@ -289,8 +289,18 @@ public sealed partial class EditorSession
             case "follow_me":
             {
                 int pb = Body("profile_body"); var pf = Face(pb, "profile_face");
-                int qb = Body("path_body"); var qf = Face(qb, "path_face");
-                var (doc, made) = before.FollowPath(pf, qf);
+                SketchDocument doc; List<int> made;
+                if (a["path_line"] != null)
+                {
+                    int line = (int)Num("path_line");
+                    if (line < 0 || line >= before.Lines.Count || before.Lines[line].Construction) throw new McpRefusal($"There is no loose line {line}.");
+                    (doc, made) = before.FollowLines(pf, line);
+                }
+                else
+                {
+                    int qb = Body("path_body"); var qf = Face(qb, "path_face");
+                    (doc, made) = before.FollowPath(pf, qf);
+                }
                 bool cut = doc.Volume() < before.Volume();
                 return Changed(before, doc, cut ? "volgt de rand en snijdt weg." : "volgt de rand (een lijst rondom).", cut ? "followed the edge and cut away (a chamfer or groove)." : "followed the edge (a rim added).",
                     new JsonObject { ["bodies_made"] = new JsonArray(made.Select(m => (JsonNode)m).ToArray()) });
@@ -469,6 +479,10 @@ public sealed partial class EditorSession
         m["groups"] = new JsonArray(d.Groups.Select(g => (JsonNode)new JsonObject { ["group"] = g.Id, ["name"] = d.GroupName(g.Id), ["parent"] = g.Parent, ["component"] = g.Component }).ToArray());
         m["open_group"] = _openGroup;
         m["loose_lines"] = d.Lines.Count;
+        m["loose_line_list"] = new JsonArray(d.Lines.Select((l, i) => (JsonNode)new JsonObject
+        {
+            ["line"] = i, ["start_mm"] = Mm3(l.Start), ["end_mm"] = Mm3(l.End), ["arc_centre_mm"] = l.Centre is { } c ? Mm3(c) : null, ["construction"] = l.Construction,
+        }).ToArray());
         m["volume_mm3"] = Math.Round(d.Volume() * 1e9, 3);
         m["join_after_pull"] = Join;
         // (where draw_rectangle without a face draws: the ground unless the user set another plane)

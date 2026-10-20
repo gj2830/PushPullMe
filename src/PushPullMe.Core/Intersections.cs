@@ -10,9 +10,9 @@ public static class Intersections
     private const double Eps = 1e-8;
 
     /// <summary>The first pair of faces that cross, a changed face and another one that is not its neighbour; or null.</summary>
-    public static (FaceRef A, FaceRef B)? FirstCrossing(SketchDocument doc, IReadOnlySet<FaceRef> changed)
+    public static (FaceRef A, FaceRef B)? FirstCrossing(SketchDocument doc, IReadOnlySet<FaceRef> changed, bool othersOnly = false)
     {
-        foreach (var pair in Crossings(doc, changed)) return pair;
+        foreach (var pair in Crossings(doc, changed, othersOnly)) return pair;
         return null;
     }
 
@@ -32,8 +32,9 @@ public static class Intersections
         return null;
     }
 
-    /// <summary>The pairs of faces that cross, a changed face and another one that is not its neighbour.</summary>
-    public static IEnumerable<(FaceRef A, FaceRef B)> Crossings(SketchDocument doc, IReadOnlySet<FaceRef> changed)
+    /// <summary>The pairs of faces that cross, a changed face and another one that is not its neighbour
+    /// (<paramref name="othersOnly"/>: one of another body; a body that cannot cross itself is not tested against itself).</summary>
+    public static IEnumerable<(FaceRef A, FaceRef B)> Crossings(SketchDocument doc, IReadOnlySet<FaceRef> changed, bool othersOnly = false)
     {
         // neighbours (a shared vertex or edge) meet along their edges by nature: not tested against each other
         var touch = new Dictionary<FaceRef, HashSet<(int body, int key)>>();
@@ -54,7 +55,7 @@ public static class Intersections
         foreach (var a in all.Where(x => changed.Contains(x.Face)))
             foreach (var b in all)
             {
-                if (a.Face == b.Face || !Overlap(a.Box, b.Box)) continue;
+                if (a.Face == b.Face || othersOnly && a.Face.Body == b.Face.Body || !Overlap(a.Box, b.Box)) continue;
                 if (a.Face.Body == b.Face.Body && Keys(a.Face).Overlaps(Keys(b.Face))) continue;
                 if (Any(a.Tris, b.Tris, b.Box)) yield return (a.Face, b.Face);
             }

@@ -184,8 +184,9 @@ public sealed partial class SketchDocument
     {
         var body = Bodies[f.Body];
         if (body.Sheet) return PushSheet(f, distance, checkCrossing, join);
-        // the end of a piece turned round an axis: it follows the turn, out and in (as DesignSpark)
+        // the end of a piece turned round an axis: it follows the turn, out and in (as DesignSpark); of a thread: the helix
         if (!straight && Core.Revolve.EndAxis(body, f.Face) is { } end) return TurnEnd(f, end, distance, checkCrossing);
+        if (!straight && ScrewEnd.Of(body, f.Face) is { } screw) return ScrewOn(f, screw, distance, checkCrossing);
         if (body.Faces[f.Face].Surface is BrepCylinder || (body.Faces[f.Face].Surface is BrepSphere or BrepTorus && Core.PushPull.IsRoundingSet(body, f.Face)))
             return PushPullCylinder(f, distance, checkCrossing);
         PushPullResult r;
@@ -472,6 +473,29 @@ public sealed partial class SketchDocument
         if (Math.Abs(angle) >= 2 * Math.PI) throw new PushPullException(Lang.T("Zo ver draait het vlak helemaal rond; dat kan niet.", "That far the face turns all the way round; that is not possible."));
         var (doc, r) = Move(f.Body, MoveSelection.Face(f.Face), new Motion(default, new BrepTransform.Turn(end.Point, end.Dir, angle)), checkCrossing);
         return (doc, new PushPullResult(r.Body, r.FaceMap, [], [], new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>(), r.Changed, []));
+    }
+
+    /// <summary>The end face of a thread moved along its helix (see <see cref="ScrewEnd"/>).</summary>
+    private (SketchDocument Doc, PushPullResult Result) ScrewOn(FaceRef f, ScrewEnd.Screw screw, double distance, bool checkCrossing)
+    {
+        var moved = ScrewEnd.Moved(Bodies[f.Body], f.Face, screw, distance);
+        // (every round face shown anew: the helical ones are new, the cylinders reach further or less far)
+        var curved = (IReadOnlyDictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>)Enumerable.Range(0, moved.Faces.Count)
+            .Select(g => (g, t: moved.Faces[g].Surface is BrepPlane ? null : FaceGeometry.CurvedTriangles(moved, moved.Faces[g]))).Where(x => x.t != null)
+            .ToDictionary(x => x.g, x => (IReadOnlyList<(Vec3, Vec3, Vec3)>)x.t!);
+        var doc = new SketchDocument
+        {
+            Lines = Lines,
+            Bodies = Bodies.Select((b, i) => i == f.Body ? moved : b).ToList(),
+            Curved = Curved.Select((c, i) => i == f.Body ? curved : c).ToList(),
+            Colors = Colors,
+        };
+        var all = Enumerable.Range(0, moved.Faces.Count).ToList();
+        // (only against other parts: a thread made on along its own helix does not come through its own turns, and testing
+        // its flanks against each other is slow)
+        if (checkCrossing && Intersections.FirstCrossing(doc, all.Select(g => new FaceRef(f.Body, g)).ToHashSet(), othersOnly: true) is not null)
+            throw new PushPullException(Lang.T("Zo komt de schroefdraad door een ander deel van het model heen; dat kan nog niet.", "That way the thread goes through another part of the model; that is not possible yet."));
+        return (doc, new PushPullResult(moved, all, [], [], new Dictionary<int, IReadOnlyList<(Vec3, Vec3, Vec3)>>(), all, []));
     }
 
     /// <summary>A face tilted round an axis (one of its edges): see <see cref="Core.PushPull.Move(BrepBody, MoveSelection, Motion)"/>.</summary>
@@ -1051,25 +1075,37 @@ public sealed partial class SketchDocument
 
     /// <summary>
     /// SketchUp's Follow Me along a path (see <see cref="Sweep"/>): the profile face swept along the outer edge of the
-    /// path face (both of one body). Where the sweep lies in the body (a profile drawn on its side, at a corner of the
-    /// path) it is cut away, as a chamfer or a groove round it; else it is added, as a rim. The bodies the result is in.
+    /// path face (the profile of the same body, of another part, or a face without thickness, which is used up). Where
+    /// the sweep lies in the path's body (a profile drawn on its side, at a corner of the path) it is cut away, as a
+    /// chamfer or a groove round it; else it is added, as a rim. The bodies the result is in.
     /// </summary>
     public (SketchDocument Doc, List<int> Bodies) FollowPath(FaceRef profile, FaceRef path)
     {
         NoSheet(path.Body);
-        // (a face without thickness may be the profile for a path on another part: it is used up)
+        return Follow(profile, Sweep.OfFace(Bodies[path.Body], path.Face), path.Body);
+    }
+
+    /// <summary>
+    /// Follow Me along loose lines: the profile face swept along the run of loose lines and arcs that line
+    /// <paramref name="line"/> is part of (see <see cref="Sweep.OfLines"/>). A face without thickness as the profile is
+    /// used up and the sweep is a part of its own; a face of a solid has the sweep added to its body (or cut away where
+    /// it lies in it).
+    /// </summary>
+    public (SketchDocument Doc, List<int> Bodies) FollowLines(FaceRef profile, int line) =>
+        Follow(profile, Sweep.OfLines(Lines, line), Bodies[profile.Body].Sheet ? null : profile.Body);
+
+    private (SketchDocument Doc, List<int> Bodies) Follow(FaceRef profile, Sweep.SweepPath path, int? into)
+    {
         bool sheet = Bodies[profile.Body].Sheet;
-        if (profile.Body != path.Body && !sheet) throw new PushPullException(Lang.T("Het profiel en het pad moeten van hetzelfde deel zijn (of het profiel een vlak zonder dikte).", "The profile and the path must be of the same part (or the profile a face without thickness)."));
-        var prisms = Sweep.Prisms(Bodies[profile.Body], profile.Face, Bodies[path.Body], path.Face);
-        var swept = prisms[0];
-        for (int i = 1; i < prisms.Count; i++) swept = Booleans.Combine(swept, prisms[i], Booleans.Op.Union).Single().Body;
-        // (a point of the first prism: in the body or not)
-        var probe = prisms[0].Vertices.Aggregate(new Vec3(0, 0, 0), (a, v) => a + v) * (1.0 / prisms[0].Vertices.Count);
-        var tris = Enumerable.Range(0, Bodies[path.Body].Faces.Count).SelectMany(g => TrianglesOf(new FaceRef(path.Body, g))).ToList();
-        var op = Inside(tris, probe) ? Booleans.Op.Subtract : Booleans.Op.Union;
-        var (start, pathBody) = sheet ? WithoutSheetFace(profile, path.Body) : (this, path.Body);
+        var (pieces, probe) = Sweep.Pieces(Bodies[profile.Body], profile.Face, path);
+        var swept = pieces[0];
+        for (int i = 1; i < pieces.Count; i++) swept = Booleans.Combine(swept, pieces[i], Booleans.Op.Union).Single().Body;
+        var (start, target) = sheet ? WithoutSheetFace(profile, into ?? 0) : (this, into ?? 0);
         var both = start.AddBody(swept);
-        return both.Combine(pathBody, both.Bodies.Count - 1, op);
+        if (into == null) return (both, [both.Bodies.Count - 1]);
+        var tris = Enumerable.Range(0, Bodies[into.Value].Faces.Count).SelectMany(g => TrianglesOf(new FaceRef(into.Value, g))).ToList();
+        var op = Inside(tris, probe) ? Booleans.Op.Subtract : Booleans.Op.Union;
+        return both.Combine(target, both.Bodies.Count - 1, op);
     }
 
     /// <summary>A body added as the last one (its round faces in triangles).</summary>

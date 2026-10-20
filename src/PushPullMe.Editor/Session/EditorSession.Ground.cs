@@ -92,13 +92,28 @@ public sealed partial class EditorSession
     /// point along an axis of the plane, parallel or square to a line drawn before or to the edge rested on last (see
     /// <see cref="InferDirs"/>), else where the mouse points; with the direction it was inferred along.
     /// </summary>
-    private (Vec3 P, InferDir? Along)? GroundLinePoint(Point pos)
+    private (Vec3 P, InferDir? Along, (Vec3 A, Vec3 B, Color Color)? Guide)? GroundLinePoint(Point pos)
     {
         if (GroundAt(pos) is not { } g) return null;
-        if (_gKind != GroundKind.Line || _gPts.Count == 0 || GroundCorners().Any(c => (c - g).Length < 1e-12)) return (g, null);
+        if (_gKind != GroundKind.Line || _gPts.Count == 0 || GroundCorners().Any(c => (c - g).Length < 1e-12)) return (g, null, null);
+        var last = _gPts[^1];
+        if (_groundAxis is int held)
+        {
+            // (held to an axis of the plane by an arrow key: the mouse's point taken onto it)
+            var ax = held == 0 ? _plane.X : _plane.Y;
+            var q = last + ax * (Math.Round((g - last).Dot(ax) * Display * 10) / 10 / Display);
+            return (q, new InferDir(ax, T("langs de ", "along the ") + (held == 0 ? T("rode as", "red axis") : T("groene as", "green axis")), held == 0 ? AxisX : AxisY), null);
+        }
         var drawn = _gPts.Zip(_gPts.Skip(1)).Select(s => (s.Second - s.First).Normalized());
-        return InferFrom(_gPts[^1], pos, g, InferDirs(_plane.N, drawn)) is { } inf ? (inf.P, inf.Dir) : (g, null);
+        if (InferFrom(last, pos, g, InferDirs(_plane.N, drawn)) is { } inf)
+            return LineUp(inf.P, _plane.N, pos, last, inf.Dir.Dir) is { } lu
+                ? (lu.P, inf.Dir with { Name = inf.Dir.Name + " · " + T("in lijn met een punt", "in line with a point") }, (lu.Corner, lu.P, lu.Color))
+                : (inf.P, inf.Dir, null);
+        return LineUp(g, _plane.N, pos) is { } l2 ? (l2.P, null, (l2.Corner, l2.P, l2.Color)) : (g, null, null);
     }
+
+    /// <summary>The axis of the work plane a line on it is held to by an arrow key (0 red, 1 green; null: none).</summary>
+    private int? _groundAxis;
 
     /// <summary>A click on the work plane: the first point of a shape, or its next or last.</summary>
     private void GroundClick(Point pos)
@@ -202,7 +217,7 @@ public sealed partial class EditorSession
                 MeasureBox.Text = Mm(r);
                 break;
             default:
-                ShowSketch([_gPts[^1], g], default, color: gl.Along?.Color);
+                ShowSketch([_gPts[^1], g], default, color: gl.Along?.Color, guide: gl.Guide);
                 MeasureBox.Text = Mm((g - _gPts[^1]).Length);
                 if (gl.Along is { } al) StatusText.Text = T($"╱ {Mm((g - _gPts[^1]).Length)} mm {al.Name} · klik, of typ een lengte + Enter. Esc: klaar.", $"╱ {Mm((g - _gPts[^1]).Length)} mm {al.Name} · click, or type a length + Enter. Esc: done.");
                 break;
@@ -245,7 +260,7 @@ public sealed partial class EditorSession
 
     private void EndGround()
     {
-        _gKind = null; _gPts.Clear();
+        _gKind = null; _gPts.Clear(); _groundAxis = null;
         ShowSketch([]);
     }
 

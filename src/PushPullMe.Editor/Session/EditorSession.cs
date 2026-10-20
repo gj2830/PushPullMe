@@ -146,7 +146,7 @@ public sealed partial class EditorSession
         // (the snap marks were put a little toward the eye as it was: away, the next mouse move brings them back)
         ShowMarks([]);
         if (_doc == null) return;
-        if (_sketchShown is { } sk) ShowSketch(sk.Pts, default, sk.Closed, sk.Color);
+        if (_sketchShown is { } sk) ShowSketch(sk.Pts, default, sk.Closed, sk.Color, sk.Guide);
         RenderLoose(_doc);
         PlaceNotes();
     }
@@ -414,8 +414,8 @@ public sealed partial class EditorSession
 
     /// <summary>
     /// Body <paramref name="b"/> as shown (per colour one mesh of triangles: flat faces flat, round faces shaded smooth;
-    /// outside the open group faded, not to be picked, without edges; its edges not between two round faces: those are
-    /// soft, as in SketchUp); the one made before when the body, its colours and its place in or outside the open group
+    /// outside the open group faded, not to be picked, without edges; its edges but the soft ones, see
+    /// <see cref="FaceGeometry.SoftEdges"/>); the one made before when the body, its colours and its place in or outside the open group
     /// are the same and nothing is cut away by a section.
     /// </summary>
     private BodyView ViewOf(SketchDocument doc, int b)
@@ -462,12 +462,10 @@ public sealed partial class EditorSession
         var edges = new List<Point3D>();
         if (!outside)
         {
-            var curvedUses = new int[body.Edges.Count];
-            foreach (var face in body.Faces.Where(f => f.Surface is not BrepPlane))
-                foreach (var c in face.Loops.SelectMany(l => l)) curvedUses[c.Edge]++;
+            var soft = FaceGeometry.SoftEdges(body);
             for (int e = 0; e < body.Edges.Count; e++)
             {
-                if (curvedUses[e] >= 2) continue;
+                if (soft[e]) continue;
                 var line = FaceGeometry.EdgePoints(body, body.Edges[e]);
                 for (int i = 0; i + 1 < line.Count; i++)
                     if (ClippedSegment(line[i], line[i + 1]) is { } seg) { edges.Add(P(seg.A)); edges.Add(P(seg.B)); }
@@ -772,7 +770,7 @@ public sealed partial class EditorSession
     {
         if (Tool == tool) return;
         Tool = tool;
-        _restEdge = null;
+        _restEdge = null; _restPoint = null;
         ToolChanged?.Invoke();
         PaintPanel.On = PaintMode;
         if (PaintMode) SetPaint(_paint); else _sampleOnce = false;
@@ -824,8 +822,12 @@ public sealed partial class EditorSession
         _mouseAt = pos;
         if (_doc == null) return;
         UpdateMarks(pos);
-        // (the edge the mouse rests on: to line up with later, see InferDirs)
-        if (Tool is Tool.Line or Tool.Move or Tool.Tape) RestOnEdge(pos);
+        // (the edge and the corner the mouse rests on: to line up with later, see InferDirs and LineUp)
+        if (Tool is Tool.Line or Tool.Move or Tool.Tape or Tool.Rotate or Tool.Arc or Tool.Arc3 or Tool.CentreArc or Tool.Pie or Tool.Polygon or Tool.RotatedRectangle)
+        {
+            RestOnEdge(pos);
+            RestOnPoint(pos);
+        }
         if (_movePick != null) { MoveTo(pos); return; }
         if (_dragFace != null) { DragTo(pos); return; }
         if (_drawFace != null) { DrawTo(pos); return; }
@@ -1606,6 +1608,7 @@ public sealed partial class EditorSession
     /// </summary>
     private (Vec3 P, string? Label, Color? Color, bool OnEdge) LineCandidate(FaceRef f, Vec3 p, Point pos)
     {
+        _lineGuide = null;
         var body = _doc!.Bodies[f.Body];
         var face = body.Faces[f.Face];
         var n = NormalOf(f); var o = ((BrepPlane)face.Surface).Origin;
@@ -1645,13 +1648,26 @@ public sealed partial class EditorSession
                     if (PushPullMe.Core.Drawing.RayToEdges(body, plane, last, sdir) is { } across
                         && ((Screen(across) - pos).Length < 15 || Math.Abs((q - last).Length - (across - last).Length) < 0.06 / Display))
                         return (across, name + T(", tot de rand", ", to the edge"), color, true);
+                    if (LineUp(q, n, pos, last, dir) is { } lu)
+                    {
+                        _lineGuide = (lu.Corner, lu.P, lu.Color);
+                        return (lu.P, name + " · " + T("in lijn met een punt", "in line with a point"), color, OnEdge(lu.P));
+                    }
                     return (q, name, color, OnEdge(q));
                 }
         }
         if (es is { } on) return (on.Point, on.Kind.Name(), null, on.Kind != Snap.OnLoose || OnEdge(on.Point));
         if (GuideSnap(p, pos, n, o) is { } g) return (g.Point, g.Kind.Name(), null, OnEdge(g.Point));
+        if (LineUp(p, n, pos) is { } l2)
+        {
+            _lineGuide = (l2.Corner, l2.P, l2.Color);
+            return (l2.P, T("in lijn met een punt", "in line with a point"), null, OnEdge(l2.P));
+        }
         return (p, null, null, OnEdge(p));
     }
+
+    /// <summary>The line from the corner the last point of a line lines up with (see <see cref="LineUp"/>), or null.</summary>
+    private (Vec3 A, Vec3 B, Color Color)? _lineGuide;
 
     private void DrawTo(Point pos)
     {
@@ -1690,7 +1706,7 @@ public sealed partial class EditorSession
         var c = LineCandidate(f, p, pos);
         _drawEnd = c.P; _drawEndOk = true; _lineColor = c.Color;
         var shown = _linePts.Append(c.P).ToList();
-        ShowSketch(shown, n, color: c.Color);
+        ShowSketch(shown, n, color: c.Color, guide: _lineGuide);
         double len = (c.P - _linePts[^1]).Length;
         MeasureBox.Text = Mm(len);
         StatusText.Text = T($"╱ {Mm(len)} mm{(c.Label != null ? " · " + c.Label : "")} · klik voor het volgende punt, of typ een lengte + Enter. Esc: klaar.", $"╱ {Mm(len)} mm{(c.Label != null ? " · " + c.Label : "")} · click for the next point, or type a length + Enter. Esc: done.");
@@ -1978,16 +1994,26 @@ public sealed partial class EditorSession
     }
 
     /// <summary>The last sketch shown (to show it again when the camera moves).</summary>
-    private (IReadOnlyList<Vec3> Pts, bool Closed, Color? Color)? _sketchShown;
+    private (IReadOnlyList<Vec3> Pts, bool Closed, Color? Color, (Vec3 A, Vec3 B, Color Color)? Guide)? _sketchShown;
+
+    /// <summary>The thin line from a corner to the point lined up with it (see <see cref="LineUp"/>), or null.</summary>
+    private LineSet? _sketchGuide;
 
     /// <summary>What is being drawn, as lines (a single point as a small cross), moved a little toward the camera so the
-    /// face (and its highlight) does not hide them. (n: the face's normal; no longer used.)</summary>
-    private void ShowSketch(IReadOnlyList<Vec3> pts, Vec3 n = default, bool closed = false, Color? color = null)
+    /// face (and its highlight) does not hide them; with <paramref name="guide"/> a thin line in an axis's colour from
+    /// the corner a point lines up with. (n: the face's normal; no longer used.)</summary>
+    private void ShowSketch(IReadOnlyList<Vec3> pts, Vec3 n = default, bool closed = false, Color? color = null, (Vec3 A, Vec3 B, Color Color)? guide = null)
     {
         if (_sketch != null) { View.Children.Remove(_sketch); _sketch = null; }
-        _sketchShown = pts.Count == 0 ? null : (pts.ToList(), closed, color);
+        if (_sketchGuide != null) { View.Children.Remove(_sketchGuide); _sketchGuide = null; }
+        _sketchShown = pts.Count == 0 ? null : (pts.ToList(), closed, color, guide);
         if (pts.Count == 0) return;
         Point3D Q(Vec3 v) => TowardEye(P(v), 2e-3);
+        if (guide is { } gd)
+        {
+            _sketchGuide = new LineSet { Points = [Q(gd.A), Q(gd.B)], Color = gd.Color, Thickness = 1.2 };
+            View.Children.Add(_sketchGuide);
+        }
         var lines = new Point3DCollection();
         if (pts.Count == 1)
         {
@@ -2956,7 +2982,9 @@ public sealed partial class EditorSession
         }
         else n = FaceGeometry.Normal(face);
         _dragNormal = new Vector3D(n.X, n.Y, n.Z);
-        _dragTurn = face.Surface is BrepPlane ? PushPullMe.Core.Revolve.EndAxis(_doc.Bodies[f.Body], f.Face) : null;
+        // (the end of a turned piece, or of a thread: the mouse goes round the axis, the way along the turn or the helix)
+        _dragTurn = face.Surface is not BrepPlane ? null : PushPullMe.Core.Revolve.EndAxis(_doc.Bodies[f.Body], f.Face)
+            ?? (ScrewEnd.Of(_doc.Bodies[f.Body], f.Face) is { } sc ? (sc.Point, sc.Out, sc.PerRadian) : null);
         // (Ctrl: the end of a turned piece straight on, as DesignSpark's pull of a copy of the face)
         _dragStraight = _dragTurn != null && (Mods & ModifierKeys.Control) != 0;
         if (_dragStraight) _dragTurn = null;
@@ -3253,12 +3281,11 @@ public sealed partial class EditorSession
         var n = NormalOf(f);
         if (_swStage == 1)
         {
-            if (ArcPoint(f, pos) is not { } p) return;
-            var d = p - _swCentre; d -= n * d.Dot(n);
+            if (PlanePoint(f, _swCentre, pos) is not { } pk) return;
+            var d = pk.P - _swCentre; d -= n * d.Dot(n);
             if (d.Length < 1e-9) return;
             _swDir = d.Normalized();
-            ShowSketch([_swCentre, _swCentre + d], n);
-            MeasureBox.Text = Mm(d.Length);
+            ShowFrom(_swCentre, pk with { P = _swCentre + d }, n, SweepIcon, "klik het beginpunt, of typ de straal + Enter. Esc breekt af.", "click the start point, or type the radius + Enter. Esc cancels.");
             return;
         }
         if (OnPlane(f, pos) is not { } q) return;
@@ -3285,7 +3312,7 @@ public sealed partial class EditorSession
         if (_swFace is not { } f || _doc is not { } before) return;
         if (_swStage == 1)
         {
-            if (ArcPoint(f, pos) is not { } p) return;
+            if (PlanePoint(f, _swCentre, pos)?.P is not { } p) return;
             var n = NormalOf(f);
             var d = p - _swCentre; d -= n * d.Dot(n);
             if (d.Length < 1e-6) return;
@@ -4262,6 +4289,20 @@ public sealed partial class EditorSession
         if (_fmStage == 1)
         {
             if (AxisAt(f, pos) is { } ax) { ShowSketch([ax.A, ax.B], default, color: AxisZ); StatusText.Text = T("↝ Klik om deze lijn als as te nemen.", "↝ Click to take this line as the axis."); }
+            else if (LooseAt(pos) is int li && !baseDoc.Lines[li].Construction)
+            {
+                // the run of loose lines that would be the path
+                try
+                {
+                    var run = Sweep.OfLines(baseDoc.Lines, li);
+                    var pts = new List<Vec3>();
+                    foreach (var piece in run.Pieces)
+                        pts.AddRange((piece.Arc is { } c ? PushPullMe.Core.Drawing.ArcPoints(c, piece.A, piece.B) : [piece.A, piece.B]).Skip(pts.Count > 0 ? 1 : 0));
+                    ShowSketch(pts, default, color: InferColor);
+                    StatusText.Text = T("↝ Klik om het profiel langs deze losse lijnen te laten lopen.", "↝ Click to sweep the profile along these loose lines.");
+                }
+                catch (PushPullException ex) { ShowSketch([]); StatusText.Text = "⛔ " + ex.Message; }
+            }
             else { ShowSketch([]); StatusText.Text = T("↝ Klik de as (een rechte rand, losse lijn of hulplijn in het vlak van dit vlak), of een vlak waarvan de rand het pad is. Esc breekt af.", "↝ Click the axis (a straight edge, loose line or guide line in the plane of this face), or a face whose edge is the path. Esc cancels."); }
             return;
         }
@@ -4305,8 +4346,10 @@ public sealed partial class EditorSession
         {
             if (AxisAt(f, pos) is not { } ax)
             {
-                // no axis there: a face, whose edge is the path to sweep the profile along
-                if (FaceAt(pos) is { } h && h.Face != f && IsPlanar(h.Face)) { EndFollow(); ApplyFollowPath(baseDoc, f, h.Face); }
+                // no axis there: a loose line, the run of loose lines it is part of the path; or a face, whose edge is the
+                // path to sweep the profile along
+                if (LooseAt(pos) is int li && !baseDoc.Lines[li].Construction) { EndFollow(); ApplyFollowLines(baseDoc, f, li); }
+                else if (FaceAt(pos) is { } h && h.Face != f && IsPlanar(h.Face)) { EndFollow(); ApplyFollowPath(baseDoc, f, h.Face); }
                 return;
             }
             try
@@ -4329,6 +4372,29 @@ public sealed partial class EditorSession
         var (p, dir, ang) = (_fmAxisP, _fmAxisDir, _fmAngle);
         EndFollow();
         ApplyFollow(baseDoc, f, p, dir, ang);
+    }
+
+    /// <summary>The profile swept along the run of loose lines that line <paramref name="line"/> is part of.</summary>
+    private void ApplyFollowLines(SketchDocument before, FaceRef profile, int line)
+    {
+        try
+        {
+            var (doc, _) = before.FollowLines(profile, line);
+            Commit(before, doc);
+            _last = null; _selected = null; _hover = null;
+            Render();
+            bool cut = doc.Volume() < before.Volume();
+            StatusText.Text = cut ? T("✅ Langs de losse lijnen gevolgd en weggesneden.", "✅ Followed along the loose lines and cut away.")
+                : T("✅ Langs de losse lijnen gevolgd.", "✅ Followed along the loose lines.");
+            Log(string.Create(CultureInfo.InvariantCulture, $"follow me: profile face {profile.Face} along loose line {line}: ok, {(cut ? "cut" : "added")}, volume {doc.Volume() * 1e9:0.###} mm³"));
+        }
+        catch (PushPullException ex)
+        {
+            Render();
+            ShowToast(T("⛔ Dat lukt niet", "⛔ That does not work"), ex.Message);
+            StatusText.Text = "⛔ " + ex.Message;
+            Log($"follow me along loose line {line}: {ex.Message}");
+        }
     }
 
     /// <summary>The profile swept along the edge of the path face (cut away where it lies in the body).</summary>
@@ -4415,7 +4481,7 @@ public sealed partial class EditorSession
         var n = NormalOf(f);
         if (_rrStage == 1)
         {
-            if (ArcPoint(f, pos) is { } p) { ShowSketch([_rrA, p], n); MeasureBox.Text = Mm((p - _rrA).Length); }
+            if (PlanePoint(f, _rrA, pos) is { } pk) ShowFrom(_rrA, pk, n, "◇", "klik de tweede hoek. Esc breekt af.", "click the second corner. Esc cancels.");
             return;
         }
         if (OnPlane(f, pos) is not { } q) return;
@@ -4433,7 +4499,7 @@ public sealed partial class EditorSession
         if (_rrFace is not { } f || _doc is not { } before) return;
         if (_rrStage == 1)
         {
-            if (ArcPoint(f, pos) is not { } p || (p - _rrA).Length < 1e-6) return;
+            if (PlanePoint(f, _rrA, pos)?.P is not { } p || (p - _rrA).Length < 1e-6) return;
             _rrB = p; _rrStage = 2; _rrWidth = 0;
             StatusText.Text = T("◇ Beweeg voor de breedte en klik, of typ de breedte + Enter. Esc breekt af.", "◇ Move for the width and click, or type the width + Enter. Esc cancels.");
             return;
@@ -4478,11 +4544,18 @@ public sealed partial class EditorSession
     private bool _arc3;
     private Vec3? _arcC;
 
-    /// <summary>The point under the mouse on the face's plane, snapped to a corner, middle or edge as the line does.</summary>
-    private Vec3? ArcPoint(FaceRef f, Point pos)
+    /// <summary>The point under the mouse on the face's plane, snapped to a corner, middle or edge as the line does, or
+    /// lined up with the corner rested on (see <see cref="PlanePoint"/>).</summary>
+    private Vec3? ArcPoint(FaceRef f, Point pos) => PlanePoint(f, null, pos)?.P;
+
+    /// <summary>The sketch from <paramref name="from"/> to the point inferred (see <see cref="PlanePoint"/>), its length in
+    /// the box and what it is in the status bar.</summary>
+    private void ShowFrom(Vec3 from, PlanePick pk, Vec3 n, string icon, string nl, string en)
     {
-        if (OnPlane(f, pos) is not { } p) return null;
-        return EdgeSnap(f, p, pos) is { } s ? s.Point : p;
+        ShowSketch([from, pk.P], n, color: pk.Color, guide: pk.Guide);
+        string len = Mm((pk.P - from).Length), what = pk.Name != null ? " · " + pk.Name : "";
+        MeasureBox.Text = len;
+        StatusText.Text = T($"{icon} {len} mm{what} · {nl}", $"{icon} {len} mm{what} · {en}");
     }
 
     private void StartArc((FaceRef Face, Point3D Point)? hit, Point pos)
@@ -4510,14 +4583,16 @@ public sealed partial class EditorSession
         var n = NormalOf(f);
         if (_arcStage == 1)
         {
-            if (ArcPoint(f, pos) is { } p) { ShowSketch([_arcA, p], n); MeasureBox.Text = Mm((p - _arcA).Length); }
+            if (PlanePoint(f, _arcA, pos) is { } pk)
+                ShowFrom(_arcA, pk, n, _arc3 ? "⌓" : "⌒", _arc3 ? "klik een punt waar de boog doorheen gaat. Esc breekt af." : "klik het eindpunt van de boog. Esc breekt af.",
+                    _arc3 ? "click a point the arc goes through. Esc cancels." : "click the end point of the arc. Esc cancels.");
             return;
         }
         if (_arc3)
         {
             // the end under the mouse; the arc from A through B to it
             _arcC = null;
-            if (ArcPoint(f, pos) is not { } e) return;
+            if (PlanePoint(f, _arcA, pos)?.P is not { } e) return;
             if (!Bends(_arcA, _arcB, e, n)) { ShowSketch([_arcA, _arcB, e], n); StatusText.Text = T("⌓ De drie punten liggen (bijna) op een lijn; beweeg verder opzij.", "⌓ The three points lie (almost) on a line; move further aside."); return; }
             _arcC = e;
             var c3 = PushPullMe.Core.Drawing.ArcThrough(_arcA, _arcB, e, n);
@@ -4548,7 +4623,7 @@ public sealed partial class EditorSession
         if (_arcFace is not { } f || _doc is not { } before) return;
         if (_arcStage == 1)
         {
-            if (ArcPoint(f, pos) is not { } p || (p - _arcA).Length < 1e-6) return;
+            if (PlanePoint(f, _arcA, pos)?.P is not { } p || (p - _arcA).Length < 1e-6) return;
             _arcB = p; _arcStage = 2; _arcBulge = 0;
             StatusText.Text = _arc3 ? T("⌓ Klik het eindpunt van de boog. Esc breekt af.", "⌓ Click the end point of the arc. Esc cancels.") : T("⌒ Beweeg voor de bolling en klik, of typ de bolling + Enter. Esc breekt af.", "⌒ Move for the bulge and click, or type the bulge + Enter. Esc cancels.");
             return;
@@ -4678,13 +4753,13 @@ public sealed partial class EditorSession
     private void PolygonTo(Point pos)
     {
         if (_polyFace is not { } f || _doc == null || _typed.Length > 0) return;
-        if (OnPlane(f, pos) is not { } p) return;
+        if (PlanePoint(f, _polyCentre, pos) is not { } pk) return;
         var n = NormalOf(f);
-        var d = p - _polyCentre; d -= n * d.Dot(n);
+        var d = pk.P - _polyCentre; d -= n * d.Dot(n);
         double r = Math.Round(d.Length * Display * 10) / 10 / Display;
         if (r < 1e-7) return;
         _polyDir = d.Normalized(); _polyRadius = r;
-        ShowSketch(PolygonCorners(_polyCentre, _polyDir, r, n), n, closed: true);
+        ShowSketch(PolygonCorners(_polyCentre, _polyDir, r, n), n, closed: true, color: pk.Color, guide: pk.Guide);
         MeasureBox.Text = Mm(r);
         StatusText.Text = T($"⬡ {_polySides} hoeken, straal {Mm(r)} mm (zijde {Mm(2 * r * Math.Sin(Math.PI / _polySides))} mm) · klik, of typ de straal + Enter. ↑/↓: meer/minder hoeken. Esc breekt af.", $"⬡ {_polySides} sides, radius {Mm(r)} mm (side {Mm(2 * r * Math.Sin(Math.PI / _polySides))} mm) · click, or type the radius + Enter. ↑/↓: more/fewer sides. Esc cancels.");
     }
@@ -5088,20 +5163,41 @@ public sealed partial class EditorSession
         if (start is { } s0) { segs.Add(_rotCentre); segs.Add(_rotCentre + s0 * (r * 1.3)); }
         if (now is { } n0) { segs.Add(_rotCentre); segs.Add(_rotCentre + n0 * (r * 1.3)); }
         if (_sketch != null) { View.Children.Remove(_sketch); _sketch = null; }
+        if (_sketchGuide != null) { View.Children.Remove(_sketchGuide); _sketchGuide = null; }
         _sketchShown = null;
         var axisColor = Axes.FirstOrDefault(a => Math.Abs(a.Dir.Dot(_rotAxis)) > 1 - 1e-9).Color;
         _sketch = new LineSet { Points = new Point3DCollection(segs.Select(v => TowardEye(P(v), 2e-3))), Color = axisColor == default ? SelectColor : axisColor, Thickness = 2.5 };
         View.Children.Add(_sketch);
     }
 
+    /// <summary>The start direction of a turn under the mouse (unit, square to the axis): along an axis or parallel or
+    /// square to the edge rested on (see <see cref="InferFrom"/>) when the mouse is near it, with that direction's name;
+    /// null: the mouse is off the plane of the turn.</summary>
+    private (Vec3 Dir, string? Name)? RotateStartDir(Point pos)
+    {
+        if (OnRotatePlane(pos) is not { } p) return null;
+        string? name = null;
+        if (InferFrom(_rotCentre, pos, p, InferDirs(_rotAxis, [])) is { } inf) { p = inf.P; name = inf.Dir.Name; }
+        var v = p - _rotCentre; v -= _rotAxis * v.Dot(_rotAxis);
+        return v.Length < 1e-9 ? null : (v.Normalized(), name);
+    }
+
     private void RotateTo(Point pos)
     {
         if (_rotStage == 0 || _rotBase == null || _typed.Length > 0) return;
+        if (_rotStage == 1)
+        {
+            if (RotateStartDir(pos) is { } sd)
+            {
+                ShowProtractor(sd.Dir, null);
+                if (sd.Name != null) StatusText.Text = T($"↻ Beginrichting {sd.Name} · klik, of typ de hoek + Enter. Esc breekt af.", $"↻ Start direction {sd.Name} · click, or type the angle + Enter. Esc cancels.");
+            }
+            return;
+        }
         if (OnRotatePlane(pos) is not { } p) return;
         var v = p - _rotCentre; v -= _rotAxis * v.Dot(_rotAxis);
         if (v.Length < 1e-9) return;
         v = v.Normalized();
-        if (_rotStage == 1) { ShowProtractor(v, null); return; }
         // the angle from the start direction, counter-clockwise round the axis; near a multiple of 15°: that
         double deg = Math.Atan2(_rotRef.Cross(v).Dot(_rotAxis), _rotRef.Dot(v)) * 180 / Math.PI;
         double snapped = Math.Round(deg / 15) * 15;
@@ -5124,10 +5220,8 @@ public sealed partial class EditorSession
     {
         if (_rotStage == 1)
         {
-            if (OnRotatePlane(pos) is not { } p) return;
-            var v = p - _rotCentre; v -= _rotAxis * v.Dot(_rotAxis);
-            if (v.Length < 1e-7) return;
-            _rotRef = v.Normalized(); _rotStage = 2;
+            if (RotateStartDir(pos) is not { } sd) return;
+            _rotRef = sd.Dir; _rotStage = 2;
             StatusText.Text = T("↻ Beweeg om te draaien; klik om vast te zetten, of typ de hoek + Enter. Esc breekt af.", "↻ Move to rotate; click to set it, or type the angle + Enter. Esc cancels.");
             return;
         }
@@ -5188,6 +5282,7 @@ public sealed partial class EditorSession
         if (_roundSel is { } sel) foreach (int e in sel.Edges) AddEdge(sel.Body, e);
         if (hoverBody is int hb && hoverEdge is int he) AddEdge(hb, he);
         if (_sketch != null) { View.Children.Remove(_sketch); _sketch = null; }
+        if (_sketchGuide != null) { View.Children.Remove(_sketchGuide); _sketchGuide = null; }
         _sketchShown = null;
         if (lines.Count == 0) return;
         var pts3 = new Point3DCollection(lines.Select(v => TowardEye(P(v), 2e-3)));
@@ -5594,6 +5689,12 @@ public sealed partial class EditorSession
                 break;
             case Key.M when _typed.Length == 0:
                 SetTool(Tool.Move); handled = true;
+                break;
+            case Key.Right or Key.Left or Key.Up or Key.Down when _gKind == GroundKind.Line && _gPts.Count > 0:
+                // held to the work plane's red (right) or green (left) axis; again, up or down lets go
+                _groundAxis = key switch { Key.Right => _groundAxis == 0 ? null : 0, Key.Left => _groundAxis == 1 ? null : 1, _ => null };
+                GroundTo(_mouseAt);
+                handled = true;
                 break;
             case Key.Right or Key.Left or Key.Up or Key.Down when LineMode && _drawFace != null:
                 _lineAxis = key switch { Key.Right => _lineAxis == 0 ? null : 0, Key.Left => _lineAxis == 1 ? null : 1, Key.Up => _lineAxis == 2 ? null : 2, _ => null };
