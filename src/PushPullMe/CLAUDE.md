@@ -12,8 +12,9 @@ The window only draws what `EditorSession` describes and passes mouse and keys o
     blended pass that keeps the picture itself opaque.
   - Lines of any width as quads in the vertex shader (thick GL lines do not exist everywhere); edges as instances.
   - Vertex layout: `FaceStride = 11`, `EdgeStride = 7` floats, with an `aModel` attribute: the storey cut
-    (`CutAway(z, model)` → discard) is done in the shaders, per model (bit mask, ≤ 31 models). Highlights (FaceSet)
-    do not cut yet (issue).
+    (`CutAway(z, model)` → discard) is done in the shaders, per model (bit mask, ≤ 31 models). Highlights (FaceSet:
+    hover, selection) ignore the cut on purpose (model -1): they show the whole part, also where it is cut away
+    (decided, keep; issue #8).
   - The clip matrix comes straight from `ViewFrame`, so drawing and picking agree exactly. The view angle is
     VERTICAL (as Helix had it): everything that snaps in pixels depends on it.
 - Highlights: one FaceSet per colour, not rebuilt on camera moves; a picked group of more than 20 000 faces gets a
