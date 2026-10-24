@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The view, shared by every system (Avalonia, 3D through OpenGL/WebGL): it shows what the editor layer
+       (PushPullMe.Editor) describes and passes the mouse and the keys on to it. Each system has its own small start
+       project around it (src/PushPullMe for the desktop, src/PushPullMe.Browser for the browser), which gives it an
+       IAppHost for what differs there (file dialogs, questions, the converter). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>PushPullMe</RootNamespace>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- (vertex data handed to OpenGL by pointer) -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\pushpullme.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Skia" Version="12.1.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+    <PackageReference Include="Silk.NET.OpenGL" Version="2.23.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
+    <ProjectReference Include="..\PushPullMe.Editor\PushPullMe.Editor.csproj" />
+    <!-- the 3D view's GL calls and its drawing in a browser (shared with the converter's mesh view) -->
+    <ProjectReference Include="$(RsConverterDir)src\GlKit\GlKit.csproj" />
+  </ItemGroup>
+
+</Project>

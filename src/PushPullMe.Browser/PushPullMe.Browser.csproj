@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+
+  <!-- The browser app (WebAssembly): the shared view (PushPullMe.App) in a web page, 3D through WebGL 2; the converter
+       as a layer over it. No AI assistant (no pipe in a browser); files come in through the page's file picker and go
+       out to where the user chooses. Published, it is served from output/web/wwwroot (any static web server). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-browser</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>PushPullMe</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- (the editor layer brings the MCP server along, an executable of its own; never run here) -->
+    <ValidateExecutableReferencesMatchSelfContained>false</ValidateExecutableReferencesMatchSelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Browser" Version="12.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PushPullMe.App\PushPullMe.App.csproj" />
+    <!-- the fonts (a browser has none of its own) and the converter's view, as a layer over this app's view -->
+    <ProjectReference Include="$(RsConverterDir)src\BrowserKit\BrowserKit.csproj" />
+    <ProjectReference Include="$(RsConverterDir)tools\StlConverter.View\StlConverter.View.csproj" />
+  </ItemGroup>
+
+</Project>

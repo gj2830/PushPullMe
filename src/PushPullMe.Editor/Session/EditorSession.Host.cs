@@ -25,6 +25,9 @@ public interface IEditorWindow
     /// <summary>Where to save, chosen by the user (null: nowhere); <paramref name="kind"/>: 1 STEP, 2 rsdocx, 3 STL.</summary>
     Task<string?> AskSavePath(string name, string? folder, int kind);
 
+    /// <summary>Saved at the path <see cref="AskSavePath"/> gave (the browser hands the file to the page from there).</summary>
+    Task Saved(string path) => Task.CompletedTask;
+
     /// <summary>A mesh opened in the converter's window and what it hands over; null when the user closed it without
     /// taking anything over; an exception when the converter cannot open (then it is recognised here).</summary>
     Task<(SketchDocument Doc, string Note)?> OpenInConverter(string path);

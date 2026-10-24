@@ -1,7 +1,7 @@
 # EditorSession: all of the app's logic, without a window
 
 - `EditorSession` (partials: main file, Gizmo, Ground, Infer, Mcp, Host, Overlay) is the former WPF MainWindow code;
-  the Avalonia window (`src/PushPullMe`) is a shell. New logic goes here or lower, never into the window.
+  the Avalonia view (`src/PushPullMe.App`, with a desktop and a browser shell around it) is a shell. New logic goes here or lower, never into the window.
 - `Compat.cs`: WPF-like helper types in millimetres (Point, Vector, Point3D, Vector3D, Color, Key, ModifierKeys, Rect,
   LineSet, FaceSet). What is shown: `Shown` (ShownModel: meshes per body/colour, edges) + `SceneChanged`,
   `View.Children`, `Labels`; status, size box and buttons through TextSlot/FlagSlot.

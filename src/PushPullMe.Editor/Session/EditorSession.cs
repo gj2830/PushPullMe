@@ -271,11 +271,13 @@ public sealed partial class EditorSession
         // (the name it has now, in its own folder: the user decides on another; the dialog asks before overwriting)
         // (STEP first: the main format; the kind the file has now chosen)
         int kind = _path == null ? 1 : _path.EndsWith(".rsdocx", StringComparison.OrdinalIgnoreCase) ? 2 : _path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase) ? 3 : 1;
-        if (await _window.AskSavePath(Path.GetFileNameWithoutExtension(_path ?? "model"), _path != null ? Path.GetDirectoryName(Path.GetFullPath(_path)) : null, kind) is { } path) Save(path);
+        if (await _window.AskSavePath(Path.GetFileNameWithoutExtension(_path ?? "model"), _path != null ? Path.GetDirectoryName(Path.GetFullPath(_path)) : null, kind) is { } path && Save(path)) await _window.Saved(path);
     }
-    public void Save(string path)
+
+    /// <summary>Saved at <paramref name="path"/>; false when that did not work (the user was told why).</summary>
+    public bool Save(string path)
     {
-        if (_doc == null) return;
+        if (_doc == null) return false;
         try
         {
             if (path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase)) File.WriteAllBytes(path, _doc.ToStl());
@@ -286,20 +288,22 @@ public sealed partial class EditorSession
             {
                 ShowToast(T("💾 Opgeslagen, zonder kleuren", "💾 Saved, without colours"), Path.GetFileName(path) + T(": een STL kan geen kleuren bevatten. Sla op als .rsdocx om ze te bewaren (DesignSpark ziet ze dan ook).", ": an STL cannot hold colours. Save as .rsdocx to keep them (DesignSpark sees them too)."));
                 Log($"saved {path} (colours left out)");
-                return;
+                return true;
             }
             if (_doc.Groups.Count > 0 && path.EndsWith(".stl", StringComparison.OrdinalIgnoreCase))
             {
                 ShowToast(T("💾 Opgeslagen, zonder groepen", "💾 Saved, without groups"), Path.GetFileName(path) + T(": een STL kan geen groepen of componenten bevatten. Sla op als STEP of .rsdocx om ze te houden.", ": an STL cannot hold groups or components. Save as STEP or .rsdocx to keep them."));
                 Log($"saved {path} (groups left out)");
-                return;
+                return true;
             }
             ShowToast(T("💾 Opgeslagen", "💾 Saved"), Path.GetFileName(path));
             Log($"saved {path}");
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
         {
             ShowToast(T("😕 Opslaan lukt niet", "😕 Saving does not work"), ex.Message);
+            return false;
         }
     }
 

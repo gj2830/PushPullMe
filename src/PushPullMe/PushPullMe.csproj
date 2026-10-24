@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- The window, for Windows, Linux and macOS (Avalonia, 3D through OpenGL): it shows what the editor layer
-       (PushPullMe.Editor) describes and passes the mouse and the keys on to it. -->
+  <!-- The desktop app, for Windows, Linux and macOS: a window around the shared view (PushPullMe.App), with what only
+       the desktop has (file paths, dialog windows, the converter's window, the MCP pipe). -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
@@ -10,8 +10,6 @@
     <!-- the icon (Assets/pushpullme.ico, after the user's design; drawn by tools/icon.py) -->
     <ApplicationIcon>Assets\pushpullme.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <!-- (vertex data handed to OpenGL by pointer) -->
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- recognising a mesh runs its bodies in parallel (as in the converter) -->
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
@@ -20,19 +18,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <AvaloniaResource Include="Assets\pushpullme.png" />
-  </ItemGroup>
-
-  <ItemGroup>
     <PackageReference Include="Avalonia" Version="12.1.4" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
-    <PackageReference Include="Silk.NET.OpenGL" Version="2.23.0" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\PushPullMe.Core\PushPullMe.Core.csproj" />
-    <ProjectReference Include="..\PushPullMe.Editor\PushPullMe.Editor.csproj" />
+    <ProjectReference Include="..\PushPullMe.App\PushPullMe.App.csproj" />
     <!-- the converter's window, opened here for a mesh (STL/3MF); its result is taken over in memory -->
     <ProjectReference Include="$(RsConverterDir)tools\StlConverter\StlConverter.csproj" />
   </ItemGroup>

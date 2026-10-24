@@ -4,8 +4,8 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.OpenGL;
-using Avalonia.OpenGL.Controls;
 using Avalonia.Rendering;
+using GlKit;
 using PushPullMe.Editor;
 using PushPullMe.Editor.Session;
 using Silk.NET.OpenGL;
@@ -24,7 +24,7 @@ namespace PushPullMe;
 /// clip matrix comes straight from the editor's <see cref="ViewFrame"/>, so what is drawn and what is picked agree. The
 /// mouse goes on to the editor; the right button turns the view as the middle one does (for a Mac without one).
 /// </summary>
-public sealed class ModelView : OpenGlControlBase, ICustomHitTest
+public sealed class ModelView : GlView, ICustomHitTest
 {
     private EditorSession? _session;
 
@@ -36,10 +36,10 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
         {
             _session = value;
             if (value == null) return;
-            value.SceneChanged += () => { _modelDirty = true; RequestNextFrameRendering(); };
-            value.View.Children.CollectionChanged += (_, _) => { _overlayDirty = true; RequestNextFrameRendering(); };
-            value.View.Camera.Changed += RequestNextFrameRendering;
-            value.CutsChanged += RequestNextFrameRendering;
+            value.SceneChanged += () => { _modelDirty = true; Redraw(); };
+            value.View.Children.CollectionChanged += (_, _) => { _overlayDirty = true; Redraw(); };
+            value.View.Camera.Changed += Redraw;
+            value.CutsChanged += Redraw;
             value.View.MouseCaptureChanged += on => _captured = on;
             SizeToEditor();
         }
@@ -52,7 +52,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
     public ModelView()
     {
         Focusable = true;
-        PropertyChanged += (_, e) => { if (e.Property == BoundsProperty) { SizeToEditor(); RequestNextFrameRendering(); } };
+        PropertyChanged += (_, e) => { if (e.Property == BoundsProperty) { SizeToEditor(); Redraw(); } };
     }
 
     private void SizeToEditor()
@@ -120,7 +120,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
 
     // ------------------------------------------------------------------ drawing
 
-    private GL? _gl;
+    private IGl? _gl;
     private uint _faceProgram, _lineProgram, _edgeProgram;
     private int _uMvp, _uLight, _uBack, _uUnlit, _uLineMvp, _uHalf, _uBias, _uEdgeMvp, _uEdgeHalf, _uEdgeColor, _uEdgeWidth;
     private (int Count, int Ranges, int Masks) _uFaceCuts, _uEdgeCuts;
@@ -145,17 +145,17 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
     public Task<(int W, int H, byte[] Rgba)> CaptureAsync()
     {
         var tcs = _capture ??= new TaskCompletionSource<(int, int, byte[])>(TaskCreationOptions.RunContinuationsAsynchronously);
-        RequestNextFrameRendering();
+        Redraw();
         return tcs.Task;
     }
 
-    protected override void OnOpenGlInit(GlInterface gl)
+    protected override void OnGlInit(IGl gl, GlVersion version)
     {
-        _gl = GL.GetApi(gl.GetProcAddress);
-        GlInfo = $"{GlVersion.Type} {GlVersion.Major}.{GlVersion.Minor}, {_gl.GetStringS(StringName.Renderer)}";
+        _gl = gl;
+        GlInfo = $"{version.Type} {version.Major}.{version.Minor}, {_gl.GetStringS(StringName.Renderer)}";
         SessionLog.Write("OpenGL: " + GlInfo);
         // (OpenGL ES 3 through ANGLE on Windows; desktop OpenGL 3.3 core and up elsewhere)
-        string head = GlVersion.Type == GlProfileType.OpenGLES ? "#version 300 es\nprecision highp float;\n" : "#version 330 core\n";
+        string head = version.Type == GlProfileType.OpenGLES ? "#version 300 es\nprecision highp float;\n" : "#version 330 core\n";
         _faceProgram = Program(head + """
             layout(location = 0) in vec3 aPos;
             layout(location = 1) in vec3 aNormal;
@@ -301,7 +301,7 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
         _modelDirty = _overlayDirty = true;
     }
 
-    protected override void OnOpenGlDeinit(GlInterface gl)
+    protected override void OnGlDeinit(IGl gl)
     {
         if (_gl == null) return;
         foreach (var b in new[] { _faces, _faded, _highlights, _edges, _lines, _linesBehind, _linesOnTop })
@@ -503,15 +503,17 @@ public sealed class ModelView : OpenGlControlBase, ICustomHitTest
             (float)er, (float)eu, (float)(a * ef + b), (float)ef);
     }
 
-    protected override unsafe void OnOpenGlRender(GlInterface gl, int fb)
+    // ------------------------------------------------------------------ a frame
+
+    /// <summary>The model and what lies beside it, into framebuffer <paramref name="fb"/> of <paramref name="w"/> by
+    /// <paramref name="h"/> pixels.</summary>
+    protected override unsafe void OnGlRender(int fb, int w, int h)
     {
         if (_gl == null || _faces == null || _session == null) return;
         var g = _gl;
         if (_modelDirty) { UploadModel(); _modelDirty = false; }
         if (_overlayDirty) { UploadOverlays(); _overlayDirty = false; }
 
-        double scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1;
-        int w = Math.Max(1, (int)(Bounds.Width * scale)), h = Math.Max(1, (int)(Bounds.Height * scale));
         g.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)fb);
         g.Viewport(0, 0, (uint)w, (uint)h);
         g.ClearColor(0xF2 / 255f, 0xF7 / 255f, 0xFD / 255f, 1);
