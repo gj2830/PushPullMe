@@ -13,7 +13,7 @@ public static class UiTexts
         ["↩  ongedaan"] = "↩  undo",
         ["↪  opnieuw"] = "↪  redo",
         ["📂  openen"] = "📂  open",
-        ["STL, 3MF of .rsdocx (Ctrl+O)"] = "STL, 3MF or .rsdocx (Ctrl+O)",
+        ["STL, 3MF, PLY, SPZ of .rsdocx (Ctrl+O)"] = "STL, 3MF, PLY, SPZ or .rsdocx (Ctrl+O)",
         ["💾  opslaan"] = "💾  save",
         ["⊞  grond"] = "⊞  ground",
         ["Werkvlak terug op de grond (net als ⊞ en klikken op een lege plek)"] = "Work plane back on the ground (as ⊞ and a click on empty space)",
@@ -110,7 +110,7 @@ public static class UiTexts
             "Look Around: click and move to turn your head without leaving your place; click to stop.",
         ["Lopen (Walk): ↑/↓ vooruit en achteruit, ←/→ draaien, PageUp/PageDown omhoog en omlaag; klik en beweeg om rond te kijken."] =
             "Walk: ↑/↓ forward and back, ←/→ turn, PageUp/PageDown up and down; click and move to look around.",
-        ["Sleep een STL, 3MF of .rsdocx hierheen"] = "Drag an STL, 3MF or .rsdocx here",
+        ["Sleep een STL, 3MF, PLY, SPZ of .rsdocx hierheen"] = "Drag an STL, 3MF, PLY, SPZ or .rsdocx here",
         ["middelste knop = draaien · Shift + middelste knop = schuiven · wiel = zoomen"] = "middle button = orbit · Shift + middle button = pan · wheel = zoom",
         ["Vormen herkennen…"] = "Recognising shapes…",
         ["🎨 Verf"] = "🎨 Paint",

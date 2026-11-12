@@ -5,7 +5,7 @@ using RsDocx.Core.Stl;
 namespace PushPullMe.Editor;
 
 /// <summary>Opening a model without the converter's window: STEP and DesignSpark as they are, a Revit project as Revit
-/// last drew it, a mesh (STL/3MF) recognised here (cleaned first when it is not closed).</summary>
+/// last drew it, a mesh (STL/3MF/PLY, Gaussian splats in PLY or SPZ) recognised here (cleaned first when it is not closed).</summary>
 public static class ModelFiles
 {
     public static bool IsStep(string path) => path.EndsWith(".step", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".stp", StringComparison.OrdinalIgnoreCase);
@@ -15,7 +15,7 @@ public static class ModelFiles
     public static bool IsRevit(string path) => path.EndsWith(".rvt", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The kinds of file that can be opened (extensions without the dot).</summary>
-    public static readonly string[] Extensions = ["step", "stp", "rsdocx", "rvt", "stl", "3mf"];
+    public static readonly string[] Extensions = ["step", "stp", "rsdocx", "rvt", "stl", "3mf", "ply", "spz"];
 
     /// <summary>Whether an exception is the file's fault (to tell the user), not the program's.</summary>
     public static bool IsFileError(Exception ex) => ex is MeshException or IOException or UnauthorizedAccessException or StlFormatException

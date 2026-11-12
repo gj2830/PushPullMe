@@ -16,7 +16,7 @@
         <Button x:Name="LanguageButton" Classes="pill" Content="🌐  NL" ToolTip.Tip="Taal / language: Nederlands · English"/>
         <Button x:Name="UndoButton" Classes="pill" Content="↩  ongedaan" IsEnabled="False" ToolTip.Tip="Ctrl+Z"/>
         <Button x:Name="RedoButton" Classes="pill" Content="↪  opnieuw" IsEnabled="False" ToolTip.Tip="Ctrl+Y"/>
-        <Button x:Name="OpenButton" Classes="pill" Content="📂  openen" ToolTip.Tip="STL, 3MF of .rsdocx (Ctrl+O)"/>
+        <Button x:Name="OpenButton" Classes="pill" Content="📂  openen" ToolTip.Tip="STL, 3MF, PLY, SPZ of .rsdocx (Ctrl+O)"/>
         <Button x:Name="SaveButton" Classes="pill primary" Content="💾  opslaan" IsEnabled="False" Margin="0"
                 ToolTip.Tip="Als .rsdocx (voor je tekenpakket) of .stl (voor de printer) (Ctrl+S)"/>
       </StackPanel>
@@ -46,7 +46,7 @@
 
         <StackPanel x:Name="EmptyHint" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
           <TextBlock Text="🧊" FontSize="64" HorizontalAlignment="Center"/>
-          <TextBlock Text="Sleep een STL, 3MF of .rsdocx hierheen" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+          <TextBlock Text="Sleep een STL, 3MF, PLY, SPZ of .rsdocx hierheen" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,8,0,0"/>
           <TextBlock Text="middelste knop = draaien · Shift + middelste knop = schuiven · wiel = zoomen" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" Margin="0,6,0,0"/>
         </StackPanel>
 
